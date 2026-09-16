@@ -201,7 +201,7 @@ const SHOP_WAIT_MS = 240_000
 /** A deployment allows ten sign-ins a minute from one address, so a refused burst waits this out. */
 const RATE_WINDOW_WAIT_MS = 62_000
 
-const FLOOD_MOVES = 30
+const FLOOD_MOVES = 40
 
 /** Six metres a second is the walk speed, and a second of measurement is never exact. */
 const MOVE_CAP_METRES = 7

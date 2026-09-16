@@ -52,7 +52,7 @@ export const INTERACT_RANGE = 2.5
  * four shots a second on purpose: the sim refuses the extra shots on the rules, and this
  * only stops a client from spending the server's time asking.
  */
-export const MESSAGE_LIMITS = { move: 20, fire: 8, interact: 5, ping: 2 } as const
+export const MESSAGE_LIMITS = { move: 30, fire: 8, interact: 5, ping: 2 } as const
 
 export type MessageKind = keyof typeof MESSAGE_LIMITS
 

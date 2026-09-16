@@ -133,7 +133,8 @@ Tick: 50 ms. Units: metres, seconds, radians.
   `GET /ws?ticket=...`. `permessage-deflate` is off (iOS WebViews drop compressed
   sockets).
 - Client to server, JSON, `v: 1` on every message:
-  - `{ t: 'move', seq, dx, dz, yaw }` at most 20 per second; extra ones are dropped.
+  - `{ t: 'move', seq, dx, dz, yaw }` at most 30 per second; extra ones are dropped. Clients
+    send 15 a second, so timer jitter never reaches the budget.
   - `{ t: 'fire', seq, yaw, pitch }`.
   - `{ t: 'interact', target: 'office' | 'shop' | 'pickup' | 'deliver' | 'landmark:<n>' }`
     requires the player within 2.5 m of that place.
