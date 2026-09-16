@@ -23,6 +23,7 @@ const starts: Place[] = [map.spawn, map.office, map.shop, ...map.landmarks, ...m
 const crossings: Place[] = [map.spawn, map.office, map.shop, ...map.landmarks]
 const DRONE_Y = 6
 const DRONE_CLEARANCE = 1
+const MAX_DRONES = 12
 
 /**
  * One held direction. A real client holds a key for many ticks, and a fresh random direction
@@ -163,7 +164,7 @@ describe('the blaster holds its fire rate', () => {
 })
 
 describe('drones', () => {
-  it('never has more than six alive, and a dead one never shoots', () => {
+  it('never has more than twelve alive, and a dead one never shoots', () => {
     fc.assert(
       fc.property(
         fc.array(fc.record({ jump: fc.integer({ min: 50, max: 3000 }), kill: fc.boolean() }), {
@@ -192,7 +193,7 @@ describe('drones', () => {
             const result = step(room, map, DT, now)
             room = result.room
 
-            if (liveDrones(room).length > 6) return false
+            if (liveDrones(room).length > MAX_DRONES) return false
 
             for (const bolt of room.bolts) {
               if (flying.has(bolt.id)) continue
@@ -237,6 +238,7 @@ describe('kill credit', () => {
           loop: 0,
           waypoint: 0,
           target: null,
+          targetUntil: 0,
           nextFireAt: START + 100000,
           deadUntil: 0,
           damage: new Map(),
@@ -312,6 +314,7 @@ describe('drones keep out of the towers', () => {
             loop: 0,
             waypoint: 0,
             target: null,
+            targetUntil: 0,
             // Far in the future: a drone that never fires never downs its target, so it stays
             // engaged for the whole run and the orbit is what is under test.
             nextFireAt: START + 1_000_000,

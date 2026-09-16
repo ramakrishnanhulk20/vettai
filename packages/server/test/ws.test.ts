@@ -108,6 +108,7 @@ function droneInFrontOf(address: string, id: string): void {
     loop: 0,
     waypoint: 0,
     target: null,
+    targetUntil: 0,
     // Far enough ahead that the drone never shoots back inside a test.
     nextFireAt: Date.now() + 60_000,
     deadUntil: 0,
@@ -142,7 +143,9 @@ describe('the welcome', () => {
 
     const welcome = client.frames.find((frame) => frame.t === 'welcome')
     expect(welcome).toMatchObject({ v: 1, you: address, room: 'r1', mapVersion: map.version })
-    expect(welcome?.['drones']).toHaveLength(6)
+    // The client resets its move counter from this, so a reconnect never replays old moves.
+    expect(welcome?.['youSeq']).toBe(0)
+    expect(welcome?.['drones']).toHaveLength(12)
     const joinedPlayers = welcome?.['players'] as { seq: number }[]
     expect(joinedPlayers).toHaveLength(1)
     // Nothing has been sent yet, so the client has no input of its own to replay.

@@ -38,15 +38,15 @@ async function gearOf(address: string) {
 
 describe('the shop', () => {
   it('prices the five items in luna and opens an order with a memo of its own', async () => {
-    expect(items['blaster-mk2'].priceLuna).toBe(nimToLuna('1'))
+    expect(items['blaster-mk2'].priceLuna).toBe(nimToLuna('0.6'))
     expect(items.sprint.priceLuna).toBe(nimToLuna('0.8'))
-    expect(items['skin-neon'].priceLuna).toBe(nimToLuna('0.5'))
+    expect(items['skin-neon'].priceLuna).toBe(nimToLuna('0.4'))
     expect(Object.keys(items)).toHaveLength(5)
 
     const order = await createOrder(db, { address: player, item: 'blaster-mk2', now: NOW })
 
     expect(order.memo).toBe(`vettai:shop:${order.id.slice(0, 8)}`)
-    expect(order.priceLuna).toBe(nimToLuna('1'))
+    expect(order.priceLuna).toBe(nimToLuna('0.6'))
     expect(order.expiresAt.getTime()).toBe(NOW.getTime() + ORDER_TTL_MS)
 
     const view = await getOrder(db, order.id, NOW)

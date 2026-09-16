@@ -79,7 +79,7 @@ describe('GET /api/shop', () => {
     expect(response.statusCode).toBe(200)
     expect(body.to).toBe(config.TREASURY_ADDRESS)
     expect(body.items.map((item) => item.id)).toContain('sprint')
-    expect(body.items.find((item) => item.id === 'blaster-mk2')?.priceNim).toBe('1')
+    expect(body.items.find((item) => item.id === 'blaster-mk2')?.priceNim).toBe('0.6')
   })
 })
 

@@ -51,12 +51,24 @@ const AIM_CONE = (12 * Math.PI) / 180
 const DRONE_HP = 3
 const DRONE_SPEED = 3
 const DRONE_ENGAGE_RANGE = 25
+/** How long a drone stays angry at the player who shot it before it looks around again. */
+const DRONE_ANGER_MS = 6000
+/** A drone chases the player who shot it out to the range that player can shoot back from. */
+const DRONE_CHASE_RANGE = 60
 const DRONE_CIRCLE_RADIUS = 12
 const DRONE_FIRE_MS = 2000
 const DRONE_WAYPOINT_REACHED = 1.5
 const DRONE_WRECK_MS = 2000
-const MAX_DRONES = 6
-const DRONE_SPAWN_MS = 20000
+const MAX_DRONES = 12
+const DRONE_SPAWN_MS = 15000
+
+/**
+ * The quest board stands in a no-fire circle this wide. A player reading the board, picking
+ * a quest or coming back from being downed cannot be shot there, and a bolt that crosses
+ * into it dies. Shooting out of it is still allowed: the safety is for the reader, not a
+ * place to camp from.
+ */
+const OFFICE_SAFE_RADIUS = 10
 
 /** How close an engaged drone is allowed to fly to a tower it is circling. */
 const DRONE_CLEARANCE = 1
@@ -64,7 +76,7 @@ const DRONE_CLEARANCE = 1
 /** Aim assist looks past this many blocked drones before the shot counts as a miss. */
 const AIM_CANDIDATES = 3
 
-const BOLT_SPEED = 12
+const BOLT_SPEED = 18
 const BOLT_LIFE_MS = 3000
 const BOLT_RADIUS = 0.15
 
@@ -136,6 +148,11 @@ function aimVector(intent: FireIntent): Vec3 {
   }
 }
 
+/** True for anything standing inside the no-fire circle around the quest board. */
+function inSafeZone(map: WorldMap, at: Place): boolean {
+  return horizontal(at, map.office) <= OFFICE_SAFE_RADIUS
+}
+
 function isLive(drone: DroneState): boolean {
   return drone.state !== 'dead' && drone.hp > 0
 }
@@ -160,7 +177,9 @@ function spawnDrone(
 ): { room: RoomState; drone: DroneState | null } {
   const count = room.ids.drone + 1
   const rng = seeded(`${room.seed}:drone:${count}`)
-  const loopIndex = Math.floor(rng() * map.patrols.length)
+  // The loops are handed out in turn rather than drawn at random, so no loop is ever left
+  // empty by a run of unlucky draws and the centre of the city is always being patrolled.
+  const loopIndex = (count - 1) % map.patrols.length
   const loop = map.patrols[loopIndex]
   if (!loop || loop.length === 0) return { room, drone: null }
 
@@ -179,6 +198,7 @@ function spawnDrone(
     loop: loopIndex,
     waypoint: (index + 1) % loop.length,
     target: null,
+    targetUntil: 0,
     nextFireAt: now + DRONE_FIRE_MS,
     deadUntil: 0,
     damage: new Map(),
@@ -245,7 +265,13 @@ export function removePlayer(room: RoomState, id: string): RoomState {
     if (!drone.damage.has(id) && drone.target !== id) continue
     const damage = new Map(drone.damage)
     damage.delete(id)
-    drones.set(droneId, { ...drone, damage, target: drone.target === id ? null : drone.target })
+    const dropped = drone.target === id
+    drones.set(droneId, {
+      ...drone,
+      damage,
+      target: dropped ? null : drone.target,
+      targetUntil: dropped ? 0 : drone.targetUntil,
+    })
   }
   return { ...room, players, drones }
 }
@@ -277,6 +303,7 @@ function damageDrone(
   player: string,
   amount: number,
   now: number,
+  map: WorldMap,
 ): { room: RoomState; events: SimEvent[] } {
   const damage = new Map(drone.damage)
   damage.set(player, (damage.get(player) ?? 0) + amount)
@@ -285,9 +312,23 @@ function damageDrone(
   const events: SimEvent[] = [
     { kind: 'hit', player, drone: drone.id, damage: amount, x: drone.x, y: drone.y, z: drone.z },
   ]
-  let hurt: DroneState = { ...drone, hp: hp > 0 ? hp : 0, damage }
+  // Being shot is what makes a drone yours. It turns on the shooter wherever the shot came
+  // from, holds on to them for six seconds, and answers inside its own fire interval, so a
+  // player cannot stand at 40 m and take one apart while it flies its loop. A shot fired
+  // from the board's circle provokes nothing, because nothing may shoot back into it.
+  const shooter = room.players.get(player)
+  const provokes = shooter !== undefined && !inSafeZone(map, shooter)
+  let hurt: DroneState = {
+    ...drone,
+    hp: hp > 0 ? hp : 0,
+    damage,
+    state: provokes ? 'engage' : drone.state,
+    target: provokes ? player : drone.target,
+    targetUntil: provokes ? now + DRONE_ANGER_MS : drone.targetUntil,
+    nextFireAt: provokes ? Math.min(drone.nextFireAt, now + DRONE_FIRE_MS) : drone.nextFireAt,
+  }
   if (hp <= 0) {
-    hurt = { ...hurt, state: 'dead', target: null, deadUntil: now + DRONE_WRECK_MS }
+    hurt = { ...hurt, state: 'dead', target: null, targetUntil: 0, deadUntil: now + DRONE_WRECK_MS }
     const credit = topDamage(damage)
     if (credit !== null) {
       events.push({
@@ -352,7 +393,7 @@ export function applyFire(
 
   const drone = fired.drones.get(found.target.id)
   if (!drone) return { room: fired, events: [] }
-  return damageDrone(fired, drone, id, 1, now)
+  return damageDrone(fired, drone, id, 1, now, map)
 }
 
 function stepPlayers(
@@ -417,14 +458,34 @@ function stepPlayers(
   return { room: changed ? { ...room, players } : room, events }
 }
 
+/**
+ * Who a drone is after: the player who shot it while its anger lasts, otherwise the nearest
+ * player inside the engage range. A held target is dropped early if they go down, step into
+ * the board's circle, or get further away than a player could shoot from.
+ */
 function pickTarget(
   drone: DroneState,
   players: ReadonlyMap<string, PlayerState>,
+  now: number,
+  map: WorldMap,
 ): PlayerState | null {
+  if (drone.target !== null && now < drone.targetUntil) {
+    const held = players.get(drone.target)
+    if (
+      held &&
+      held.downedUntil === 0 &&
+      !inSafeZone(map, held) &&
+      horizontal(drone, held) <= DRONE_CHASE_RANGE
+    ) {
+      return held
+    }
+  }
+
   let best: PlayerState | null = null
   let bestRange = DRONE_ENGAGE_RANGE
   for (const player of players.values()) {
     if (player.downedUntil > 0) continue
+    if (inSafeZone(map, player)) continue
     const range = horizontal(drone, player)
     if (range > bestRange) continue
     best = player
@@ -475,7 +536,7 @@ function stepDrones(
       continue
     }
 
-    const target = pickTarget(drone, room.players)
+    const target = pickTarget(drone, room.players, now, map)
     const goal = droneGoal(drone, map, target, dt)
     let x = drone.x
     let z = drone.z
@@ -520,7 +581,15 @@ function stepDrones(
     if (target) {
       yaw = Math.atan2(target.x - x, target.z - z)
       if (now >= drone.nextFireAt) {
-        const aim = { x: target.x, y: TORSO_HEIGHT, z: target.z }
+        // Aim where the player will be, not where they are. The flight time is measured to
+        // where they stand now, which is close enough at these ranges and leaves a player
+        // who changes direction after the shot with a clean dodge.
+        const flight = Math.hypot(target.x - x, TORSO_HEIGHT - PATROL_Y, target.z - z) / BOLT_SPEED
+        const aim = {
+          x: target.x + target.vx * flight,
+          y: TORSO_HEIGHT,
+          z: target.z + target.vz * flight,
+        }
         const range = Math.hypot(aim.x - x, aim.y - PATROL_Y, aim.z - z)
         if (range > 1e-6) {
           boltCount += 1
@@ -601,6 +670,10 @@ function stepBolts(
 
     const from = { x: bolt.x, y: bolt.y, z: bolt.z }
     const to = { x: bolt.x + bolt.vx * dt, y: bolt.y + bolt.vy * dt, z: bolt.z + bolt.vz * dt }
+
+    // A bolt dies the moment it crosses into the board's circle. A tick moves it under a
+    // metre, so nothing can jump the ten metre edge and reach somebody standing inside.
+    if (inSafeZone(map, from) || inSafeZone(map, to)) continue
 
     let struck = false
     for (const player of players.values()) {

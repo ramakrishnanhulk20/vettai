@@ -122,7 +122,7 @@ describe('joining', () => {
 
     expect(joined.room).toBe('r1')
     expect(joined.players).toHaveLength(1)
-    expect(joined.drones).toHaveLength(6)
+    expect(joined.drones).toHaveLength(12)
     expect(rooms.snapshot()).toEqual({ rooms: 1, online: 1 })
   })
 
@@ -206,7 +206,7 @@ describe('the tick', () => {
     const states = socket.of('state')
     expect(states).toHaveLength(3)
     expect(states[0]?.['v']).toBe(PROTOCOL_VERSION)
-    expect(states[0]?.['drones']).toHaveLength(6)
+    expect(states[0]?.['drones']).toHaveLength(12)
     expect(Array.isArray(states[0]?.['bolts'])).toBe(true)
   })
 
@@ -243,6 +243,13 @@ describe('the tick', () => {
   it('sends the whole player list again every forty ticks', () => {
     const socket = fakeSocket()
     rooms.join(ADDRESS, STARTING_GEAR, socket)
+
+    // Drones patrol the centre of the city now, so one would shoot the player inside these
+    // two seconds and the lost shield bar would be a second frame carrying players. This
+    // test is about the resend, so the sky is cleared first.
+    const room = rooms.roomFor(ADDRESS)
+    if (!room) throw new Error('that player is in no room')
+    room.write({ ...room.state, drones: new Map(), bolts: [] })
 
     ticks(FULL_STATE_EVERY)
 

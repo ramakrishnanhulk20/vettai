@@ -27,18 +27,18 @@ export const items: Record<ShopItemId, ShopItem> = {
   'blaster-mk2': {
     id: 'blaster-mk2',
     name: 'Blaster MK2',
-    priceLuna: nimToLuna('1'),
+    priceLuna: nimToLuna('0.6'),
     gear: { blaster: 'mk2' },
   },
   sprint: { id: 'sprint', name: 'Sprint boots', priceLuna: nimToLuna('0.8'), gear: { sprint: true } },
-  'skin-neon': { id: 'skin-neon', name: 'Neon skin', priceLuna: nimToLuna('0.5'), gear: { skin: 'neon' } },
+  'skin-neon': { id: 'skin-neon', name: 'Neon skin', priceLuna: nimToLuna('0.4'), gear: { skin: 'neon' } },
   'skin-carbon': {
     id: 'skin-carbon',
     name: 'Carbon skin',
-    priceLuna: nimToLuna('0.5'),
+    priceLuna: nimToLuna('0.4'),
     gear: { skin: 'carbon' },
   },
-  'skin-sand': { id: 'skin-sand', name: 'Sand skin', priceLuna: nimToLuna('0.5'), gear: { skin: 'sand' } },
+  'skin-sand': { id: 'skin-sand', name: 'Sand skin', priceLuna: nimToLuna('0.4'), gear: { skin: 'sand' } },
 }
 
 export function isShopItem(value: unknown): value is ShopItemId {

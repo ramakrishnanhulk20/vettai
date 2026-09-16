@@ -11,7 +11,7 @@ import type { Building, Lot, PatrolLoop, Place, WorldMap } from './types.js'
  */
 
 /** Bump this when the shape of the map changes, so a stale client refuses to draw it. */
-const GENERATOR_VERSION = 1
+const GENERATOR_VERSION = 2
 
 export const LOTS_PER_SIDE = 12
 export const LOT_SIZE = 16
@@ -40,11 +40,17 @@ const COURIER_CROSSINGS: Lot[] = [
   [10, 6],
   [6, 10],
 ]
+/**
+ * Four loops over the quarters of the block and one short loop over the four centre blocks
+ * around the office. The centre loop is last, and drones are handed out to the loops in
+ * turn, so a player who has just spawned always has a couple of drones inside 60 m.
+ */
 const PATROL_QUADRANTS: [number, number, number, number][] = [
   [1, 5, 1, 5],
   [6, 10, 1, 5],
   [1, 5, 6, 10],
   [6, 10, 6, 10],
+  [CENTRE_LOT - 1, CENTRE_LOT + 1, CENTRE_LOT - 1, CENTRE_LOT + 1],
 ]
 
 /** The middle of the street strip in cell `index`, on either axis. */
@@ -164,9 +170,14 @@ export function generateMap(seed: string): WorldMap {
 
   const office = crossing([CENTRE_LOT, CENTRE_LOT])
   const shop = crossing([CENTRE_LOT + 2, CENTRE_LOT])
+  /**
+   * In tour order, near first. Two sit in the middle ring and two on the far corners, which
+   * keeps the whole round trip from the spawn under 450 m of street: four corners cost 834 m
+   * and nearly two and a half minutes of walking for a quest that pays less than one drone.
+   */
   const landmarks: [Place, Place, Place, Place] = [
-    crossing([1, 1]),
-    crossing([LOTS_PER_SIDE - 2, 1]),
+    crossing([CENTRE_LOT, CENTRE_LOT + 1]),
+    crossing([3, LOTS_PER_SIDE - 4]),
     crossing([1, LOTS_PER_SIDE - 2]),
     crossing([LOTS_PER_SIDE - 2, LOTS_PER_SIDE - 2]),
   ]
@@ -189,7 +200,8 @@ export function generateMap(seed: string): WorldMap {
     landmarks,
     courier: [c0, c1, c2, c3, c4, c5, c6, c7],
     patrols: PATROL_QUADRANTS.map((quadrant) => patrolLoop(quadrant, rng)),
-    // The office front: six metres up the street that runs past the quest board.
-    spawn: { x: office.x, z: office.z + 6 },
+    // On the office door: two metres short of it, on the same street, looking down +z at
+    // it, so the interact prompt is already on screen in the first frame a player sees.
+    spawn: { x: office.x, z: office.z - 2 },
   }
 }

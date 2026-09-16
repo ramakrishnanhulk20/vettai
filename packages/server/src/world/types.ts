@@ -83,6 +83,11 @@ export type DroneState = {
   readonly loop: number
   readonly waypoint: number
   readonly target: string | null
+  /**
+   * While this is in the future the drone keeps its target even out of engage range. It is
+   * set when a player shoots the drone, so a sniper at 40 m is chased instead of ignored.
+   */
+  readonly targetUntil: number
   readonly nextFireAt: number
   /** A wreck is kept for a moment so the client can play the explosion, then removed. */
   readonly deadUntil: number

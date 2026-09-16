@@ -158,6 +158,12 @@ export type JoinResult = {
    * arrives late, after the same wallet has already reconnected, removes nothing.
    */
   connectionId: number
+  /**
+   * The move number the server has applied for this player, always 0 on a join. A client
+   * that dropped and came back reads its counter from here instead of looking itself up in
+   * the players list, so its first moves after a reconnect are not replays the server drops.
+   */
+  youSeq: number
 }
 
 export type RoomsOptions = {
@@ -393,6 +399,7 @@ export function createRooms(options: RoomsOptions): Rooms {
       players: livePlayers(room),
       drones: liveDrones(room),
       connectionId,
+      youSeq: 0,
     }
   }
 

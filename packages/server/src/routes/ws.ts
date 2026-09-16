@@ -100,6 +100,7 @@ export function registerWorldSocket(
               v: PROTOCOL_VERSION,
               t: 'welcome',
               you: address,
+              youSeq: joined.youSeq,
               room: joined.room,
               tick: joined.tick,
               mapVersion: world.map.version,

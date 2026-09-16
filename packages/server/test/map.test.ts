@@ -31,6 +31,24 @@ function insideInflated(place: Place, box: Box, radius: number): boolean {
   )
 }
 
+/** Streets run straight across the grid, so the walk between two crossings is the grid distance. */
+function byStreet(a: Place, b: Place): number {
+  return Math.abs(a.x - b.x) + Math.abs(a.z - b.z)
+}
+
+/** The shortest walk that starts at `from` and touches every stop, over all 24 orders. */
+function bestTour(from: Place, stops: Place[]): number {
+  if (stops.length === 0) return 0
+  let best = Infinity
+  for (let index = 0; index < stops.length; index++) {
+    const stop = stops[index]
+    if (!stop) continue
+    const rest = stops.filter((_, other) => other !== index)
+    best = Math.min(best, byStreet(from, stop) + bestTour(stop, rest))
+  }
+  return best
+}
+
 function fixedPlaces(map: WorldMap): Place[] {
   return [map.office, map.shop, map.spawn, ...map.landmarks, ...map.courier, ...map.patrols.flat()]
 }
@@ -64,7 +82,7 @@ describe('generateMap', () => {
   })
 
   it('stamps a version that moves with the seed', () => {
-    expect(map.version).toMatch(/^1-[0-9a-z]+$/)
+    expect(map.version).toMatch(/^2-[0-9a-z]+$/)
     expect(generateMap('vettai-2').version).not.toBe(map.version)
   })
 
@@ -138,7 +156,10 @@ describe('generateMap', () => {
     expect(CENTRE_LINES).toContain(map.shop.x)
     expect(CENTRE_LINES).toContain(map.shop.z)
     expect(map.spawn.x).toBe(map.office.x)
-    expect(Math.abs(map.spawn.z - map.office.z)).toBeLessThanOrEqual(STREET)
+    // Inside the 2.4 m interact range, and short of the board on +z, so a player who has
+    // not touched the camera yet is already looking at it.
+    expect(Math.hypot(map.spawn.x - map.office.x, map.spawn.z - map.office.z)).toBeLessThanOrEqual(2)
+    expect(map.spawn.z).toBeLessThan(map.office.z)
   })
 
   it('counts four landmarks and eight courier points, all spread out', () => {
@@ -154,8 +175,25 @@ describe('generateMap', () => {
     }
   })
 
-  it('flies at least four patrol loops of six to ten waypoints', () => {
-    expect(map.patrols.length).toBeGreaterThanOrEqual(4)
+  it('walks all four landmarks in under 450 m of street, none of them in a wall', () => {
+    expect(bestTour(map.spawn, [...map.landmarks])).toBeLessThan(450)
+    for (const landmark of map.landmarks) {
+      for (const building of map.buildings) {
+        expect(insideInflated(landmark, building.aabb, PLAYER_RADIUS)).toBe(false)
+      }
+    }
+  })
+
+  it('patrols the centre blocks, so a new player has drones inside 60 m', () => {
+    const centre = map.patrols[map.patrols.length - 1]
+    if (!centre) throw new Error('the map has no patrol loops')
+    for (const waypoint of centre) {
+      expect(Math.hypot(waypoint.x - map.spawn.x, waypoint.z - map.spawn.z)).toBeLessThan(60)
+    }
+  })
+
+  it('flies at least five patrol loops of six to ten waypoints', () => {
+    expect(map.patrols.length).toBeGreaterThanOrEqual(5)
     for (const loop of map.patrols) {
       expect(loop.length).toBeGreaterThanOrEqual(6)
       expect(loop.length).toBeLessThanOrEqual(10)

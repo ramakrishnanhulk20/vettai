@@ -91,8 +91,9 @@ server and the client, served at `GET /api/world/map` with `version`.
 
 - 12 by 12 lots of 16 m with 8 m streets: a 288 m square, origin at the centre, y up.
 - Each lot is empty, a park, or a building `{ lot, type: 0..19, height, aabb }`.
-- Fixed places: `office` (quest board, spawn), `shop`, four `landmarks`, eight `courier`
-  points, and `patrol` waypoint loops for drones along streets at 6 m height.
+- Fixed places: `office` (quest board), `shop`, four `landmarks`, eight `courier`
+  points, and `patrol` waypoint loops for drones along streets at 6 m height. The spawn is
+  2 m in front of the office door, facing it, so the board is in reach on the first frame.
 - Everything the client needs to draw the block and the server needs to collide is in
   this JSON. Nothing else is hardcoded on either side.
 
@@ -105,15 +106,22 @@ Tick: 50 ms. Units: metres, seconds, radians.
   gear. Integrate, then slide along building AABBs (axis-separated resolution), then
   clamp to the map bounds. A player can never end a tick inside a building.
 - Drone: `{ id, x, y, z, yaw, hp: 3, state: 'patrol' | 'engage' | 'dead', waypoint,
-  target, nextFireAt }`. Patrol 3 m/s along its loop. Engage when a player is within
-  25 m: circle the player at 12 m radius and fire a bolt every 2 s. Max 6 alive per room,
-  one respawn every 20 s at a random loop point.
-- Bolt: `{ id, x, y, z, vx, vy, vz, ownerDrone, bornAt }`. Speed 12 m/s, straight line
-  toward the target's position at fire time, dies after 3 s or on impact. Impact is a
+  target, targetUntil, nextFireAt }`. Patrol 3 m/s along its loop. Engage when a player is
+  within 25 m, or when a player shoots it from anywhere inside 60 m: circle the player at
+  12 m radius and fire a bolt every 2 s. A drone that has been shot holds that target for
+  6 s and answers within its 2 s fire interval. Max 12 alive per room, one respawn every
+  15 s, loops handed out in turn so the centre of the city is always patrolled.
+- Bolt: `{ id, x, y, z, vx, vy, vz, ownerDrone, bornAt }`. Speed 18 m/s, straight line
+  toward where the target will be after the bolt's flight time (current velocity, one
+  step of lead), dies after 3 s or on impact. Impact is a
   sphere-capsule test against each player (capsule radius 0.5, height 1.8). A hit costs
   one shield. Shield regenerates one bar every 8 s without a hit.
-- Downed at shield 0: 3 s, then respawn at the office with full shield. Quest progress
-  is kept.
+- Safe zone: a 10 m circle around `office`. Drones do not engage, target or fire at a
+  player inside it, an engaged drone drops a target who walks in, and a bolt that crosses
+  the edge dies. Firing out of the circle is allowed and provokes nothing, so it is a place
+  to read the board from, not a place to camp from.
+- Downed at shield 0: 3 s, then respawn at the office with full shield, inside the safe
+  zone. Quest progress is kept.
 - Fire intent `{ yaw, pitch }`: at most 4 per second (mk1) or 6 (mk2). Hitscan from the
   player's server position at eye height along the aim direction, range 60 m, with aim
   assist: the nearest live drone within a 12 degree cone counts as hit (a phone thumb
@@ -122,7 +130,7 @@ Tick: 50 ms. Units: metres, seconds, radians.
 - Every function takes state in and returns new state plus a list of events:
   `hit`, `kill`, `downed`, `respawn`, `pickup`, `deliver`, `landmark`, `spawn`.
 - Property tests: no player inside a building after any input sequence, speed never
-  above the cap, fire rate never above the cap, drone count never above 6, a dead drone
+  above the cap, fire rate never above the cap, drone count never above 12, a dead drone
   never deals damage, kill credit goes to the top damage dealer.
 
 ## Rooms and the socket (`src/world/rooms.ts`, `src/routes/ws.ts`)
@@ -140,7 +148,9 @@ Tick: 50 ms. Units: metres, seconds, radians.
     requires the player within 2.5 m of that place.
   - `{ t: 'ping', ts }`.
 - Server to client:
-  - `{ t: 'welcome', you, room, tick, mapVersion, players, drones, quests }` on join.
+  - `{ t: 'welcome', you, youSeq, room, tick, mapVersion, players, drones, quests }` on
+    join. `youSeq` is 0, the move number the server has applied for this connection, so a
+    reconnecting client resets its counter without searching the players list.
   - `{ t: 'state', tick, players: [changed only], drones: [all live], bolts: [all] }`
     every tick, players only when moved, a full players list every 40 ticks. Each player
     entry carries `seq`, the highest `move` sequence number the server has applied for
