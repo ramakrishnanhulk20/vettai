@@ -9,14 +9,14 @@ Vettai is Tamil for "the hunt".
   <img src="./docs/submission/icon.png" width="64" height="64" alt="Vettai icon" />
 </p>
 
-[Live app](<WEB_URL>) · [Docs](<WEB_URL>/docs) · [GitHub](https://github.com/ramakrishnanhulk20/vettai) · [Open in Nimiq Pay](https://nimpay.app/miniapps/open/<WEB_HOST>/play)
+[Live app](https://vettai-web.vercel.app) · [Docs](https://vettai-web.vercel.app/docs) · [GitHub](https://github.com/ramakrishnanhulk20/vettai) · [Open in Nimiq Pay](https://nimpay.app/miniapps/open/vettai-web.vercel.app/play)
 
 ## Live deployments
 
 | What | Value |
 |---|---|
-| App | `<WEB_URL>` |
-| Docs | `<WEB_URL>/docs` |
+| App | `https://vettai-web.vercel.app` |
+| Docs | `https://vettai-web.vercel.app/docs` |
 | World API | `https://world-production-4620.up.railway.app` |
 | Network | Nimiq testnet (TestAlbatross) today. Mainnet follows when the reward pool is funded |
 | Treasury | `NQ92 YGUB VUV9 LX6H 36G0 33C1 081V TMDD 9152` |
@@ -254,7 +254,7 @@ flowchart TD
 
 On a phone, inside Nimiq Pay, with testnet mode on:
 
-1. Open `https://nimpay.app/miniapps/open/<WEB_HOST>/play`, or paste `<WEB_URL>` into Pay's
+1. Open `https://nimpay.app/miniapps/open/vettai-web.vercel.app/play`, or paste `https://vettai-web.vercel.app` into Pay's
    Custom URL field.
 2. Approve the one login signature. Nothing else asks for a signature until there is money
    involved.
