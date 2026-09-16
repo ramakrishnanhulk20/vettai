@@ -230,8 +230,10 @@ export function createControls(options: ControlsOptions): Controls {
 
     // The server normalises the vector it is sent, so the client predicts with a unit
     // vector too: a half pushed stick walks at the same speed as a full one.
-    const dx = forward * Math.sin(yaw) + right * Math.cos(yaw);
-    const dz = forward * Math.cos(yaw) - right * Math.sin(yaw);
+    // Screen right is forward x up: (-cos yaw, sin yaw). With the other sign the stick
+    // walked mirrored, which Ram caught on his phone.
+    const dx = forward * Math.sin(yaw) - right * Math.cos(yaw);
+    const dz = forward * Math.cos(yaw) + right * Math.sin(yaw);
     const length = Math.hypot(dx, dz);
     return { dx: dx / length, dz: dz / length, yaw };
   }
