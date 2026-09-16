@@ -36,6 +36,7 @@ Fly.io works the same way with `fly.toml`.
 | LANDLORD_MIN_NIM | both | `10` |
 | LANDLORD_ENABLED | both | `false` until Ram turns the landlord quest on |
 | IP_SALT | world | A long random string, fresh per deployment. It only ever hashes IPs |
+| TRUST_PROXY | world | Blank until the first deploy answers `GET /api/echo-ip`; then the proxy peer it shows, as a preset (`uniquelocal`, `loopback`) or a CIDR, so the world reads the real client IP from X-Forwarded-For. Never `true` |
 
 5. Migrations run at boot of either process, so the first world deploy creates the schema.
 6. Check: `curl https://<world domain>/health` returns ok.
@@ -74,3 +75,48 @@ for a smoke test and disappears when the container stops. It logs `vettai world 
 One deployment serves one network. `NIMIQ_RPC_URL` and `NIMIQ_NETWORK` must agree, and the
 treasury address must hold real balance on that network. Point a testnet treasury key at a
 mainnet node and the sender refuses by construction, which is the behaviour we want.
+
+## Proving a deployment
+
+The same prove-it command that runs the world in one process can run against a deployment
+instead. Nothing runs locally and no key is needed: it signs in over the network, plays the
+deployed world through its real socket, claims a reward, waits for the deployed treasury to
+pay it, and reads that payment back off the chain the deployment says it is on.
+
+```sh
+cd packages/server
+npm run prove -- --url https://<world domain>
+```
+
+`VETTAI_PROVE_URL` does the same thing if you would rather set it once. The run prints one
+line per check and writes the whole thing to `docs/proofs/prove-remote-<date>-<time>.txt`,
+with the origin in the header. It exits 1 only when a check fails.
+
+Seven of the twelve checks run remotely and five are skipped, because they need something
+only the host has:
+
+| Check | Remote |
+|---|---|
+| 1 health, the network, the caller's real IP, the map version | runs |
+| 2 sign-in, and `/api/me` agreeing | runs |
+| 3 forged signature and replayed challenge refused | runs |
+| 4 a scripted wallet plays until the hunt quest is done | runs, up to 300 seconds |
+| 5 claim queued once, replay and another wallet refused | runs |
+| 6 the deployed treasury pays on chain, read back through the public node | runs, waits up to 240 seconds |
+| 7, 8, 9 daily cap, per-IP cap, pool | skipped: the caps are configured on the host and a local run turns them down to something one pass can cross |
+| 10 the shop | skipped unless `--fund` is passed, because funding a fresh wallet needs the treasury key |
+| 11 socket flood, long move vector, nonsense frames | runs, measured from the frames the server sends |
+| 12 outbox idempotency | skipped: it is proven against the database, which only the host can read |
+
+Check 1 is the one that catches a wrong `TRUST_PROXY`. If `/api/echo-ip` answers with a
+10.x or 100.64.x address, the world is reading its own hosting edge rather than the player,
+the per-IP cap is counting the whole internet as one household, and the check fails with
+that address printed.
+
+Check 6 needs a real reward to leave the deployed treasury, so run it against a testnet
+deployment, or accept that a mainnet run spends the reward for real.
+
+With `--fund` the shop check also runs: the treasury key in `packages/server/.env.treasury`
+floats a fresh wallet, that wallet pays its own order, and the run waits for the deployed
+watcher to settle it. It refuses to start if that key does not derive the address the
+deployment takes payments at.

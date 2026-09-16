@@ -1,12 +1,22 @@
 import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 import type { AddressInfo } from 'node:net'
 import { KeyPair } from '@nimiq/core'
 import type { FastifyInstance } from 'fastify'
 import { buildApp } from '../app.js'
 import { config } from '../config.js'
-import { canonical } from '../lib/address.js'
+import { canonical, formatAddress } from '../lib/address.js'
 import type { Db } from '../db/client.js'
 import { sleep } from '../lib/sleep.js'
+import {
+  isNotFound,
+  RpcError,
+  toChainTransaction,
+  type ChainTransaction,
+  type RpcAccount,
+  type RpcBlock,
+  type RpcTransaction,
+} from '../nimiq/rpc.js'
 import { signWithKeyPair } from '../nimiq/verify.js'
 import { worldMap } from '../routes/world.js'
 import { startGearSweep } from '../world/gear.js'
@@ -54,13 +64,19 @@ export type HttpOptions = {
    * range gives as many as the checks need without leaving the machine.
    */
   localAddress?: string
+  /** A deployment that stops answering must fail the check, not hang the run. */
+  timeoutMs?: number
 }
 
 export type HttpResult<T> = { status: number; body: T; raw: string }
 
+/** How long any one call waits before it is treated as a failure. */
+export const CALL_TIMEOUT_MS = 30_000
+
 /** One JSON call. A body that is not JSON comes back as raw text with the status intact. */
 export function httpJson<T>(base: string, path: string, options: HttpOptions = {}): Promise<HttpResult<T>> {
   const url = new URL(path, base)
+  const send = url.protocol === 'https:' ? httpsRequest : httpRequest
   const payload = options.body === undefined ? null : Buffer.from(JSON.stringify(options.body))
 
   const headers: Record<string, string> = { accept: 'application/json' }
@@ -71,10 +87,10 @@ export function httpJson<T>(base: string, path: string, options: HttpOptions = {
   if (options.token) headers['authorization'] = `Bearer ${options.token}`
 
   return new Promise((resolve, reject) => {
-    const call = httpRequest(
+    const call = send(
       {
         host: url.hostname,
-        port: url.port,
+        ...(url.port === '' ? {} : { port: url.port }),
         path: `${url.pathname}${url.search}`,
         method: options.method ?? (payload ? 'POST' : 'GET'),
         headers,
@@ -98,10 +114,88 @@ export function httpJson<T>(base: string, path: string, options: HttpOptions = {
       },
     )
 
+    call.setTimeout(options.timeoutMs ?? CALL_TIMEOUT_MS, () => {
+      call.destroy(new Error(`${url.host} did not answer ${path} in time`))
+    })
+
     call.on('error', reject)
     if (payload) call.write(payload)
     call.end()
   })
+}
+
+/**
+ * The public node for a network, as DEPLOY.md names it. A run against a deployment reads
+ * the chain through the node that matches the network the deployment itself reports, so
+ * the proof is never read off a different chain than the one that was paid on.
+ */
+export function publicNodeFor(network: string): string {
+  if (network === 'MainAlbatross') return 'https://rpc.nimiqwatch.com'
+  if (network === 'TestAlbatross') return 'https://rpc.testnet.nimiqwatch.com'
+  throw new Error(`${network} is not a Nimiq network this command knows`)
+}
+
+/**
+ * A read-only view of one Albatross node, chosen at run time.
+ *
+ * `src/nimiq/rpc.ts` is bound to NIMIQ_RPC_URL from the environment, which is the right
+ * answer for the server and the wrong one for a command that has to follow whichever
+ * network a deployment says it is on. The answers are decoded by the same functions the
+ * server uses, so both sides of any comparison come out of one parser.
+ */
+export type NodeReader = {
+  url: string
+  getLatestBlock: () => Promise<RpcBlock>
+  getBlockNumber: () => Promise<number>
+  getAccountByAddress: (address: string) => Promise<RpcAccount>
+  getTransactionByHash: (hash: string) => Promise<RpcTransaction>
+  fetchTransaction: (hash: string) => Promise<ChainTransaction | null>
+  pushTransaction: (rawHex: string) => Promise<string>
+}
+
+export function readNode(url: string): NodeReader {
+  let nextId = 1
+
+  async function call<T>(method: string, params: unknown[]): Promise<T> {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: nextId++, method, params }),
+      signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+    })
+
+    if (!response.ok) throw new RpcError(`RPC ${method} returned HTTP ${response.status}`, response.status)
+
+    const body = (await response.json()) as {
+      result?: { data: T }
+      error?: { code: number; message: string; data?: unknown }
+    }
+
+    if (body.error) throw new RpcError(body.error.message, body.error.code, body.error.data)
+    if (!body.result) throw new RpcError(`RPC ${method} returned no result`, -1)
+
+    return body.result.data
+  }
+
+  const getTransactionByHash = (hash: string): Promise<RpcTransaction> =>
+    call<RpcTransaction>('getTransactionByHash', [hash])
+
+  return {
+    url,
+    getLatestBlock: () => call<RpcBlock>('getLatestBlock', [false]),
+    getBlockNumber: () => call<number>('getBlockNumber', []),
+    getAccountByAddress: (address) => call<RpcAccount>('getAccountByAddress', [formatAddress(address)]),
+    getTransactionByHash,
+    fetchTransaction: async (hash) => {
+      try {
+        return toChainTransaction(await getTransactionByHash(hash))
+      } catch (error) {
+        if (isNotFound(error)) return null
+        throw error
+      }
+    },
+    pushTransaction: (rawHex) => call<string>('pushTransaction', [rawHex]),
+  }
 }
 
 /** The session, plus the exact bytes that were signed, so a caller can try replaying them. */

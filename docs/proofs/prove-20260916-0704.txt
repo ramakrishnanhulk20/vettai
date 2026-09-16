@@ -1,0 +1,30 @@
+vettai prove-it, 2026-09-16T07:04:16.761Z
+world http://127.0.0.1:51987, database pglite in memory, node https://rpc.testnet.nimiqwatch.com
+caps for this run: daily 0.6 NIM, pool 1.2 NIM, 2 wallets per IP per day
+
+ 1/12  PASS  the node and the treasury are the ones we say they are: TestAlbatross at block 11578298, key derives NQ92YGUBVUV9LX6H36G033C1081VTMDD9152, balance 22.55 NIM
+ 2/12  PASS  a wallet signs in and the server reads its address off the key: NQ423UV85P3TCQHRGU529NJJ3D0TQC0L1YVH signed in, /api/me agrees, nothing named an address but the key
+ 3/12  PASS  a forged signature and a replayed challenge are both refused: forged signature 401 "signature does not match message", replayed challenge 401 "nonce used"
+ 4/12  PASS  a scripted wallet plays the real world until the hunt quest is done: 5 kills in 60s through the socket, reward 0.5 NIM
+ 5/12  PASS  the hunt claim is signed once, and a replay or another wallet is refused: queued with memo vettai:5d2fa6f2, replay 409 "already claimed", another wallet 404
+     sent claim=759b2bf6-ac3c-4046-a0ad-64a33d8addcf to=NQ423UV85P3TCQHRGU529NJJ3D0TQC0L1YVH hash=bc3e9a39588e58f315caff02fe66cd68122d96e5b5c83a8af2646550f920682e
+     paid claim=759b2bf6-ac3c-4046-a0ad-64a33d8addcf hash=bc3e9a39588e58f315caff02fe66cd68122d96e5b5c83a8af2646550f920682e block=11578361
+ 6/12  PASS  the treasury pays it on chain and the payment carries the quest id: 0.5 NIM to NQ423UV85P3TCQHRGU529NJJ3D0TQC0L1YVH, memo "vettai:5d2fa6f2", hash bc3e9a39588e58f315caff02fe66cd68122d96e5b5c83a8af2646550f920682e, block 11578361
+ 7/12  PASS  the daily cap holds the claim that would cross it: 0.5 NIM already committed today, 0.2 NIM more crosses the 0.6 NIM cap, landmarks and streak both held for "daily cap"
+ 8/12  PASS  the third wallet claiming from one address is held: wallets 1 and 2 from 127.0.0.1 were queued, 2 distinct wallets had claimed, wallets 3 and 4 held for "ip cap"
+ 9/12  PASS  the pool stops the claim that would spend past it: 0.7 NIM + 0.2 NIM -> queued, 0.9 NIM + 0.2 NIM -> queued, 1.1 NIM + 0.2 NIM -> held; 1.3 NIM is past the 1.2 NIM pool
+     skipped hash=2aaacfd89a9bb2f8d7f7b8f6ac8a1057ed4d08cb2eb3205bcd9eb3d5861209d4 block=11578507: sender mismatch
+     shop order 7aef2949-7d77-4845-b627-3767dfd2e52f paid with blaster-mk2 hash=3ac725afccbb1bc729eb6c13f582bf98c32cfac1c80f2dfb509f7aeae2e963e7 block=11578507
+10/12  PASS  a real shop payment grants the gear and a short one from another wallet does not: paid 1 NIM with memo vettai:shop:7aef2949, hash 3ac725afccbb1bc729eb6c13f582bf98c32cfac1c80f2dfb509f7aeae2e963e7, gear now mk2; 0.01 NIM from the wrong wallet on vettai:shop:43b2457d left the order pending
+11/12  PASS  the socket refuses a flood, a long move vector and nonsense frames: 30 moves in a second: 10 dropped and 6.00 m covered, under the 6 m/s cap; dx 50 stored as a unit vector; 20 fire frames gave 4 accepted shots on an mk1; three bad frames closed the socket with 1008
+     still pending claim=c0c8dbd1-7408-498f-a3eb-e4984fa158fd hash=2edc91ea835b78c939aac006524c9bad6e941269132572ffe82e91f3e003d5c9
+     sent claim=ffc15b75-6861-4cfa-b137-439d34c186d9 to=NQ86A63M4FPMXBCGKT6YCKMTM4X8PA0D5Q97 hash=0c2905c000ea525d03a818e31bed9e725ae94bc9171d563e0abba842aacf1ab2
+     sent claim=5c9b6c41-553f-4538-99eb-da34ec73f53c to=NQ332CMD5176QSGY3V467TBYBRMHMT015RP9 hash=3e3657837679b882067b15dd15648b129057b0d5850bfa99da930b09af96fe91
+     paid claim=ffc15b75-6861-4cfa-b137-439d34c186d9 hash=0c2905c000ea525d03a818e31bed9e725ae94bc9171d563e0abba842aacf1ab2 block=11578516
+     paid claim=5c9b6c41-553f-4538-99eb-da34ec73f53c hash=3e3657837679b882067b15dd15648b129057b0d5850bfa99da930b09af96fe91 block=11578518
+12/12  PASS  a payout that already has a hash is looked up, never sent again: 2 payout(s) left in this pass; the claim holding a made up hash stayed "sending" and was not signed again; the treasury fell by 0.4 NIM, exactly the confirmed payouts of this pass
+
+treasury NQ92YGUBVUV9LX6H36G033C1081VTMDD9152 now holds 21.16 NIM
+
+12/12 passed
+finished in 240s
