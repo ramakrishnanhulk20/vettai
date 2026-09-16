@@ -3,15 +3,15 @@ import * as THREE from "three";
 export const NIGHT = 0x0b0f1a;
 
 /**
- * Night over the block: a navy sky that the fog fades into, a cold hemisphere bounce off
- * the street, and one warm key low on the horizon standing in for the city glow. No
- * shadow maps anywhere, the phone pays for those twice.
+ * Night over the block: a navy sky that the fog fades into, a bounce off the street warm
+ * enough to read the road by, and one warm key low on the horizon standing in for the
+ * city glow. No shadow maps anywhere, the phone pays for those twice.
  */
 export function addNightLights(scene: THREE.Scene, mapSize: number): void {
   scene.background = new THREE.Color(NIGHT);
   scene.fog = new THREE.Fog(NIGHT, mapSize * 0.04, mapSize * 0.34);
 
-  const sky = new THREE.HemisphereLight(0x2c3f66, 0x151d2e, 0.8);
+  const sky = new THREE.HemisphereLight(0x33486f, 0x2b3346, 0.95);
   scene.add(sky);
 
   const key = new THREE.DirectionalLight(0xffa463, 0.85);
@@ -21,4 +21,73 @@ export function addNightLights(scene: THREE.Scene, mapSize: number): void {
   const rim = new THREE.DirectionalLight(0x3f6dff, 0.45);
   rim.position.set(38, 18, -30);
   scene.add(rim);
+}
+
+/** How high the warm pool sits, which is the height of a lamp head. */
+const LAMP_HEIGHT = 4.1;
+const LAMP_COLOUR = 0xffb070;
+const LAMP_INTENSITY = 22;
+const LAMP_REACH = 20;
+
+export type LampGlow = {
+  /** Moves the two lights to the two nearest lamps. `spots` is x and z, pair by pair. */
+  update: (spots: Float32Array, x: number, z: number) => void;
+  dispose: () => void;
+};
+
+/**
+ * Two real lights for a street full of lamps.
+ *
+ * A point light per lamp would be hundreds of lights and a shader recompile the phone
+ * cannot afford, so the city carries the lamps as geometry and only the two nearest the
+ * player are lit. The player never sees the swap: a lamp is out of the pool's reach long
+ * before it hands its light over.
+ */
+export function addLampGlow(scene: THREE.Scene): LampGlow {
+  const lights = [0, 1].map(() => {
+    const light = new THREE.PointLight(LAMP_COLOUR, LAMP_INTENSITY, LAMP_REACH, 2);
+    light.visible = false;
+    scene.add(light);
+    return light;
+  });
+
+  return {
+    update(spots, x, z) {
+      let bestOne = -1;
+      let bestTwo = -1;
+      let rangeOne = Infinity;
+      let rangeTwo = Infinity;
+
+      for (let index = 0; index < spots.length; index += 2) {
+        const dx = (spots[index] as number) - x;
+        const dz = (spots[index + 1] as number) - z;
+        const range = dx * dx + dz * dz;
+        if (range < rangeOne) {
+          rangeTwo = rangeOne;
+          bestTwo = bestOne;
+          rangeOne = range;
+          bestOne = index;
+        } else if (range < rangeTwo) {
+          rangeTwo = range;
+          bestTwo = index;
+        }
+      }
+
+      const place = (light: THREE.PointLight, at: number) => {
+        if (at < 0) {
+          light.visible = false;
+          return;
+        }
+        light.position.set(spots[at] as number, LAMP_HEIGHT, spots[at + 1] as number);
+        light.visible = true;
+      };
+
+      place(lights[0] as THREE.PointLight, bestOne);
+      place(lights[1] as THREE.PointLight, bestTwo);
+    },
+
+    dispose() {
+      for (const light of lights) scene.remove(light);
+    },
+  };
 }

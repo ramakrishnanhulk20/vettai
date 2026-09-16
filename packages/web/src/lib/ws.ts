@@ -107,9 +107,10 @@ const PING_EVERY_MS = 5000;
 const BACKOFF_MS = [1000, 2000, 4000, 8000];
 const BACKOFF_CAP_MS = 15000;
 
-function socketUrl(ticket: string): string {
+function socketUrl(ticket: string, base: string | null): string {
   const scheme = window.location.protocol === "https:" ? "wss" : "ws";
-  return `${scheme}://${window.location.host}/ws?ticket=${encodeURIComponent(ticket)}`;
+  const root = base ?? `${scheme}://${window.location.host}/ws`;
+  return `${root}?ticket=${encodeURIComponent(ticket)}`;
 }
 
 function backoff(attempt: number): number {
@@ -134,6 +135,10 @@ export function connectWorld(ticket: string): WorldConnection {
 
   let socket: WebSocket | null = null;
   let next: string | null = ticket;
+  // Where the socket lives is learned from the ticket reply: on Vercel the web origin
+  // cannot carry the upgrade, so the world names its own address.
+  let base: string | null = null;
+  let baseKnown = false;
   let attempt = 0;
   let round: number | null = null;
   let closed = false;
@@ -162,7 +167,7 @@ export function connectWorld(ticket: string): WorldConnection {
   async function open(): Promise<void> {
     if (closed) return;
 
-    if (next === null) {
+    if (next === null || !baseKnown) {
       const fresh = await getTicket();
       if (closed) return;
       if (!fresh.ok) {
@@ -170,9 +175,11 @@ export function connectWorld(ticket: string): WorldConnection {
         return;
       }
       next = fresh.data.ticket;
+      base = (fresh.data as { wsUrl?: string | null }).wsUrl ?? null;
+      baseKnown = true;
     }
 
-    const live = new WebSocket(socketUrl(next));
+    const live = new WebSocket(socketUrl(next, base));
     next = null;
     socket = live;
 

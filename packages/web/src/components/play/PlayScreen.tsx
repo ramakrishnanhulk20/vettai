@@ -2,7 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { getTicket, getWorldMap, type Gear, type QuestView } from "@/lib/api";
+import {
+  getHealth,
+  getTicket,
+  getWorldMap,
+  type ClaimView,
+  type Gear,
+  type QuestView,
+} from "@/lib/api";
 import { isUserRejection, waitForProvider } from "@/lib/nimiq";
 import { login, me, readSession } from "@/lib/session";
 import { connectWorld, type WorldConnection } from "@/lib/ws";
@@ -11,6 +18,11 @@ import { loadCityAssets, type CityAssets } from "@/game/scene/assets";
 import { loadCharacters } from "@/game/scene/character";
 import { createWorld, type Prompt, type World } from "@/game/world";
 import Hud, { type Toast } from "./Hud";
+import Ladder from "./Ladder";
+import QuestBoard from "./QuestBoard";
+import Shop from "./Shop";
+import { nim, type Network } from "./format";
+import { useClaims } from "./useClaims";
 import styles from "./play.module.css";
 
 /**
@@ -65,6 +77,9 @@ export default function PlayScreen() {
   const gearRef = useRef<Gear>({ blaster: "mk1", skin: "default", sprint: false });
   const questsRef = useRef<QuestView[]>([]);
   const promptRef = useRef<Prompt | null>(null);
+  /** The game loop reads this every frame, so a panel takes the thumb without a re-render. */
+  const sheetRef = useRef(false);
+  const celebrateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const reduced = useReducedMotion();
   const [phase, setPhase] = useState<Phase>({ name: "provider" });
@@ -81,10 +96,31 @@ export default function PlayScreen() {
   const [hitAt, setHitAt] = useState(0);
   const [showHint, setShowHint] = useState(false);
 
+  const [sheet, setSheet] = useState<"board" | "shop" | "ladder" | null>(null);
+  const [gear, setGear] = useState<Gear>({ blaster: "mk1", skin: "default", sprint: false });
+  const [address, setAddress] = useState("");
+  const [network, setNetwork] = useState<Network | null>(null);
+  const [celebrate, setCelebrate] = useState<string | null>(null);
+  const [paidAt, setPaidAt] = useState(0);
+
   useEffect(() => {
     setHost(window.location.host);
     setShowHint(window.localStorage.getItem(HINT_KEY) === null);
+    setAddress(readSession()?.address ?? "");
   }, []);
+
+  const [wantExplorer, setWantExplorer] = useState(false);
+
+  // Which chain the payouts are on decides which explorer a transaction points at, and it
+  // is only worth asking once there is a transaction to point at. The world serves this
+  // outside /api, so a refusal is not an error: the hash is then shown as plain text
+  // rather than as a link to the wrong chain.
+  useEffect(() => {
+    if (!wantExplorer || network !== null) return;
+    void getHealth().then((result) => {
+      if (result.ok) setNetwork(result.data.network);
+    });
+  }, [network, wantExplorer]);
 
   const toast = useCallback((text: string) => {
     const entry: Toast = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, text };
@@ -95,6 +131,55 @@ export default function PlayScreen() {
   const retry = useCallback(() => {
     setPhase({ name: "provider" });
     setAttempt((count) => count + 1);
+  }, []);
+
+  const playing = phase.name === "playing" || phase.name === "reconnecting";
+
+  /**
+   * The signature moment. A payout that landed is announced wherever the player is
+   * standing: the amount, the block it is in, the shield bars taking the accent, and the
+   * row on the board lighting up if the board happens to be open.
+   */
+  const onPaid = useCallback(
+    (claim: ClaimView) => {
+      const block = claim.blockNumber === null ? "" : `, block ${claim.blockNumber}`;
+      toast(`Bounty paid: ${nim(claim.amountLuna)} NIM${block}`);
+      setPaidAt(Date.now());
+      setCelebrate(claim.id);
+      if (celebrateTimer.current) clearTimeout(celebrateTimer.current);
+      celebrateTimer.current = setTimeout(() => setCelebrate(null), 6000);
+    },
+    [toast],
+  );
+
+  const claims = useClaims(playing, onPaid);
+
+  // A paid claim is the one place a link is worth having, so that is the only thing that
+  // makes the page ask which chain it is on.
+  const hasPayout = claims.claims.some((claim) => claim.state === "paid" && claim.txHash !== null);
+  useEffect(() => {
+    if (hasPayout) setWantExplorer(true);
+  }, [hasPayout]);
+
+  useEffect(() => () => {
+    if (celebrateTimer.current) clearTimeout(celebrateTimer.current);
+  }, []);
+
+  const openSheet = useCallback((next: "board" | "shop" | "ladder") => {
+    sheetRef.current = true;
+    setSheet(next);
+  }, []);
+
+  const closeSheet = useCallback(() => {
+    sheetRef.current = false;
+    setSheet(null);
+  }, []);
+
+  // Stable, because the board reloads the day's jobs whenever this changes and the HUD
+  // re-renders every couple of seconds on its own.
+  const takeQuests = useCallback((next: QuestView[]) => {
+    questsRef.current = next;
+    setQuests(next);
   }, []);
 
   useEffect(() => {
@@ -153,6 +238,8 @@ export default function PlayScreen() {
         }
       }
       gearRef.current = who.gear;
+      setGear(who.gear);
+      setAddress(who.address);
 
       setPhase({ name: "loading", percent: 0 });
       const total = CITY_STEPS + CHARACTER_STEPS + 1;
@@ -193,7 +280,13 @@ export default function PlayScreen() {
         assets,
         you: session.address,
         reduced: Boolean(reduced),
-        readIntent: () => controlsRef.current?.intent() ?? { dx: 0, dz: 0, yaw: 0 },
+        // A panel is up: the body stands still rather than walking on under the sheet,
+        // while the camera keeps the look it had.
+        readIntent: () => {
+          const look = controlsRef.current?.look().yaw ?? 0;
+          if (sheetRef.current) return { dx: 0, dz: 0, yaw: look };
+          return controlsRef.current?.intent() ?? { dx: 0, dz: 0, yaw: 0 };
+        },
         readLook: () => controlsRef.current?.look() ?? { yaw: 0, pitch: 0 },
         onAim: setAimHot,
         onPrompt: (next) => {
@@ -211,8 +304,14 @@ export default function PlayScreen() {
 
       const controls = createControls({
         surface,
-        onMove: (intent) => connectionRef.current?.send({ t: "move", ...intent }),
-        onFire: (yaw, pitch) => connectionRef.current?.send({ t: "fire", yaw, pitch }),
+        onMove: (intent) => {
+          const stopped = { t: "move" as const, dx: 0, dz: 0, yaw: intent.yaw };
+          connectionRef.current?.send(sheetRef.current ? stopped : { t: "move", ...intent });
+        },
+        onFire: (yaw, pitch) => {
+          if (sheetRef.current) return;
+          connectionRef.current?.send({ t: "fire", yaw, pitch });
+        },
         fireIntervalMs: () => FIRE_INTERVAL[gearRef.current.blaster] ?? FIRE_INTERVAL.mk1,
         onFirstStick: () => {
           window.localStorage.setItem(HINT_KEY, "seen");
@@ -252,6 +351,7 @@ export default function PlayScreen() {
         debug.vettaiDebug = {
           stats: () => world.stats(),
           place: () => world.place(),
+          look: () => controlsRef.current?.look() ?? { yaw: 0, pitch: 0 },
           heap: () =>
             (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory
               ?.usedJSHeapSize ?? null,
@@ -309,8 +409,16 @@ export default function PlayScreen() {
         }
         if (frame.kind === "gear") {
           gearRef.current = frame.gear;
+          setGear(frame.gear);
           world.setGear(frame.gear);
           toast(`Gear equipped: ${frame.item}`);
+          return;
+        }
+        if (frame.kind === "interact") {
+          // The server has just confirmed the player really is standing at the door, so
+          // the panel opens on its word rather than on the phone's guess.
+          if (frame.target === "office") openSheet("board");
+          if (frame.target === "shop") openSheet("shop");
           return;
         }
         if (frame.kind === "leave") {
@@ -349,7 +457,7 @@ export default function PlayScreen() {
       later?.();
       drop();
     };
-  }, [attempt, reduced, toast]);
+  }, [attempt, openSheet, reduced, toast]);
 
   const interact = useCallback(() => {
     const target = promptRef.current;
@@ -388,15 +496,13 @@ export default function PlayScreen() {
     });
   }, [deepLink]);
 
-  const playing = phase.name === "playing" || phase.name === "reconnecting";
-
   return (
     <div className={`${styles.stage} overflow-hidden bg-night`}>
       <canvas ref={canvasRef} className="absolute inset-0 block h-full w-full" />
 
       <div
         ref={surfaceRef}
-        className="absolute inset-0 touch-none select-none"
+        className={`absolute inset-0 select-none ${sheet ? "pointer-events-none" : "touch-none"}`}
         style={{ touchAction: "none" }}
       />
 
@@ -409,12 +515,50 @@ export default function PlayScreen() {
           aimHot={aimHot}
           prompt={promptLabel(prompt, quests)}
           onInteract={interact}
+          onOpenBoard={() => openSheet("board")}
+          nearOffice={prompt?.kind === "office"}
+          payouts={claims.inFlight}
+          paidAt={paidAt}
           attachFire={attachFire}
           hitAt={hitAt}
           showHint={showHint}
+          sheetOpen={sheet !== null}
           reduced={Boolean(reduced)}
         />
       )}
+
+      <AnimatePresence>
+        {sheet === "board" && (
+          <QuestBoard
+            key="board"
+            quests={quests}
+            claims={claims}
+            network={network}
+            reduced={Boolean(reduced)}
+            celebrate={celebrate}
+            onQuests={takeQuests}
+            onLadder={() => openSheet("ladder")}
+            onClose={closeSheet}
+          />
+        )}
+        {sheet === "shop" && (
+          <Shop
+            key="shop"
+            gear={gear}
+            network={network}
+            reduced={Boolean(reduced)}
+            onClose={closeSheet}
+          />
+        )}
+        {sheet === "ladder" && (
+          <Ladder
+            key="ladder"
+            address={address}
+            reduced={Boolean(reduced)}
+            onClose={closeSheet}
+          />
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {phase.name === "reconnecting" && (

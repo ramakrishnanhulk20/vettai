@@ -208,13 +208,15 @@ function windows(placed: Placed[]): THREE.Group {
     new THREE.MeshBasicMaterial({ color: WINDOW_COLOR, toneMapped: false }),
     matrices.length,
   );
+  // Plain blending rather than additive: two or three haloes overlapping on a facade the
+  // player is standing against used to add up to white, which blew the whole wall out.
+  // Capped at its own opacity the glow still reads from across the block.
   const glow = new THREE.InstancedMesh(
     pane,
     new THREE.MeshBasicMaterial({
       color: WINDOW_COLOR,
       transparent: true,
-      opacity: 0.16,
-      blending: THREE.AdditiveBlending,
+      opacity: 0.18,
       depthWrite: false,
       toneMapped: false,
     }),
@@ -222,7 +224,7 @@ function windows(placed: Placed[]): THREE.Group {
   );
 
   const wide = new THREE.Matrix4();
-  const halo = new THREE.Matrix4().makeScale(3.1, 2.4, 1);
+  const halo = new THREE.Matrix4().makeScale(2.3, 1.9, 1);
   matrices.forEach((matrix, index) => {
     lit.setMatrixAt(index, matrix);
     wide.copy(matrix).multiply(halo);
@@ -236,6 +238,107 @@ function windows(placed: Placed[]): THREE.Group {
 
   group.add(lit, glow);
   return group;
+}
+
+/** Lamps stand this far apart along a street, and this high. */
+const LAMP_SPACING = 24;
+const LAMP_TOP = 4.1;
+
+/**
+ * Vertex colours are read as linear, so the two shades are converted once from the sRGB
+ * values they were picked as. Skipping that is what turns a warm sodium head into a pale
+ * grey ball.
+ */
+function linear(hex: number): [number, number, number] {
+  const colour = new THREE.Color(hex).convertSRGBToLinear();
+  return [colour.r, colour.g, colour.b];
+}
+
+const POLE_COLOR = linear(0x2a3040);
+const HEAD_COLOR = linear(0xffb070);
+
+/**
+ * Where every street lamp stands, as x and z pair by pair: down the middle of each street
+ * running north and each street running east. The same list lights the two lamps nearest
+ * the player, so it is worked out once and shared.
+ */
+export function lampSpots(map: WorldMap): Float32Array {
+  const cell = map.lotSize + map.street;
+  const half = map.size / 2;
+  const lines = Math.round(map.size / cell);
+  const along = Math.max(1, Math.round(map.size / LAMP_SPACING));
+
+  // The lamps stand at the kerb rather than on the centre line, alternating sides down
+  // the street: a pole in the middle of the road is the first thing a player walks into.
+  const kerb = map.street / 2 - 0.7;
+
+  const spots: number[] = [];
+  for (let line = 0; line < lines; line += 1) {
+    const centre = -half + line * cell + map.street / 2;
+    for (let step = 0; step < along; step += 1) {
+      const run = -half + (step + 0.5) * LAMP_SPACING;
+      const side = step % 2 === 0 ? kerb : -kerb;
+      spots.push(centre + side, run);
+      spots.push(run, centre + side);
+    }
+  }
+  return new Float32Array(spots);
+}
+
+/**
+ * One lamp: a dark pole with a warm head, welded into a single geometry and coloured per
+ * vertex. Two meshes would be two draw calls for the whole city, and the colour is what
+ * lets one unlit material carry both the pole and the glow.
+ */
+function lampGeometry(): THREE.BufferGeometry {
+  const pole = new THREE.CylinderGeometry(0.07, 0.1, LAMP_TOP, 5, 1, true)
+    .translate(0, LAMP_TOP / 2, 0)
+    .toNonIndexed();
+  const head = new THREE.SphereGeometry(0.2, 6, 4).translate(0, LAMP_TOP, 0).toNonIndexed();
+
+  const polePoints = pole.getAttribute("position").array as Float32Array;
+  const headPoints = head.getAttribute("position").array as Float32Array;
+
+  const positions = new Float32Array(polePoints.length + headPoints.length);
+  positions.set(polePoints, 0);
+  positions.set(headPoints, polePoints.length);
+
+  const colors = new Float32Array(positions.length);
+  for (let at = 0; at < positions.length; at += 3) {
+    const shade = at < polePoints.length ? POLE_COLOR : HEAD_COLOR;
+    colors[at] = shade[0];
+    colors[at + 1] = shade[1];
+    colors[at + 2] = shade[2];
+  }
+
+  pole.dispose();
+  head.dispose();
+
+  const lamp = new THREE.BufferGeometry();
+  lamp.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  lamp.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  return lamp;
+}
+
+function streetLamps(map: WorldMap): THREE.InstancedMesh {
+  const spots = lampSpots(map);
+  const count = spots.length / 2;
+  const lamps = new THREE.InstancedMesh(
+    lampGeometry(),
+    new THREE.MeshBasicMaterial({ vertexColors: true, toneMapped: false, fog: true }),
+    count,
+  );
+  lamps.name = "lamps";
+
+  const dummy = new THREE.Object3D();
+  for (let index = 0; index < count; index += 1) {
+    dummy.position.set(spots[index * 2] as number, 0, spots[index * 2 + 1] as number);
+    dummy.updateMatrix();
+    lamps.setMatrixAt(index, dummy.matrix);
+  }
+  lamps.instanceMatrix.needsUpdate = true;
+  lamps.computeBoundingSphere();
+  return lamps;
 }
 
 export function buildCity(map: WorldMap, assets: CityAssets): THREE.Group {
@@ -295,6 +398,7 @@ export function buildCity(map: WorldMap, assets: CityAssets): THREE.Group {
     city.add(mesh);
   }
 
+  city.add(streetLamps(map));
   city.add(windows(placed));
   return city;
 }

@@ -78,6 +78,7 @@ const schema = z.object({
   MAP_SEED: blankIsMissing(z.string().min(1).default('vettai-1')),
   IP_SALT: blankIsMissing(z.string().min(1).optional()),
   TRUST_PROXY: blankIsMissing(z.string().min(1).optional()),
+  PUBLIC_WS_URL: blankIsMissing(z.string().url().optional()),
   VETTAI_PROCESS: blankIsMissing(z.string().min(1).optional()),
   REWARD_HUNT: blankIsMissing(nimAmount().optional()),
   REWARD_COURIER: blankIsMissing(nimAmount().optional()),

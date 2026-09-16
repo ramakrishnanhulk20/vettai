@@ -77,6 +77,35 @@ export type ShopOrder = {
   expiresAt: string;
 };
 
+export type ClaimResponse = {
+  state: "queued" | "held";
+  claimId: string;
+  memo: string;
+  amountLuna: string;
+  amountNim: string;
+  /** Only on a hold, and it is a delay rather than a refusal. */
+  reason?: "daily cap" | "ip cap" | "pool";
+};
+
+export type ShopOrderState = {
+  orderId: string;
+  item: string;
+  state: "pending" | "paid" | "expired";
+  luna: string;
+  nim: string;
+  memo: string;
+  to: string;
+  txHash: string | null;
+  expiresAt: string;
+};
+
+export type Health = {
+  ok: boolean;
+  network: "TestAlbatross" | "MainAlbatross";
+  rooms: number;
+  online: number;
+};
+
 export type LadderWeek = {
   week: string;
   prizesNim: string[];
@@ -194,4 +223,28 @@ export function getLadderWeek(): Promise<ApiResult<LadderWeek>> {
 
 export function getStats(): Promise<ApiResult<Stats>> {
   return request("/api/stats");
+}
+
+export function claimChallenge(questId: string): Promise<ApiResult<Challenge>> {
+  return request(`/api/quests/${questId}/claim/challenge`, { method: "POST", body: {}, auth: true });
+}
+
+export function submitClaim(
+  questId: string,
+  body: { message: string; publicKey: string; signature: string },
+): Promise<ApiResult<ClaimResponse>> {
+  return request(`/api/quests/${questId}/claim`, { method: "POST", body, auth: true });
+}
+
+export function getShopOrder(orderId: string): Promise<ApiResult<ShopOrderState>> {
+  return request(`/api/shop/orders/${orderId}`, { auth: true });
+}
+
+/**
+ * Which chain the world server is paying on, which decides the explorer a payout links to.
+ * The world serves this outside /api, so in a split deployment the call can be refused;
+ * a payout then shows its hash as text rather than pointing at the wrong explorer.
+ */
+export function getHealth(): Promise<ApiResult<Health>> {
+  return request("/health");
 }

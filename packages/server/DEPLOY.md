@@ -37,6 +37,7 @@ Fly.io works the same way with `fly.toml`.
 | LANDLORD_ENABLED | both | `false` until Ram turns the landlord quest on |
 | IP_SALT | world | A long random string, fresh per deployment. It only ever hashes IPs |
 | TRUST_PROXY | world | Blank until the first deploy answers `GET /api/echo-ip`; then the proxy peer it shows, as a preset (`uniquelocal`, `loopback`) or a CIDR, so the world reads the real client IP from X-Forwarded-For. Never `true` |
+| PUBLIC_WS_URL | world | The `wss://<world domain>/ws` address handed to the browser with its ticket. Blank means same origin. Needed whenever the web app fronts the API with a rewrite, since rewrites do not carry WebSocket upgrades |
 
 5. Migrations run at boot of either process, so the first world deploy creates the schema.
 6. Check: `curl https://<world domain>/health` returns ok.

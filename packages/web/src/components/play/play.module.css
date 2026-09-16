@@ -15,3 +15,37 @@
 .stage ~ div :global(.grain-layer) {
   display: none;
 }
+
+/* The panels that slide up over the street. The shadow is what lifts the sheet off the
+   city rather than a border doing all the work. */
+.sheet {
+  box-shadow: 0 -34px 90px rgba(0, 0, 0, 0.62);
+}
+
+.sheetGrain {
+  position: absolute;
+  inset: 0;
+  background-image: var(--grain);
+  opacity: 0.05;
+  mix-blend-mode: overlay;
+  pointer-events: none;
+}
+
+/* The payout landing: the shield bars take the accent for a beat, so the moment reads
+   even when the board is the thing being looked at. */
+@keyframes payout-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(255, 106, 43, 0); }
+  30% { box-shadow: 0 0 18px 5px rgba(255, 106, 43, 0.85); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 106, 43, 0); }
+}
+
+.payoutPulse {
+  animation: payout-pulse 1.5s ease-out 2;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .payoutPulse {
+    animation: none;
+    outline: 1px solid var(--hunt);
+  }
+}

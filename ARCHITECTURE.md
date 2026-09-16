@@ -38,6 +38,7 @@ Unset, the image runs `world`. Locally the treasury reads its key from
 | LANDLORD_ENABLED | both | `true` to generate landlord quests; default `false` until Ram decides |
 | IP_SALT | world | Salt for hashing client IPs; a fixed dev string when unset |
 | TRUST_PROXY | world | Blank locally. Otherwise a comma list of trusted proxy peers: named presets (`loopback`, `linklocal`, `uniquelocal`) or CIDRs. Fastify 5 ignores a plain hop count on purpose, and `true` would let any direct caller forge the client IP. Verify after deploy with `GET /api/echo-ip` |
+| PUBLIC_WS_URL | world | The `wss://<world domain>/ws` address handed to the browser with its ticket. Blank means same origin. Needed whenever the web app fronts the API with a rewrite, since rewrites do not carry WebSocket upgrades |
 | VETTAI_PROCESS | both | Entry script; `src/treasury/index.ts` makes the image run the treasury, unset runs the world |
 | REWARD_HUNT, REWARD_COURIER, REWARD_LANDMARKS, REWARD_LANDMARKS_REPEAT, REWARD_LANDLORD | both | Quest rewards in NIM; defaults in the "Quests" table below |
 | LADDER_PRIZES_NIM | both | Comma list of weekly prizes for first, second, third; default `2,1,0.5` |

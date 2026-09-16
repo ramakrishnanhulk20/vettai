@@ -2,6 +2,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import type { QuestView } from "@/lib/api";
+import styles from "./play.module.css";
 
 /**
  * Everything drawn over the city: what the player has left, what the day asks of them,
@@ -19,10 +20,19 @@ export type HudProps = {
   aimHot: boolean;
   prompt: { text: string } | null;
   onInteract: () => void;
+  /** The quest strip and the Board button both lead to the same place. */
+  onOpenBoard: () => void;
+  nearOffice: boolean;
+  /** Claims the treasury has not finished sending yet. */
+  payouts: number;
+  /** The moment the last payout landed, which flashes the shield bars. */
+  paidAt: number;
   attachFire: (button: HTMLElement | null) => void;
   /** The moment the last shield bar was lost, which flashes the edge of the screen. */
   hitAt: number;
   showHint: boolean;
+  /** While a panel is up the thumb belongs to the panel, so the controls step back. */
+  sheetOpen: boolean;
   reduced: boolean;
 };
 
@@ -51,11 +61,18 @@ export default function Hud({
   aimHot,
   prompt,
   onInteract,
+  onOpenBoard,
+  nearOffice,
+  payouts,
+  paidAt,
   attachFire,
   hitAt,
   showHint,
+  sheetOpen,
   reduced,
 }: HudProps) {
+  const claimable = quests.some((quest) => quest.state === "done");
+
   return (
     <div className="pointer-events-none absolute inset-0 z-20 select-none">
       <AnimatePresence>
@@ -74,7 +91,7 @@ export default function Hud({
       </AnimatePresence>
 
       <div className="absolute left-4 top-[max(1rem,env(safe-area-inset-top))] flex flex-col gap-2">
-        <div className="flex gap-1.5">
+        <div key={paidAt} className={`flex gap-1.5 ${paidAt > 0 ? styles.payoutPulse : ""}`}>
           {Array.from({ length: MAX_SHIELD }, (_, index) => (
             <motion.span
               key={index}
@@ -91,10 +108,20 @@ export default function Hud({
         <span className="label-type text-paper/45">Shield</span>
       </div>
 
-      <div className="absolute right-4 top-[max(1rem,env(safe-area-inset-top))] flex w-40 flex-col items-end gap-1.5">
-        <span className="label-type text-paper/45">Today</span>
+      <button
+        type="button"
+        onClick={onOpenBoard}
+        data-testid="hud-quests"
+        aria-label="Open the day's jobs"
+        className={`pointer-events-auto absolute right-4 top-[max(1rem,env(safe-area-inset-top))] flex w-40 flex-col items-end gap-1.5 text-right transition-opacity duration-300 ${
+          sheetOpen ? "opacity-30" : "opacity-100"
+        }`}
+      >
+        <span className={`label-type ${claimable ? "text-hunt" : "text-paper/45"}`}>
+          {claimable ? "Today, claim" : "Today"}
+        </span>
         {quests.map((quest) => (
-          <motion.div
+          <motion.span
             key={quest.id}
             initial={{ opacity: 0, x: 16 }}
             animate={{ opacity: 1, x: 0 }}
@@ -114,12 +141,17 @@ export default function Hud({
                 &#10003;
               </span>
             )}
-          </motion.div>
+          </motion.span>
         ))}
+        {payouts > 0 && (
+          <span className="mt-1 font-mono text-[11px] text-hunt" data-testid="payouts-line">
+            {payouts === 1 ? "1 payout on its way" : `${payouts} payouts on their way`}
+          </span>
+        )}
         {latency !== null && (
           <span className="mt-1 font-mono text-[10px] text-paper/30">{latency} ms</span>
         )}
-      </div>
+      </button>
 
       <div className="pointer-events-none absolute inset-x-0 top-[max(5.5rem,calc(env(safe-area-inset-top)+5rem))] flex flex-col items-center gap-2">
         <AnimatePresence initial={false}>
@@ -138,33 +170,46 @@ export default function Hud({
         </AnimatePresence>
       </div>
 
-      <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-        <Crosshair hot={aimHot} reduced={reduced} />
-      </div>
+      {!sheetOpen && (
+        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+          <Crosshair hot={aimHot} reduced={reduced} />
+        </div>
+      )}
 
       <AnimatePresence>
-        {prompt && (
+        {prompt && !sheetOpen && (
           <motion.div
             key={prompt.text}
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 12 }}
             transition={{ duration: reduced ? 0 : 0.3, ease: "easeOut" }}
-            className="absolute inset-x-0 bottom-[max(12rem,calc(env(safe-area-inset-bottom)+11rem))] flex justify-center"
+            className="absolute inset-x-0 bottom-[max(12rem,calc(env(safe-area-inset-bottom)+11rem))] flex justify-center gap-2"
           >
             <button
               type="button"
               onClick={onInteract}
+              data-testid="interact"
               className="pointer-events-auto rounded-btn border border-hunt bg-night/80 px-4 py-2.5 text-sm text-paper backdrop-blur transition-colors duration-200 hover:bg-hunt hover:text-night active:bg-hunt active:text-night"
             >
               {prompt.text}
             </button>
+            {nearOffice && (
+              <button
+                type="button"
+                onClick={onOpenBoard}
+                data-testid="board-button"
+                className="label-type pointer-events-auto rounded-btn border border-line bg-night/80 px-3 py-2.5 text-paper/70 backdrop-blur transition-colors duration-200 hover:border-hunt hover:text-paper"
+              >
+                Board
+              </button>
+            )}
           </motion.div>
         )}
       </AnimatePresence>
 
       <AnimatePresence>
-        {showHint && (
+        {showHint && !sheetOpen && (
           <motion.span
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -181,12 +226,15 @@ export default function Hud({
         type="button"
         ref={attachFire}
         initial={{ opacity: 0, scale: 0.9 }}
-        animate={{ opacity: 1, scale: 1 }}
-        transition={{ duration: reduced ? 0 : 0.5, ease: "easeOut" }}
+        animate={{ opacity: sheetOpen ? 0 : 1, scale: sheetOpen ? 0.9 : 1 }}
+        transition={{ duration: reduced ? 0 : 0.35, ease: "easeOut" }}
         whileTap={reduced ? undefined : { scale: 0.92 }}
         aria-label="Fire"
+        aria-hidden={sheetOpen}
         data-testid="fire"
-        className="label-type pointer-events-auto absolute bottom-[max(2.5rem,calc(env(safe-area-inset-bottom)+1.5rem))] right-6 flex h-[72px] w-[72px] items-center justify-center rounded-full border-2 border-hunt bg-hunt/15 text-hunt backdrop-blur-sm transition-colors duration-200 hover:bg-hunt/30"
+        className={`label-type absolute bottom-[max(2.5rem,calc(env(safe-area-inset-bottom)+1.5rem))] right-6 flex h-[72px] w-[72px] items-center justify-center rounded-full border-2 border-hunt bg-hunt/15 text-hunt backdrop-blur-sm transition-colors duration-200 hover:bg-hunt/30 ${
+          sheetOpen ? "pointer-events-none" : "pointer-events-auto"
+        }`}
         style={{ touchAction: "none" }}
       >
         Fire

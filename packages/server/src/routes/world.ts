@@ -41,6 +41,8 @@ export function registerWorldRoutes(app: FastifyInstance, deps: RouteDeps, world
     const ticket = issueTicket(address)
 
     request.log.info({ address }, 'handed out a socket ticket')
-    return reply.send({ ticket, expiresInMs: TICKET_TTL_MS })
+    // The socket cannot ride the web app's rewrite (Vercel drops WebSocket upgrades), so the
+    // world tells the client where to open it. Blank means same origin, as in local dev.
+    return reply.send({ ticket, expiresInMs: TICKET_TTL_MS, wsUrl: config.PUBLIC_WS_URL ?? null })
   })
 }

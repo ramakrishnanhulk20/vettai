@@ -8,10 +8,13 @@ import { segmentHitsBox } from "./slide";
  * convention the server uses, so where the camera points is where the blaster fires.
  */
 
-const BOOM = 3.2;
-const LIFT = 1.7;
+const BOOM = 4.6;
+const LIFT = 2.3;
 const EYE = 1.5;
-const LOOK_AHEAD = 8;
+
+/** Where the shot is framed: chest height on the player, six metres down the street. */
+const LOOK_HEIGHT = 1.4;
+const LOOK_AHEAD = 6;
 
 /** Nearest the camera may sit to the head before it would be inside it. */
 const MIN_BOOM = 0.9;
@@ -116,7 +119,7 @@ export function createCameraRig(): CameraRig {
       }
 
       look
-        .set(at.x, EYE, at.z)
+        .set(at.x, LOOK_HEIGHT, at.z)
         .addScaledVector(
           new THREE.Vector3(Math.sin(yaw) * flat, Math.sin(pitch), Math.cos(yaw) * flat),
           LOOK_AHEAD,

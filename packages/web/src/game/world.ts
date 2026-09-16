@@ -5,10 +5,10 @@ import { createCameraRig, type Blocker } from "./camera";
 import type { Box, WorldMap } from "./map";
 import { rayConeNearest, slideAgainstBoxes } from "./slide";
 import type { CityAssets } from "./scene/assets";
-import { buildCity, disposeCity } from "./scene/city";
+import { buildCity, disposeCity, lampSpots } from "./scene/city";
 import { createCharacter, type Character } from "./scene/character";
 import { animateDrone, createDrone, disposeDrone, disposeDrones } from "./scene/drone";
-import { addNightLights, NIGHT } from "./scene/lights";
+import { addLampGlow, addNightLights, NIGHT } from "./scene/lights";
 import { scenePixelRatio } from "./scene/pixelRatio";
 
 /**
@@ -174,6 +174,9 @@ export function createWorld(options: WorldOptions): World {
   const city = buildCity(map, assets);
   scene.add(city);
 
+  const lamps = lampSpots(map);
+  const lampGlow = addLampGlow(scene);
+
   const boxes: Box[] = map.buildings.map((building) => building.aabb);
   const blockers: Blocker[] = map.buildings.map((building) => ({
     aabb: building.aabb,
@@ -199,6 +202,7 @@ export function createWorld(options: WorldOptions): World {
   const sparks: Spark[] = [];
 
   let me: Character | null = null;
+  let mySkin = "default";
   let marker: THREE.Mesh | null = null;
   let gear: Gear = { blaster: "mk1", skin: "default", sprint: false };
   let predicted: Place = { x: map.spawn.x, z: map.spawn.z };
@@ -213,6 +217,15 @@ export function createWorld(options: WorldOptions): World {
     const character = createCharacter(skin);
     scene.add(character.group);
     return character;
+  }
+
+  /** Puts the player's own body in the coat they are wearing now, and only when it changed. */
+  function wearSkin(skin: string): void {
+    if (!me || skin === mySkin) return;
+    scene.remove(me.group);
+    me.dispose();
+    me = characterFor(skin);
+    mySkin = skin;
   }
 
   function dropPlayer(entry: RemotePlayer): void {
@@ -233,7 +246,12 @@ export function createWorld(options: WorldOptions): World {
         downed = wire.downed;
         if (downed) options.onEvent({ kind: "downed" });
       }
-      if (!me) me = characterFor(wire.gear.skin);
+      if (!me) {
+        me = characterFor(wire.gear.skin);
+        mySkin = wire.gear.skin;
+      } else {
+        wearSkin(wire.gear.skin);
+      }
       gear = wire.gear;
       return;
     }
@@ -575,6 +593,7 @@ export function createWorld(options: WorldOptions): World {
 
     setGear(next) {
       gear = next;
+      wearSkin(next.skin);
     },
 
     frame(now) {
@@ -586,6 +605,7 @@ export function createWorld(options: WorldOptions): World {
       drawRemotes(now - INTERPOLATION_MS, dt, now);
 
       rig.update(camera, predicted, look.yaw, look.pitch, blockers, dt);
+      lampGlow.update(lamps, predicted.x, predicted.z);
 
       const hot = aimingAtDrone(look);
       if (hot !== aimHot) {
@@ -648,6 +668,7 @@ export function createWorld(options: WorldOptions): World {
         marker = null;
       }
       disposeDrones();
+      lampGlow.dispose();
       disposeCity(city, assets);
       scene.remove(city);
       boltGeometry.dispose();
