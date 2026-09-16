@@ -116,6 +116,12 @@ export type PlayerWire = {
   shield: number
   downed: boolean
   gear: PlayerGear
+  /**
+   * The highest move number the server has applied for this player, 0 before any. A phone
+   * on a slow link runs ahead of the server, so this tells its client which of its own
+   * inputs are already in the world and which ones it still has to replay.
+   */
+  seq: number
 }
 
 export type DroneWire = {
@@ -208,6 +214,8 @@ type Connection = {
   counters: Map<MessageKind, { from: number; count: number }>
   malformed: number
   dropped: number
+  /** The highest move number applied on this connection. A new socket starts again at 0. */
+  lastSeq: number
 }
 
 /** Two decimals is a centimetre, which is finer than anything a player can see. */
@@ -215,7 +223,7 @@ function round(value: number): number {
   return Math.round(value * 100) / 100
 }
 
-function playerWire(player: PlayerState): PlayerWire {
+function playerWire(player: PlayerState, seq: number): PlayerWire {
   return {
     id: player.id,
     x: round(player.x),
@@ -224,6 +232,7 @@ function playerWire(player: PlayerState): PlayerWire {
     shield: player.shield,
     downed: player.downedUntil > 0,
     gear: player.gear,
+    seq,
   }
 }
 
@@ -245,7 +254,7 @@ function boltWire(bolt: BoltState): BoltWire {
 
 function signature(player: PlayerWire): string {
   const gear = `${player.gear.blaster}:${player.gear.skin}:${player.gear.sprint ? 1 : 0}`
-  return `${player.x}|${player.z}|${player.yaw}|${player.shield}|${player.downed ? 1 : 0}|${gear}`
+  return `${player.x}|${player.z}|${player.yaw}|${player.shield}|${player.downed ? 1 : 0}|${gear}|${player.seq}`
 }
 
 function distance(from: Place, to: Place): number {
@@ -326,8 +335,13 @@ export function createRooms(options: RoomsOptions): Rooms {
     return best ?? openRoom()
   }
 
+  /** The move number the server has applied for this player, or 0 when nobody is connected. */
+  function seqOf(address: string): number {
+    return connections.get(address)?.lastSeq ?? 0
+  }
+
   function livePlayers(room: Room): PlayerWire[] {
-    return [...room.state.players.values()].map(playerWire)
+    return [...room.state.players.values()].map((player) => playerWire(player, seqOf(player.id)))
   }
 
   function liveDrones(room: Room): DroneWire[] {
@@ -364,10 +378,11 @@ export function createRooms(options: RoomsOptions): Rooms {
       counters: new Map(),
       malformed: 0,
       dropped: 0,
+      lastSeq: 0,
     })
 
     const player = room.state.players.get(address)
-    if (player) room.sent.set(address, signature(playerWire(player)))
+    if (player) room.sent.set(address, signature(playerWire(player, 0)))
 
     broadcast(room, { t: 'event', kind: 'join', player: address }, address)
     log('a player joined', { address, room: room.id })
@@ -493,6 +508,13 @@ export function createRooms(options: RoomsOptions): Rooms {
     if (!player) return
 
     if (body.t === 'move') {
+      // A client that has not been told its move landed sends it again, so the same input can
+      // arrive twice and out of order. Anything not newer than the last applied move is an
+      // old intent and taking it would drag the player backwards.
+      if (body.seq !== undefined) {
+        if (body.seq <= connection.lastSeq) return
+        connection.lastSeq = body.seq
+      }
       room.state = applyMove(room.state, address, { dx: body.dx, dz: body.dz, yaw: body.yaw }, now)
       return
     }
@@ -532,7 +554,7 @@ export function createRooms(options: RoomsOptions): Rooms {
 
         const players: PlayerWire[] = []
         for (const player of room.state.players.values()) {
-          const wire = playerWire(player)
+          const wire = playerWire(player, seqOf(player.id))
           const mark = signature(wire)
           if (full || room.sent.get(player.id) !== mark) players.push(wire)
           room.sent.set(player.id, mark)

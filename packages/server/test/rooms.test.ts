@@ -261,6 +261,52 @@ describe('the tick', () => {
   })
 })
 
+describe('the move number the server has applied', () => {
+  /** The seq of every player named in a frame, by wallet. */
+  function seqIn(frame: Frame | undefined): Record<string, number> {
+    const players = (frame?.['players'] ?? []) as { id: string; seq: number }[]
+    return Object.fromEntries(players.map((player) => [player.id, player.seq]))
+  }
+
+  it('names the move it applied for the player who sent it', () => {
+    const socket = fakeSocket()
+    rooms.join(ADDRESS, STARTING_GEAR, socket)
+
+    rooms.handle(ADDRESS, message({ t: 'move', seq: 7, dx: 0, dz: 1, yaw: 0 }))
+    ticks(1)
+
+    expect(seqIn(socket.of('state')[0])).toEqual({ [ADDRESS]: 7 })
+  })
+
+  it('ignores a move that is not newer than the last one it applied', () => {
+    const socket = fakeSocket()
+    rooms.join(ADDRESS, STARTING_GEAR, socket)
+
+    rooms.handle(ADDRESS, message({ t: 'move', seq: 5, dx: 0, dz: 1, yaw: 0 }))
+    rooms.handle(ADDRESS, message({ t: 'move', seq: 5, dx: 1, dz: 0, yaw: 2 }))
+    rooms.handle(ADDRESS, message({ t: 'move', seq: 4, dx: 1, dz: 0, yaw: 2 }))
+    ticks(1)
+
+    const player = rooms.roomFor(ADDRESS)?.state.players.get(ADDRESS)
+    expect(player?.intent).toEqual({ dx: 0, dz: 1, yaw: 0 })
+    expect(player?.x).toBeCloseTo(map.spawn.x, 6)
+    expect(seqIn(socket.of('state')[0])).toEqual({ [ADDRESS]: 5 })
+  })
+
+  it('reports the seq of a move that went nowhere, and keeps it through the full list', () => {
+    const mine = fakeSocket()
+    const theirs = fakeSocket()
+    rooms.join(ADDRESS, STARTING_GEAR, mine)
+    rooms.join(OTHER, STARTING_GEAR, theirs)
+
+    rooms.handle(ADDRESS, message({ t: 'move', seq: 9, dx: 0, dz: 0, yaw: 0 }))
+    ticks(FULL_STATE_EVERY)
+
+    expect(seqIn(mine.of('state')[0])).toEqual({ [ADDRESS]: 9 })
+    expect(seqIn(mine.of('state').at(-1))).toEqual({ [ADDRESS]: 9, [OTHER]: 0 })
+  })
+})
+
 describe('what a connection may send', () => {
   it('drops the moves past twenty in one second and keeps the twentieth', () => {
     const socket = fakeSocket()

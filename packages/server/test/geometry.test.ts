@@ -76,7 +76,8 @@ describe('segmentHitsBox', () => {
 describe('rayConeNearest', () => {
   const origin = { x: 0, y: 1.6, z: 0 }
   const forward = { x: 0, y: 0, z: 1 }
-  const cone = (6 * Math.PI) / 180
+  // The same half angle the simulation aims with, so the numbers here mean something.
+  const cone = (12 * Math.PI) / 180
 
   it('takes the nearest target inside the cone', () => {
     const far = { id: 'far', x: 0, y: 1.6, z: 30 }

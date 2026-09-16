@@ -116,7 +116,8 @@ Tick: 50 ms. Units: metres, seconds, radians.
   is kept.
 - Fire intent `{ yaw, pitch }`: at most 4 per second (mk1) or 6 (mk2). Hitscan from the
   player's server position at eye height along the aim direction, range 60 m, with aim
-  assist: the nearest live drone within a 6 degree cone counts as hit. Hit costs one hp.
+  assist: the nearest live drone within a 12 degree cone counts as hit (a phone thumb
+  cannot hold a narrower one). Hit costs one hp.
   The player with the most damage on a drone gets the kill.
 - Every function takes state in and returns new state plus a list of events:
   `hit`, `kill`, `downed`, `respawn`, `pickup`, `deliver`, `landmark`, `spawn`.
@@ -140,7 +141,10 @@ Tick: 50 ms. Units: metres, seconds, radians.
 - Server to client:
   - `{ t: 'welcome', you, room, tick, mapVersion, players, drones, quests }` on join.
   - `{ t: 'state', tick, players: [changed only], drones: [all live], bolts: [all] }`
-    every tick, players only when moved, a full players list every 40 ticks.
+    every tick, players only when moved, a full players list every 40 ticks. Each player
+    entry carries `seq`, the highest `move` sequence number the server has applied for
+    that player (0 before any), so the client can rewind to the server's position and
+    replay only the inputs the server has not seen yet.
   - sim events (`hit`, `kill`, `downed`, `respawn`, `spawn`, `pickup`, `deliver`,
     `landmark`) ride on the `state` frame as `events: [{ kind, ... }]`.
   - `{ t: 'event', kind, ... }` only for the per-player and roster kinds: `quest`

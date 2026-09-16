@@ -143,7 +143,10 @@ describe('the welcome', () => {
     const welcome = client.frames.find((frame) => frame.t === 'welcome')
     expect(welcome).toMatchObject({ v: 1, you: address, room: 'r1', mapVersion: map.version })
     expect(welcome?.['drones']).toHaveLength(6)
-    expect((welcome?.['players'] as unknown[]).length).toBe(1)
+    const joinedPlayers = welcome?.['players'] as { seq: number }[]
+    expect(joinedPlayers).toHaveLength(1)
+    // Nothing has been sent yet, so the client has no input of its own to replay.
+    expect(joinedPlayers[0]?.seq).toBe(0)
 
     const questKinds = (welcome?.['quests'] as { kind: string }[]).map((quest) => quest.kind)
     expect(questKinds.sort()).toEqual(['courier', 'hunt', 'landmarks', 'streak'])
@@ -189,7 +192,7 @@ describe('moving', () => {
     const { address, client } = await joinWorld()
 
     for (let n = 0; n < MESSAGE_LIMITS.move; n += 1) {
-      client.send({ t: 'move', seq: n, dx: 0, dz: 1, yaw: 1 })
+      client.send({ t: 'move', seq: n + 1, dx: 0, dz: 1, yaw: 1 })
     }
     for (let n = 0; n < 10; n += 1) {
       client.send({ t: 'move', seq: 100 + n, dx: 0, dz: 1, yaw: 2 })

@@ -41,7 +41,12 @@ const SHIELD_REGEN_MS = 8000
 const FIRE_WINDOW_MS = 1000
 const FIRE_PER_SECOND = { mk1: 4, mk2: 6 } as const
 const HITSCAN_RANGE = 60
-const AIM_CONE = (6 * Math.PI) / 180
+/**
+ * The half angle of the aim assist cone: a drone is counted when the aim is within this of
+ * it. A thumb on glass cannot hold a narrow line, and at 468 ms of lag the drone has moved
+ * by the time the shot arrives, so the cone is wide on purpose.
+ */
+const AIM_CONE = (12 * Math.PI) / 180
 
 const DRONE_HP = 3
 const DRONE_SPEED = 3
@@ -306,7 +311,7 @@ function damageDrone(
  * nothing and reports nothing.
  *
  * The shot is a hitscan from the player's eye out to 60 m, with aim assist: the nearest live
- * drone inside a 6 degree cone around the aim takes one point of damage. A drone with a
+ * drone inside a 12 degree cone around the aim takes one point of damage. A drone with a
  * building between it and the player is skipped, and the next one in the cone is tried, so
  * aim assist can never shoot somebody through a wall.
  */

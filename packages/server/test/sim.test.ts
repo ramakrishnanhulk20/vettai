@@ -295,6 +295,28 @@ describe('shooting', () => {
     expect(mustDrone(shot.room, 'd1').hp).toBe(3)
   })
 
+  it('reaches a drone nine degrees off the aim and gives up at fourteen', () => {
+    const room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    // At eye height and with no buildings anywhere, the angle off the aim is exactly the yaw,
+    // so this measures the assist cone and nothing else.
+    const level = {
+      ...droneNear(mustPlayer(room, 'p1'), 0),
+      x: OPEN_GROUND.x,
+      y: 1.6,
+      z: OPEN_GROUND.z + 10,
+    }
+    const open = mapWith([])
+    const offBy = (degrees: number) => ({ yaw: (degrees * Math.PI) / 180, pitch: 0 })
+
+    const near = applyFire(withDrone(room, level), 'p1', offBy(9), START, open)
+    expect(near.events.map((event) => event.kind)).toEqual(['hit'])
+    expect(mustDrone(near.room, 'd1').hp).toBe(2)
+
+    const wide = applyFire(withDrone(room, level), 'p1', offBy(14), START, open)
+    expect(wide.events).toHaveLength(0)
+    expect(mustDrone(wide.room, 'd1').hp).toBe(3)
+  })
+
   it('gives the kill to the player who did the most damage', () => {
     let room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
     room = addPlayer(room, 'p2', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
@@ -358,7 +380,7 @@ describe('shooting', () => {
 describe('walls', () => {
   const PILLAR = tower({ minX: -0.4, maxX: 0.4, minZ: 4, maxZ: 4.4 }, 30)
   const GROUND = { x: 0, z: 0 }
-  // Aimed between the two drones below, so both sit inside the six degree assist cone.
+  // Aimed between the two drones below, so both sit inside the twelve degree assist cone.
   const BETWEEN = { yaw: Math.atan2(1.5, 20), pitch: Math.atan2(4.4, Math.hypot(1.5, 20)) }
 
   it('does not let a player shoot a drone hidden behind a tower', () => {
