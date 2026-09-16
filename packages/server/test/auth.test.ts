@@ -227,7 +227,7 @@ describe('the auth routes', () => {
       const health = await app.inject({ method: 'GET', url: '/health' })
 
       expect(health.statusCode).toBe(200)
-      expect(health.json()).toEqual({ ok: true, network: 'TestAlbatross', rooms: 0, online: 0 })
+      expect(health.json()).toEqual({ ok: true, network: 'TestAlbatross', rooms: 0, online: 0, dailyCapNim: expect.any(String) })
     } finally {
       await app.close()
     }

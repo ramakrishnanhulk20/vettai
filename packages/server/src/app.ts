@@ -99,7 +99,13 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
 
   app.get('/health', () => {
     const live = world.rooms?.snapshot() ?? { rooms: 0, online: 0 }
-    return { ok: true, network: config.NIMIQ_NETWORK, rooms: live.rooms, online: live.online }
+    return {
+      ok: true,
+      network: config.NIMIQ_NETWORK,
+      rooms: live.rooms,
+      online: live.online,
+      dailyCapNim: config.DAILY_CAP_NIM,
+    }
   })
 
   registerAuthRoutes(app, deps)

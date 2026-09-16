@@ -261,7 +261,8 @@ row.
   claims paid count, and `history`: the last seven UTC days from `stats_daily` (players,
   kills, paid luna as a string). The landing page reads this and nothing else.
 - `GET /api/ladder/week`: top 10 this week by kills with addresses shortened.
-- `GET /health`: `{ ok, network, room count, players online }`.
+- `GET /health`: `{ ok, network, rooms, online, dailyCapNim }`; the client reads the cap to
+  show what is still payable today.
 
 ## Trust rules
 
