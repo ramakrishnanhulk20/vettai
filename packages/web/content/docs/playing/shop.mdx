@@ -11,11 +11,11 @@ decides whether that payment counts.
 
 | Item | Price | What it changes |
 |---|---|---|
-| Blaster MK2 | 1 NIM | six shots a second instead of four |
+| Blaster MK2 | 0.6 NIM | six shots a second instead of four |
 | Sprint boots | 0.8 NIM | 7 m/s instead of 6 |
-| Neon skin | 0.5 NIM | how your player looks |
-| Carbon skin | 0.5 NIM | how your player looks |
-| Sand skin | 0.5 NIM | how your player looks |
+| Neon skin | 0.4 NIM | how your player looks |
+| Carbon skin | 0.4 NIM | how your player looks |
+| Sand skin | 0.4 NIM | how your player looks |
 
 The price is the server's, not a number your phone sends. A client that asks to pay less is
 refused when the payment is inspected, not when the order is made.
@@ -59,6 +59,6 @@ transaction hash is the primary key and a repeat insert keeps the first decision
 Money that arrived is money that arrived. A refusal is something a person can settle by hand,
 because the row is still there.
 
-The prove-it run pays a real 1 NIM shop order on testnet and, in the same pass, sends 0.01
+The prove-it run pays a real 0.6 NIM shop order on testnet and, in the same pass, sends 0.01
 NIM from the wrong wallet against a different order and shows it left pending. See
 [check 10](/docs/trust/proof).

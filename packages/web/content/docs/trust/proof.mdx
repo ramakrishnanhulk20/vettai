@@ -58,35 +58,36 @@ three.
 This is the file as it was written, not a summary of it.
 
 ```
-vettai prove-it, 2026-09-15T17:38:26.321Z
-world http://127.0.0.1:57728, database pglite in memory, node https://rpc.testnet.nimiqwatch.com
+vettai prove-it, 2026-09-16T12:39:04.425Z
+world http://127.0.0.1:57099, database pglite in memory, node https://rpc.testnet.nimiqwatch.com
 caps for this run: daily 0.6 NIM, pool 1.2 NIM, 2 wallets per IP per day
 
- 1/12  PASS  the node and the treasury are the ones we say they are: TestAlbatross at block 11529205, key derives NQ92YGUBVUV9LX6H36G033C1081VTMDD9152, balance 24.44 NIM
- 2/12  PASS  a wallet signs in and the server reads its address off the key: NQ18K52A22YAG4RKM5DHYTG2QY6BVTFL8DXM signed in, /api/me agrees, nothing named an address but the key
+ 1/12  PASS  the node and the treasury are the ones we say they are: TestAlbatross at block 11598689, key derives NQ92YGUBVUV9LX6H36G033C1081VTMDD9152, balance 19.07 NIM
+ 2/12  PASS  a wallet signs in and the server reads its address off the key: NQ03EN6YK5MEHGURXNC98G3GTGAJBMTVSUEV signed in, /api/me agrees, nothing named an address but the key
  3/12  PASS  a forged signature and a replayed challenge are both refused: forged signature 401 "signature does not match message", replayed challenge 401 "nonce used"
- 4/12  PASS  a scripted wallet plays the real world until the hunt quest is done: 5 kills in 59s through the socket, reward 0.5 NIM
- 5/12  PASS  the hunt claim is signed once, and a replay or another wallet is refused: queued with memo vettai:47b3e391, replay 409 "already claimed", another wallet 404
-     sent claim=a30a8872-bd79-44a5-9e29-ac29dc767852 to=NQ18K52A22YAG4RKM5DHYTG2QY6BVTFL8DXM hash=30785646bc2adc59a299622193175f9b9f47295259977a0b635ca0e86965a2ec
-     paid claim=a30a8872-bd79-44a5-9e29-ac29dc767852 hash=30785646bc2adc59a299622193175f9b9f47295259977a0b635ca0e86965a2ec block=11529267
- 6/12  PASS  the treasury pays it on chain and the payment carries the quest id: 0.5 NIM to NQ18K52A22YAG4RKM5DHYTG2QY6BVTFL8DXM, memo "vettai:47b3e391", hash 30785646bc2adc59a299622193175f9b9f47295259977a0b635ca0e86965a2ec, block 11529267
+ 4/12  PASS  a scripted wallet plays the real world until the hunt quest is done: 5 kills in 19s through the socket, reward 0.5 NIM
+ 5/12  PASS  the hunt claim is signed once, and a replay or another wallet is refused: queued with memo vettai:035a98cb, replay 409 "already claimed", another wallet 404
+     sent claim=bcd243c1-9c16-4ea2-a10c-948e0c045173 to=NQ03EN6YK5MEHGURXNC98G3GTGAJBMTVSUEV hash=eda94221aea512261739002eac94d119bad46fee901c8dee4f05715c33761a89
+     paid claim=bcd243c1-9c16-4ea2-a10c-948e0c045173 hash=eda94221aea512261739002eac94d119bad46fee901c8dee4f05715c33761a89 block=11598713
+ 6/12  PASS  the treasury pays it on chain and the payment carries the quest id: 0.5 NIM to NQ03EN6YK5MEHGURXNC98G3GTGAJBMTVSUEV, memo "vettai:035a98cb", hash eda94221aea512261739002eac94d119bad46fee901c8dee4f05715c33761a89, block 11598713
  7/12  PASS  the daily cap holds the claim that would cross it: 0.5 NIM already committed today, 0.2 NIM more crosses the 0.6 NIM cap, landmarks and streak both held for "daily cap"
  8/12  PASS  the third wallet claiming from one address is held: wallets 1 and 2 from 127.0.0.1 were queued, 2 distinct wallets had claimed, wallets 3 and 4 held for "ip cap"
  9/12  PASS  the pool stops the claim that would spend past it: 0.7 NIM + 0.2 NIM -> queued, 0.9 NIM + 0.2 NIM -> queued, 1.1 NIM + 0.2 NIM -> held; 1.3 NIM is past the 1.2 NIM pool
-     skipped hash=94022bece1e565ccb4d697ff4ee2742efd987b4f960804e0e57aee751e1a27da block=11529412: sender mismatch
-     shop order 9424bc45-baa6-4343-a89f-ad05b6e18d77 paid with blaster-mk2 hash=f3ad731ec242f59b18d6f163fb97d1f408b0b1fe227597c4b912d62ae70f6020 block=11529412
-10/12  PASS  a real shop payment grants the gear and a short one from another wallet does not: paid 1 NIM with memo vettai:shop:9424bc45, hash f3ad731ec242f59b18d6f163fb97d1f408b0b1fe227597c4b912d62ae70f6020, gear now mk2; 0.01 NIM from the wrong wallet on vettai:shop:8bafc3fe left the order pending
-11/12  PASS  the socket refuses a flood, a long move vector and nonsense frames: 30 moves in a second: 10 dropped and 5.95 m covered, under the 6 m/s cap; dx 50 stored as a unit vector; 20 fire frames gave 4 accepted shots on an mk1; three bad frames closed the socket with 1008
-     still pending claim=64c96af3-9fb0-4e77-9021-8c1480ea369b hash=42ae52d7893a97cd4f9e78678ee644822224856c301dbc53b3f2c64b8e0d6c1a
-     sent claim=0d797310-5da0-49c7-acb6-a5d76686dbf0 to=NQ49SY5GYSHSSDG1SGS38P41V0CJ9VS176HA hash=3ee56ffa38b38643565a48849502dc20063141d1179ea4ffc05ab4e832859126
-     sent claim=fe764978-2870-42a8-8077-98a1e0be3c74 to=NQ818XFTH2J89T9QNBAUCSEUFTGHUY5X1T7K hash=eeb3e24dbc0cf5ac501c753f8d7919b5a6e0e57533ac3a6c7aff7ec9aea1cedf
-     paid claim=0d797310-5da0-49c7-acb6-a5d76686dbf0 hash=3ee56ffa38b38643565a48849502dc20063141d1179ea4ffc05ab4e832859126 block=11529418
-     paid claim=fe764978-2870-42a8-8077-98a1e0be3c74 hash=eeb3e24dbc0cf5ac501c753f8d7919b5a6e0e57533ac3a6c7aff7ec9aea1cedf block=11529420
+     shop order b5dca953-b06f-43a4-89cb-065d21b8bcea paid with blaster-mk2 hash=84f96c0098166717387b1e24275ad5b586a7396d4791295f284c051fabdc3015 block=11598787
+     skipped hash=c736e0c04f22916fcc87baa2d1678e2e5d8f8ffd88b05e71902b591fb099bfcc block=11598788: sender mismatch
+10/12  PASS  a real shop payment grants the gear and a short one from another wallet does not: paid 0.6 NIM with memo vettai:shop:b5dca953, hash 84f96c0098166717387b1e24275ad5b586a7396d4791295f284c051fabdc3015, gear now mk2; 0.01 NIM from the wrong wallet on vettai:shop:c0107617 left the order pending
+11/12  PASS  the socket refuses a flood, a long move vector and nonsense frames: 40 moves in a second: 10 dropped and 5.99 m covered, under the 6 m/s cap; dx 50 stored as a unit vector; 20 fire frames gave 4 accepted shots on an mk1; three bad frames closed the socket with 1008
+     still pending claim=b0fe9301-3606-442d-9396-d67db8857395 hash=569354bd431f2e1cae76dcd9c8d1689f479418106ade4610eda09d306d2718c2
+     sent claim=23322ba4-5c2d-484c-952c-f52091feb55c to=NQ75N8DCMRFP6QDDJDTQ17TERV4Y6P862840 hash=4617b411755ba750371737bb483f5befc2005ed4da56025590eb98c1a34b6a1c
+     sent claim=8c2113ae-804d-42ef-be65-dbf8d3d22611 to=NQ0520FVBUVK6J7TJGYPR661LVS2GEXT2XPK hash=793c192e75758f74e8ee2f8e95d2b77d8edf951bc072e9ac5fd15d627bfefbe3
+     paid claim=23322ba4-5c2d-484c-952c-f52091feb55c hash=4617b411755ba750371737bb483f5befc2005ed4da56025590eb98c1a34b6a1c block=11598796
+     paid claim=8c2113ae-804d-42ef-be65-dbf8d3d22611 hash=793c192e75758f74e8ee2f8e95d2b77d8edf951bc072e9ac5fd15d627bfefbe3 block=11598798
 12/12  PASS  a payout that already has a hash is looked up, never sent again: 2 payout(s) left in this pass; the claim holding a made up hash stayed "sending" and was not signed again; the treasury fell by 0.4 NIM, exactly the confirmed payouts of this pass
 
+treasury NQ92YGUBVUV9LX6H36G033C1081VTMDD9152 now holds 17.28 NIM
+
 12/12 passed
-treasury NQ92YGUBVUV9LX6H36G033C1081VTMDD9152 now holds 23.05 NIM
-finished in 234s
+finished in 129s
 ```
 
 Every run is saved under `docs/proofs/` in the repository, so the numbers above can be

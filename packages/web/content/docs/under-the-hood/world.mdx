@@ -45,16 +45,20 @@ shield. Quest progress is kept.
 A drone has 3 hit points and three states: patrol, engage, dead.
 
 - Patrol: 3 m/s along its waypoint loop.
-- Engage: a player inside 25 metres pulls it in. It circles that player at 12 metres and
-  fires a bolt every 2 seconds.
-- A room holds at most 6 live drones, with one respawn every 20 seconds at a random point on
+- Engage: a player inside 25 metres pulls it in, and so does any player who shoots it from
+  as far as 60 metres; it then holds that target for at least 6 seconds. It circles the
+  player at 12 metres and fires a bolt every 2 seconds.
+- The 10 metres around the office is a safe zone: no drone targets or fires at a player
+  there, and a bolt that crosses into it dies. You can still shoot out of it.
+- A room holds at most 12 live drones, with one respawn every 15 seconds at a random point on
   a loop.
 
 ## Bolts
 
-A bolt is a position and a velocity with an owner and a birth time. It flies at 12 m/s in a
-straight line toward where its target was when it was fired, and it dies after 3 seconds or
-on impact. Impact is a sphere against a capsule of radius 0.5 and height 1.8, tested against
+A bolt is a position and a velocity with an owner and a birth time. It flies at 18 m/s in a
+straight line toward where its target will be, leading a walking player by their current
+speed over the flight time, and it dies after 3 seconds or on impact. Changing direction
+after the shot still dodges it. Impact is a sphere against a capsule of radius 0.5 and height 1.8, tested against
 each player. Bolts do not hit other players' bodies as damage: there is no player versus
 player.
 
@@ -62,7 +66,7 @@ player.
 
 A fire intent is a heading and a pitch, at most 4 a second on the MK1 blaster or 6 on the
 MK2. The shot is hitscan from the server's copy of your position at eye height, along the
-aim direction, out to 60 metres, with aim assist: the nearest live drone inside a 6 degree
+aim direction, out to 60 metres, with aim assist: the nearest live drone inside a 12 degree
 cone counts as hit. A hit costs one hit point, and the player with the most damage on a
 drone gets the kill.
 
