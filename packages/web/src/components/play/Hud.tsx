@@ -8,6 +8,10 @@ import styles from "./play.module.css";
  * Everything drawn over the city: what the player has left, what the day asks of them,
  * where they are aiming and what just happened. Nothing here is decided on the phone. The
  * shield, the quest numbers and the events all come off the socket.
+ *
+ * The one thing drawn ahead of the server is the shot: the tracer in the scene and the
+ * kick on this crosshair happen on the trigger pull, because half a second of waiting for
+ * a hit to come back reads as a broken button. What was actually hit still comes back.
  */
 
 export type Toast = { id: string; text: string };
@@ -18,6 +22,8 @@ export type HudProps = {
   toasts: Toast[];
   latency: number | null;
   aimHot: boolean;
+  /** The moment of the last shot this phone drew, which kicks the crosshair. */
+  firedAt: number;
   prompt: { text: string } | null;
   onInteract: () => void;
   /** The quest strip and the Board button both lead to the same place. */
@@ -59,6 +65,7 @@ export default function Hud({
   toasts,
   latency,
   aimHot,
+  firedAt,
   prompt,
   onInteract,
   onOpenBoard,
@@ -151,6 +158,11 @@ export default function Hud({
         {latency !== null && (
           <span className="mt-1 font-mono text-[10px] text-paper/30">{latency} ms</span>
         )}
+        {latency !== null && latency > 250 && (
+          <span className="font-mono text-[10px] text-paper/30" data-testid="far-note">
+            far from the server
+          </span>
+        )}
       </button>
 
       <div className="pointer-events-none absolute inset-x-0 top-[max(5.5rem,calc(env(safe-area-inset-top)+5rem))] flex flex-col items-center gap-2">
@@ -172,9 +184,13 @@ export default function Hud({
 
       {!sheetOpen && (
         <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-          <Crosshair hot={aimHot} reduced={reduced} />
+          <Crosshair hot={aimHot} firedAt={firedAt} reduced={reduced} />
         </div>
       )}
+
+      <AnimatePresence>
+        {aimHot && !sheetOpen && <AimRing key="aim-ring" reduced={reduced} />}
+      </AnimatePresence>
 
       <AnimatePresence>
         {prompt && !sheetOpen && (
@@ -237,14 +253,69 @@ export default function Hud({
         }`}
         style={{ touchAction: "none" }}
       >
+        {firedAt > 0 && (
+          <motion.span
+            key={firedAt}
+            aria-hidden
+            initial={{ opacity: reduced ? 0 : 0.85, scale: 1 }}
+            animate={{ opacity: 0, scale: 1.45 }}
+            transition={{ duration: reduced ? 0 : 0.25, ease: "easeOut" }}
+            className="absolute inset-0 rounded-full border-2 border-hunt"
+          />
+        )}
         Fire
       </motion.button>
     </div>
   );
 }
 
+/**
+ * The ring around the drone a tap would shoot, parked on the screen position the world
+ * publishes as CSS variables every frame. Reading them here means the aim can follow a
+ * moving drone without React rendering a single extra time.
+ */
+function AimRing({ reduced }: { reduced: boolean }) {
+  return (
+    <div
+      aria-hidden
+      data-testid="aim-ring"
+      className="absolute left-0 top-0"
+      style={{
+        width: "var(--aim-size, 56px)",
+        height: "var(--aim-size, 56px)",
+        opacity: "var(--aim-on, 0)",
+        transform:
+          "translate3d(calc(var(--aim-x, -400px) - 50%), calc(var(--aim-y, -400px) - 50%), 0)",
+        willChange: "transform",
+      }}
+    >
+      <motion.div
+        initial={{ opacity: 0, scale: 1.45 }}
+        animate={{ opacity: 1, scale: 1, rotate: reduced ? 0 : 90 }}
+        exit={{ opacity: 0, scale: 0.8 }}
+        transition={{
+          opacity: { duration: reduced ? 0 : 0.18 },
+          scale: { duration: reduced ? 0 : 0.22, ease: "easeOut" },
+          rotate: { duration: reduced ? 0 : 9, ease: "linear", repeat: Infinity },
+        }}
+        className="relative h-full w-full"
+      >
+        <span className="absolute inset-0 rounded-full border border-hunt/45" />
+        {[
+          "left-0 top-0 border-l-2 border-t-2",
+          "right-0 top-0 border-r-2 border-t-2",
+          "bottom-0 left-0 border-b-2 border-l-2",
+          "bottom-0 right-0 border-b-2 border-r-2",
+        ].map((corner) => (
+          <span key={corner} className={`absolute h-3 w-3 border-hunt ${corner}`} />
+        ))}
+      </motion.div>
+    </div>
+  );
+}
+
 /** Four ticks and a dot. It goes accent when a drone is inside the cone the server counts. */
-function Crosshair({ hot, reduced }: { hot: boolean; reduced: boolean }) {
+function Crosshair({ hot, firedAt, reduced }: { hot: boolean; firedAt: number; reduced: boolean }) {
   const colour = hot ? "var(--hunt)" : "rgba(243,239,231,0.55)";
   const arm = "absolute bg-current";
 
@@ -255,6 +326,17 @@ function Crosshair({ hot, reduced }: { hot: boolean; reduced: boolean }) {
       className="relative h-6 w-6"
       style={{ color: colour }}
     >
+      {firedAt > 0 && (
+        <motion.span
+          key={firedAt}
+          aria-hidden
+          data-testid="shot-kick"
+          initial={{ opacity: reduced ? 0 : 1, scale: 0.35 }}
+          animate={{ opacity: 0, scale: 2.1 }}
+          transition={{ duration: reduced ? 0 : 0.2, ease: "easeOut" }}
+          className="absolute inset-0 rounded-full border border-hunt"
+        />
+      )}
       <span className={`${arm} left-1/2 top-0 h-1.5 w-px -translate-x-1/2`} />
       <span className={`${arm} bottom-0 left-1/2 h-1.5 w-px -translate-x-1/2`} />
       <span className={`${arm} left-0 top-1/2 h-px w-1.5 -translate-y-1/2`} />

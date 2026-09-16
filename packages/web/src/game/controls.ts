@@ -17,8 +17,12 @@ const PITCH_PER_SCREEN = 1.2;
 const PITCH_MIN = -0.35;
 const PITCH_MAX = 0.6;
 
-/** Twenty move intents a second, which is exactly what the socket budget allows. */
-const MOVE_EVERY_MS = 50;
+/**
+ * The socket budget is twenty move intents a second. Sending a little under that leaves
+ * room for timer jitter, and it keeps every intent short enough that the replay in
+ * world.ts can reproduce it in one step.
+ */
+const MOVE_EVERY_MS = 55;
 
 /** A move intent is resent this often even when nothing changed, so the server never ages it out. */
 const KEEPALIVE_MS = 500;
@@ -30,9 +34,12 @@ const ACCENT = "#ff6a2b";
 
 export type MoveIntent = { dx: number; dz: number; yaw: number };
 
+/** A move intent with the number the server will echo back once it has applied it. */
+export type SentMove = MoveIntent & { seq: number };
+
 export type ControlsOptions = {
   surface: HTMLElement;
-  onMove: (intent: MoveIntent) => void;
+  onMove: (move: SentMove) => void;
   onFire: (yaw: number, pitch: number) => void;
   /** Milliseconds between shots while the trigger is held, read from the player's gear. */
   fireIntervalMs: () => number;
@@ -42,8 +49,6 @@ export type ControlsOptions = {
 export type Controls = {
   /** Where the player is looking, read by the camera and the crosshair every frame. */
   look: () => { yaw: number; pitch: number };
-  /** The direction to predict this frame's step in, already a unit vector or zero. */
-  intent: () => MoveIntent;
   /** Binds the HUD's fire button, so the repeat while held lives in one place. */
   attachFire: (button: HTMLElement) => () => void;
   dispose: () => void;
@@ -109,6 +114,7 @@ export function createControls(options: ControlsOptions): Controls {
 
   let lastSent: MoveIntent = { dx: 0, dz: 0, yaw: 0 };
   let lastSentAt = 0;
+  let sequence = 0;
 
   function paintStick(): void {
     if (!stick) {
@@ -168,15 +174,21 @@ export function createControls(options: ControlsOptions): Controls {
   const mover = setInterval(() => {
     const now = performance.now();
     const next = intent();
+    const still = next.dx === 0 && next.dz === 0;
     const same =
       Math.abs(next.dx - lastSent.dx) < 0.01 &&
       Math.abs(next.dz - lastSent.dz) < 0.01 &&
       Math.abs(next.yaw - lastSent.yaw) < 0.01;
-    if (same && now - lastSentAt < KEEPALIVE_MS) return;
+
+    // A pushed stick goes out every tick even when the direction has not changed. The
+    // server keeps applying the last intent it holds, so one intent left standing for
+    // half a second is half a second the client cannot replay accurately.
+    if (still && same && now - lastSentAt < KEEPALIVE_MS) return;
 
     lastSent = next;
     lastSentAt = now;
-    options.onMove(next);
+    sequence += 1;
+    options.onMove({ seq: sequence, ...next });
   }, MOVE_EVERY_MS);
 
   function shoot(): void {
@@ -306,7 +318,6 @@ export function createControls(options: ControlsOptions): Controls {
 
   return {
     look: () => ({ yaw, pitch }),
-    intent,
 
     attachFire(button: HTMLElement) {
       const down = (event: PointerEvent) => {

@@ -3,7 +3,8 @@ import type { BoltWire, DroneWire, PlayerWire, StateFrame, TickEvent, WelcomeFra
 import type { Gear } from "@/lib/api";
 import { createCameraRig, type Blocker } from "./camera";
 import type { Box, WorldMap } from "./map";
-import { rayConeNearest, slideAgainstBoxes } from "./slide";
+import { segmentHitsBox, slideAgainstBoxes } from "./slide";
+import type { SentMove } from "./controls";
 import type { CityAssets } from "./scene/assets";
 import { buildCity, disposeCity, lampSpots } from "./scene/city";
 import { createCharacter, type Character } from "./scene/character";
@@ -17,9 +18,14 @@ import { scenePixelRatio } from "./scene/pixelRatio";
  * The server is the authority, so everything here is a reading of frames that already
  * happened: other players and the drones are drawn 100 ms behind the clock, between the
  * last two positions the server sent, which is what makes them glide instead of stutter.
- * The player's own body is the exception. It is stepped from the thumb at the speed the
- * server uses, with the same wall sliding, and pulled back toward the server's answer
- * every frame, so walking feels instant and still ends up where the server says.
+ *
+ * The player's own body is the exception, and at half a second of round trip it is the
+ * whole game. Every move intent that goes out is kept with the time it covered. When a
+ * frame comes back the server position is taken as truth, the intents the server has
+ * already applied are dropped, and the rest are replayed from that position with the
+ * same speed and the same wall sliding. The drawn body eases onto that answer instead of
+ * onto the raw server position, which is what stops the walk pulling backwards: the
+ * server's answer is half a second old, the replayed one is now.
  */
 
 /** How far behind the newest frame everything remote is drawn. Two ticks of headroom. */
@@ -30,15 +36,48 @@ const WALK_SPEED = 6;
 const SPRINT_SPEED = 7;
 const EYE_HEIGHT = 1.6;
 
-/** Share of the gap to the server's position closed each frame. */
-const RECONCILE = 0.2;
+/** Share of the gap to the replayed position closed each frame. */
+const SMOOTHING = 0.3;
 
-/** Further out than this and the walk is a lost cause: the body is put where the server says. */
-const SNAP_METRES = 3;
+/**
+ * The server applies an intent on its next tick and reports on a tick, so its answer for
+ * "now" swings by up to two ticks of walking however good the replay is. Chasing that
+ * swing is itself a pull-back, so a gap this small is left alone and only what is beyond
+ * it, a wall or a rule the client got wrong, moves the body.
+ */
+const JITTER_METRES = 0.4;
 
-/** The aim assist cone on the server, drawn here only to tell the player it is on them. */
-const AIM_CONE = (6 * Math.PI) / 180;
+/**
+ * The most the body is moved by a correction in one frame. A walk step is about a tenth
+ * of a metre, so anything under this cannot be seen as a jump: a real disagreement is
+ * walked off over a few frames instead of snatched back in one.
+ */
+const CORRECTION_CAP = 0.15;
+
+/** Further out than this and the walk is a lost cause: the body is put where the replay says. */
+const SNAP_METRES = 2;
+
+/** A replayed intent is walked in steps no longer than this, as the server's tick does. */
+const STEP_CAP = 0.1;
+
+/** More than a couple of seconds of unapplied intents means the socket is gone anyway. */
+const PENDING_MAX = 64;
+
+/**
+ * How far off the camera a drone may sit and still be the one a tap shoots. The server
+ * counts a 12 degree cone; a thumb on a moving phone cannot hold even that, so the client
+ * points the shot at the drone and the server gets an aim it will accept.
+ */
+const ASSIST_CONE = (20 * Math.PI) / 180;
 const HITSCAN_RANGE = 60;
+
+/** Milliseconds between shots the simulation accepts, mirrored here for the local tracer. */
+const FIRE_EVERY_MS: Record<string, number> = { mk1: 250, mk2: 167 };
+
+const TRACER_MS = 80;
+const MUZZLE_FORWARD = 0.8;
+const MUZZLE_SIDE = 0.55;
+const MUZZLE_HEIGHT = 1.05;
 
 const INTERACT_RANGE = 2.4;
 
@@ -70,7 +109,6 @@ export type WorldOptions = {
   assets: CityAssets;
   you: string;
   reduced: boolean;
-  readIntent: () => { dx: number; dz: number; yaw: number };
   readLook: () => { yaw: number; pitch: number };
   /** Fires only when the answer changes, so the HUD never re-renders per frame. */
   onAim: (hot: boolean) => void;
@@ -84,14 +122,30 @@ export type World = {
   state: (frame: StateFrame) => void;
   leave: (playerId: string) => void;
   setGear: (gear: Gear) => void;
+  /** Keeps a move intent that has just gone out, so the reply can be replayed against it. */
+  noteMove: (move: SentMove) => void;
+  /**
+   * Draws the shot on this phone at once and answers with the aim to send: the drone the
+   * player is pointing near, or the camera's own aim when there is none.
+   */
+  fire: (yaw: number, pitch: number) => { yaw: number; pitch: number };
   /** Draws one frame. `now` is a performance clock reading in milliseconds. */
   frame: (now: number) => void;
   resize: () => void;
   /** Called when the page comes back from hidden, so one long gap is not stepped through. */
   resume: (now: number) => void;
   place: () => Place;
-  /** What the last frame cost, for the performance check on a phone. */
-  stats: () => { calls: number; triangles: number };
+  /**
+   * What the last frame cost, for the performance check on a phone, and how far the last
+   * frames had to move the body to agree with the server, which is the number that says
+   * whether the walk is pulling backwards.
+   */
+  stats: () => {
+    calls: number;
+    triangles: number;
+    correction: number;
+    maxCorrection: number;
+  };
   dispose: () => void;
 };
 
@@ -112,6 +166,9 @@ type DroneView = {
   hp: number;
   flashUntil: number;
 };
+
+/** A drone the thumb is near enough to, with the aim that points straight at it. */
+type Shot = { yaw: number; pitch: number; at: THREE.Vector3; distance: number };
 
 type Wreck = { group: THREE.Group; started: number; fromY: number };
 
@@ -195,6 +252,41 @@ export function createWorld(options: WorldOptions): World {
     toneMapped: false,
   });
 
+  // One beam and one spark of light, reused for every shot: a tracer allocated per trigger
+  // pull would have the garbage collector running during a firefight. A drawn line would
+  // be one pixel wide whatever the screen, which is nothing at arm's length on a phone,
+  // so the tracer is a thin tapered tube that is scaled to the shot.
+  const tracerGeometry = new THREE.CylinderGeometry(0.02, 0.06, 1, 6, 1, true);
+  tracerGeometry.translate(0, 0.5, 0);
+  const tracerMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffc27a,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+    toneMapped: false,
+  });
+  const tracer = new THREE.Mesh(tracerGeometry, tracerMaterial);
+  tracer.frustumCulled = false;
+  tracer.visible = false;
+  scene.add(tracer);
+
+  const muzzleGeometry = new THREE.SphereGeometry(0.2, 8, 6);
+  const muzzleMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffe0b0,
+    transparent: true,
+    depthWrite: false,
+    // The camera sits behind the player's own shoulder, so a depth tested flash spends
+    // most of its eighty milliseconds hidden inside the back of the character's head.
+    depthTest: false,
+    blending: THREE.AdditiveBlending,
+    toneMapped: false,
+  });
+  const muzzle = new THREE.Mesh(muzzleGeometry, muzzleMaterial);
+  muzzle.renderOrder = 2;
+  muzzle.visible = false;
+  scene.add(muzzle);
+
   const players = new Map<string, RemotePlayer>();
   const drones = new Map<string, DroneView>();
   const bolts = new Map<string, { mesh: THREE.Mesh; track: Track; seenAt: number }>();
@@ -206,12 +298,26 @@ export function createWorld(options: WorldOptions): World {
   let marker: THREE.Mesh | null = null;
   let gear: Gear = { blaster: "mk1", skin: "default", sprint: false };
   let predicted: Place = { x: map.spawn.x, z: map.spawn.z };
-  let serverPlace: Place = { x: map.spawn.x, z: map.spawn.z };
+  /** The same walk, run from the newest server position with the intents it has not seen. */
+  let truth: Place = { x: map.spawn.x, z: map.spawn.z };
+  const pending: (SentMove & { at: number })[] = [];
+  /**
+   * The body walks the intents that were sent, not the thumb as it is right now. The
+   * server walks exactly these, so the two agree at the start and the end of a walk
+   * instead of disagreeing by one sample, which is the jolt a phone feels as a pull-back.
+   */
+  let applied: { dx: number; dz: number } = { dx: 0, dz: 0 };
   let shield = 3;
   let downed = false;
   let lastFrameAt = 0;
   let aimHot = false;
   let promptNow: Prompt | null = null;
+  let lastCorrection = 0;
+  let maxCorrection = 0;
+  let firedAt = 0;
+  let shotFresh = false;
+  const shotEnd = new THREE.Vector3();
+  let ringShown = false;
 
   function characterFor(skin: string): Character {
     const character = createCharacter(skin);
@@ -235,7 +341,7 @@ export function createWorld(options: WorldOptions): World {
 
   function trackPlayer(wire: PlayerWire, at: number): void {
     if (wire.id === you) {
-      serverPlace = { x: wire.x, z: wire.z };
+      reconcile(wire);
       if (wire.shield !== shield) {
         const hurt = wire.shield < shield;
         shield = wire.shield;
@@ -353,7 +459,8 @@ export function createWorld(options: WorldOptions): World {
     }
     if (event.kind === "respawn" && event.player === you) {
       predicted = { x: event.x, z: event.z };
-      serverPlace = { x: event.x, z: event.z };
+      truth = { x: event.x, z: event.z };
+      pending.length = 0;
       rig.snap();
       options.onEvent({ kind: "respawn" });
     }
@@ -390,31 +497,75 @@ export function createWorld(options: WorldOptions): World {
     return true;
   }
 
-  function stepLocal(dt: number, look: { yaw: number; pitch: number }): number {
-    const intent = options.readIntent();
+  /** One walk the way the server walks it: its speed, in slices, sliding along the walls. */
+  function stepAlong(from: Place, dx: number, dz: number, seconds: number): Place {
+    if (downed || seconds <= 0 || (dx === 0 && dz === 0)) return from;
+
     const speed = gear.sprint ? SPRINT_SPEED : WALK_SPEED;
-    let travelled = 0;
-
-    if (!downed && (intent.dx !== 0 || intent.dz !== 0)) {
-      const clamp = (value: number) => (value < -limit ? -limit : value > limit ? limit : value);
+    const clamp = (value: number) => (value < -limit ? -limit : value > limit ? limit : value);
+    let place = from;
+    let left = Math.min(seconds, 2);
+    while (left > 0) {
+      const slice = Math.min(left, STEP_CAP);
+      left -= slice;
       const wanted = {
-        x: clamp(predicted.x + intent.dx * speed * dt),
-        z: clamp(predicted.z + intent.dz * speed * dt),
+        x: clamp(place.x + dx * speed * slice),
+        z: clamp(place.z + dz * speed * slice),
       };
-      const moved = slideAgainstBoxes(predicted, wanted, PLAYER_RADIUS, boxes);
-      travelled = Math.hypot(moved.x - predicted.x, moved.z - predicted.z);
-      predicted = moved;
+      place = slideAgainstBoxes(place, wanted, PLAYER_RADIUS, boxes);
     }
+    return place;
+  }
 
-    const drift = Math.hypot(serverPlace.x - predicted.x, serverPlace.z - predicted.z);
-    if (drift > SNAP_METRES) {
-      predicted = { x: serverPlace.x, z: serverPlace.z };
-    } else if (drift > 0.001) {
-      predicted = {
-        x: predicted.x + (serverPlace.x - predicted.x) * RECONCILE,
-        z: predicted.z + (serverPlace.z - predicted.z) * RECONCILE,
-      };
+  /**
+   * The server's answer for this player turned into a position for now: rewind to where it
+   * says the body is, drop the intents it has already applied, and walk the rest again.
+   * A frame without `seq` comes from a server that does not echo yet, and is read as
+   * "everything applied", which is the behaviour this replaced.
+   */
+  function reconcile(wire: PlayerWire): void {
+    const applied = typeof wire.seq === "number" ? wire.seq : Number.POSITIVE_INFINITY;
+    while (pending.length > 0 && (pending[0] as SentMove).seq <= applied) pending.shift();
+
+    const until = lastFrameAt > 0 ? lastFrameAt : performance.now();
+    let place: Place = { x: wire.x, z: wire.z };
+    for (let index = 0; index < pending.length; index++) {
+      const move = pending[index] as SentMove & { at: number };
+      const after = pending[index + 1] as (SentMove & { at: number }) | undefined;
+      const ends = Math.min(after === undefined ? until : after.at, until);
+      place = stepAlong(place, move.dx, move.dz, (ends - move.at) / 1000);
     }
+    truth = place;
+  }
+
+  function stepLocal(dt: number, look: { yaw: number; pitch: number }): number {
+    const walked = stepAlong(predicted, applied.dx, applied.dz, dt);
+    const travelled = Math.hypot(walked.x - predicted.x, walked.z - predicted.z);
+    predicted = walked;
+
+    // The replayed body takes the same step in the same frame, so the gap between the two
+    // only ever closes. Easing toward a position that stands still is what used to drag
+    // the player backwards on a slow connection.
+    truth = stepAlong(truth, applied.dx, applied.dz, dt);
+
+    const gap = Math.hypot(truth.x - predicted.x, truth.z - predicted.z);
+    const real = gap - JITTER_METRES;
+    if (gap > SNAP_METRES) {
+      lastCorrection = gap;
+      predicted = { x: truth.x, z: truth.z };
+    } else if (real > 0) {
+      const wanted = real * SMOOTHING;
+      const step = Math.min(wanted, CORRECTION_CAP);
+      const share = step / gap;
+      lastCorrection = step;
+      predicted = {
+        x: predicted.x + (truth.x - predicted.x) * share,
+        z: predicted.z + (truth.z - predicted.z) * share,
+      };
+    } else {
+      lastCorrection = 0;
+    }
+    if (lastCorrection > maxCorrection) maxCorrection = lastCorrection;
 
     if (me) {
       me.group.position.set(predicted.x, 0, predicted.z);
@@ -427,21 +578,123 @@ export function createWorld(options: WorldOptions): World {
     return travelled;
   }
 
-  /** True when a live drone is inside the same cone the server would count as a hit. */
-  function aimingAtDrone(look: { yaw: number; pitch: number }): boolean {
-    const flat = Math.cos(look.pitch);
-    const dir = {
-      x: Math.sin(look.yaw) * flat,
-      y: Math.sin(look.pitch),
-      z: Math.cos(look.yaw) * flat,
-    };
-    const eye = { x: predicted.x, y: EYE_HEIGHT, z: predicted.z };
-    const targets: { x: number; y: number; z: number }[] = [];
-    for (const drone of drones.values()) {
-      const at = drone.group.position;
-      targets.push({ x: at.x, y: at.y, z: at.z });
+  const eye = new THREE.Vector3();
+  const ndc = new THREE.Vector3();
+  const muzzleAt = new THREE.Vector3();
+  const along = new THREE.Vector3();
+  const UP = new THREE.Vector3(0, 1, 0);
+
+  /** True when a building stands between the player's eye and the drone, as on the server. */
+  function behindWall(from: THREE.Vector3, to: THREE.Vector3): boolean {
+    for (const building of blockers) {
+      if (segmentHitsBox(from, to, building.aabb, 0, building.height)) return true;
     }
-    return rayConeNearest(eye, dir, AIM_CONE, HITSCAN_RANGE, targets) !== null;
+    return false;
+  }
+
+  /**
+   * The drone a tap would shoot: the nearest live one inside the thumb cone with nothing
+   * in the way. The aim that comes back points at its centre, well inside the cone the
+   * server counts, so pointing roughly at a drone is enough.
+   */
+  function assist(look: { yaw: number; pitch: number }): Shot | null {
+    eye.set(predicted.x, EYE_HEIGHT, predicted.z);
+
+    let best: Shot | null = null;
+    for (const drone of drones.values()) {
+      if (drone.hp <= 0) continue;
+      const at = drone.group.position;
+      const dx = at.x - eye.x;
+      const dy = at.y - eye.y;
+      const dz = at.z - eye.z;
+      const flat = Math.hypot(dx, dz);
+      const distance = Math.hypot(dx, dy, dz);
+      if (distance > HITSCAN_RANGE || flat < 0.001) continue;
+
+      let off = Math.atan2(dx, dz) - look.yaw;
+      while (off > Math.PI) off -= Math.PI * 2;
+      while (off < -Math.PI) off += Math.PI * 2;
+      if (Math.abs(off) > ASSIST_CONE) continue;
+      if (best !== null && distance >= best.distance) continue;
+      if (behindWall(eye, at)) continue;
+
+      best = { yaw: Math.atan2(dx, dz), pitch: Math.atan2(dy, flat), at, distance };
+    }
+    return best;
+  }
+
+  /**
+   * The ring over that drone, published as CSS variables rather than as React state: the
+   * HUD reads them in its own style, so nothing re-renders sixty times a second.
+   */
+  function paintRing(shot: Shot | null): void {
+    const root = document.documentElement;
+    const hide = () => {
+      if (!ringShown) return;
+      root.style.setProperty("--aim-on", "0");
+      ringShown = false;
+    };
+    if (!shot) return hide();
+
+    ndc.copy(shot.at).project(camera);
+    if (ndc.z > 1) return hide();
+
+    const width = canvas.clientWidth || window.innerWidth;
+    const height = canvas.clientHeight || window.innerHeight;
+    const perMetre = height / 2 / Math.max(1, shot.distance * Math.tan((camera.fov * Math.PI) / 360));
+    const size = Math.max(34, Math.min(140, perMetre * 2.6));
+
+    root.style.setProperty("--aim-x", `${((ndc.x * 0.5 + 0.5) * width).toFixed(1)}px`);
+    root.style.setProperty("--aim-y", `${((0.5 - ndc.y * 0.5) * height).toFixed(1)}px`);
+    root.style.setProperty("--aim-size", `${size.toFixed(1)}px`);
+    if (ringShown) return;
+    root.style.setProperty("--aim-on", "1");
+    ringShown = true;
+  }
+
+  /** The shot this phone draws the instant the trigger is pulled, before the server answers. */
+  function drawShot(yaw: number, pitch: number, distance: number): void {
+    const flat = Math.cos(pitch);
+    along.set(Math.sin(yaw) * flat, Math.sin(pitch), Math.cos(yaw) * flat);
+    // Minus the yaw's cosine puts the blaster on the side of the body the camera sees as
+    // the right hand, rather than hiding it behind the player's back.
+    muzzleAt.set(
+      predicted.x + along.x * MUZZLE_FORWARD - Math.cos(yaw) * MUZZLE_SIDE,
+      MUZZLE_HEIGHT,
+      predicted.z + along.z * MUZZLE_FORWARD + Math.sin(yaw) * MUZZLE_SIDE,
+    );
+
+    tracer.position.copy(muzzleAt);
+    tracer.quaternion.setFromUnitVectors(UP, along);
+    tracer.scale.set(1, Math.max(1, distance), 1);
+    tracerMaterial.opacity = 1;
+    tracer.visible = true;
+    shotFresh = true;
+
+    muzzleMaterial.opacity = 1;
+    muzzle.position.copy(muzzleAt);
+    muzzle.scale.setScalar(1.7);
+    muzzle.visible = true;
+  }
+
+  function fadeShot(now: number): void {
+    if (!tracer.visible) return;
+    // A phone dropping to thirty frames a second would otherwise draw the whole tracer
+    // half faded, so the first frame after the trigger always gets it at full strength.
+    if (shotFresh) {
+      shotFresh = false;
+      return;
+    }
+    const age = now - firedAt;
+    if (age >= TRACER_MS) {
+      tracer.visible = false;
+      muzzle.visible = false;
+      return;
+    }
+    const left = 1 - age / TRACER_MS;
+    tracerMaterial.opacity = left;
+    muzzleMaterial.opacity = left;
+    muzzle.scale.setScalar(0.6 + left * 1.1);
   }
 
   function drawRemotes(renderAt: number, dt: number, now: number): void {
@@ -544,7 +797,9 @@ export function createWorld(options: WorldOptions): World {
       const mine = frame.players.find((wire) => wire.id === you);
       if (mine) {
         predicted = { x: mine.x, z: mine.z };
-        serverPlace = { x: mine.x, z: mine.z };
+        truth = { x: mine.x, z: mine.z };
+        pending.length = 0;
+        applied = { dx: 0, dz: 0 };
         gear = mine.gear;
         shield = mine.shield;
         options.onShield(shield);
@@ -596,6 +851,28 @@ export function createWorld(options: WorldOptions): World {
       wearSkin(next.skin);
     },
 
+    noteMove(move) {
+      applied = { dx: move.dx, dz: move.dz };
+      pending.push({ ...move, at: performance.now() });
+      if (pending.length > PENDING_MAX) pending.shift();
+    },
+
+    fire(yaw, pitch) {
+      const shot = assist({ yaw, pitch });
+      const aim = shot === null ? { yaw, pitch } : { yaw: shot.yaw, pitch: shot.pitch };
+
+      // The trigger already holds to the gear's rate; this keeps the tracer honest even if
+      // a second caller ever pulls it, so the screen never shows a shot the server refused.
+      const now = performance.now();
+      const gap = FIRE_EVERY_MS[gear.blaster] ?? 250;
+      if (now - firedAt >= gap - 4) {
+        firedAt = now;
+        drawShot(aim.yaw, aim.pitch, shot === null ? HITSCAN_RANGE : shot.distance);
+        if (typeof navigator.vibrate === "function") navigator.vibrate(10);
+      }
+      return aim;
+    },
+
     frame(now) {
       const dt = lastFrameAt === 0 ? 0.016 : Math.min(0.1, (now - lastFrameAt) / 1000);
       lastFrameAt = now;
@@ -607,7 +884,11 @@ export function createWorld(options: WorldOptions): World {
       rig.update(camera, predicted, look.yaw, look.pitch, blockers, dt);
       lampGlow.update(lamps, predicted.x, predicted.z);
 
-      const hot = aimingAtDrone(look);
+      const shot = assist(look);
+      paintRing(shot);
+      fadeShot(now);
+
+      const hot = shot !== null;
       if (hot !== aimHot) {
         aimHot = hot;
         options.onAim(hot);
@@ -633,6 +914,8 @@ export function createWorld(options: WorldOptions): World {
     stats: () => ({
       calls: renderer.info.render.calls,
       triangles: renderer.info.render.triangles,
+      correction: lastCorrection,
+      maxCorrection,
     }),
 
     dispose() {
@@ -667,6 +950,15 @@ export function createWorld(options: WorldOptions): World {
         (marker.material as THREE.Material).dispose();
         marker = null;
       }
+      scene.remove(tracer);
+      tracerGeometry.dispose();
+      tracerMaterial.dispose();
+      scene.remove(muzzle);
+      muzzleGeometry.dispose();
+      muzzleMaterial.dispose();
+      document.documentElement.style.setProperty("--aim-on", "0");
+      ringShown = false;
+
       disposeDrones();
       lampGlow.dispose();
       disposeCity(city, assets);

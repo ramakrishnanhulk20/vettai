@@ -80,7 +80,7 @@ describe('aimAt', () => {
     const aim = aimAt(EYE, target)
     const wanted = { x: target.x - EYE.x, y: target.y - EYE.y, z: target.z - EYE.z }
 
-    // The simulation counts a hit inside six degrees; this has to be a direct hit, not a
+    // The simulation counts a hit inside the aim cone; this has to be a direct hit, not a
     // shot that only just scrapes in, or a drone that moved would be missed.
     expect(angleBetween(aimVector(aim.yaw, aim.pitch), wanted)).toBeLessThan(1e-9)
   })

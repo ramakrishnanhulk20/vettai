@@ -75,6 +75,12 @@ Files: `src/world/tickets.ts`, `src/routes/ws.ts`, `src/world/rooms.ts`, `src/wo
   simulation integrates at a fixed 6 m/s (7 with the sprint gear) and slides the body along
   building footprints, and `MAX_STEP_SECONDS` caps a long tick so nobody crosses a wall in
   one jump.
+- **Replaying an old move.** Every `move` carries a sequence number the client counts up.
+  `handle` in `src/world/rooms.ts` keeps the last applied number per connection and
+  ignores any move whose number is not greater, so a captured frame sent again does
+  nothing. The server echoes the applied number in each state entry (`seq`), which is
+  what lets the phone replay only its unacknowledged inputs instead of trusting a stale
+  position.
 - **Machine-gun fire.** `applyFire` keeps a sliding one second window of accepted shots and
   refuses anything past four (six with the mk2), so no second anywhere on the clock can hold
   more. The socket's own budget of 8 sits above it on purpose: the budget stops a client

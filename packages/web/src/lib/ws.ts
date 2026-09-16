@@ -18,6 +18,12 @@ export type PlayerWire = {
   shield: number;
   downed: boolean;
   gear: Gear;
+  /**
+   * The highest `move` sequence number the server has applied for this player, 0 before
+   * any. The client rewinds to `x, z` and replays only the intents above this. A frame
+   * without it comes from a server that does not echo yet, and is read as "all applied".
+   */
+  seq?: number;
 };
 
 export type DroneWire = {

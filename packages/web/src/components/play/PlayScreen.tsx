@@ -40,6 +40,7 @@ type Phase =
   | { name: "connecting" }
   | { name: "playing" }
   | { name: "reconnecting" }
+  | { name: "resigning" }
   | { name: "error"; title: string; body: string };
 
 const PROVIDER_WAIT_MS = 15_000;
@@ -91,6 +92,7 @@ export default function PlayScreen() {
   const [quests, setQuests] = useState<QuestView[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [aimHot, setAimHot] = useState(false);
+  const [firedAt, setFiredAt] = useState(0);
   const [prompt, setPrompt] = useState<Prompt | null>(null);
   const [latency, setLatency] = useState<number | null>(null);
   const [hitAt, setHitAt] = useState(0);
@@ -133,7 +135,10 @@ export default function PlayScreen() {
     setAttempt((count) => count + 1);
   }, []);
 
-  const playing = phase.name === "playing" || phase.name === "reconnecting";
+  // Reconnecting and signing back in both keep the city on screen with a line across the
+  // top: dropping the player back to a loading screen loses where they were standing.
+  const playing =
+    phase.name === "playing" || phase.name === "reconnecting" || phase.name === "resigning";
 
   /**
    * The signature moment. A payout that landed is announced wherever the player is
@@ -280,13 +285,6 @@ export default function PlayScreen() {
         assets,
         you: session.address,
         reduced: Boolean(reduced),
-        // A panel is up: the body stands still rather than walking on under the sheet,
-        // while the camera keeps the look it had.
-        readIntent: () => {
-          const look = controlsRef.current?.look().yaw ?? 0;
-          if (sheetRef.current) return { dx: 0, dz: 0, yaw: look };
-          return controlsRef.current?.intent() ?? { dx: 0, dz: 0, yaw: 0 };
-        },
         readLook: () => controlsRef.current?.look() ?? { yaw: 0, pitch: 0 },
         onAim: setAimHot,
         onPrompt: (next) => {
@@ -304,13 +302,20 @@ export default function PlayScreen() {
 
       const controls = createControls({
         surface,
-        onMove: (intent) => {
-          const stopped = { t: "move" as const, dx: 0, dz: 0, yaw: intent.yaw };
-          connectionRef.current?.send(sheetRef.current ? stopped : { t: "move", ...intent });
+        onMove: (move) => {
+          // A panel is up: the body stands still rather than walking on under the sheet,
+          // and the world steps what was sent, so zeroing it here stops both at once.
+          const sent = sheetRef.current ? { ...move, dx: 0, dz: 0 } : move;
+          // The world keeps what went out so the server's reply can be replayed against
+          // it, and it only keeps what was really sent, not what the thumb asked for.
+          worldRef.current?.noteMove(sent);
+          connectionRef.current?.send({ t: "move", ...sent });
         },
         onFire: (yaw, pitch) => {
           if (sheetRef.current) return;
-          connectionRef.current?.send({ t: "fire", yaw, pitch });
+          const shot = worldRef.current?.fire(yaw, pitch) ?? { yaw, pitch };
+          setFiredAt(Date.now());
+          connectionRef.current?.send({ t: "fire", yaw: shot.yaw, pitch: shot.pitch });
         },
         fireIntervalMs: () => FIRE_INTERVAL[gearRef.current.blaster] ?? FIRE_INTERVAL.mk1,
         onFirstStick: () => {
@@ -368,75 +373,118 @@ export default function PlayScreen() {
         return fail("The world server would not let us in", `${ticket.error} Tap below to try again.`);
       }
 
+      let resigning = false;
+
+      /**
+       * A ticket refused with 401 clears the token, so an empty session on a dropped
+       * socket means the sign in expired rather than the network dying. Retrying that
+       * forever gets nowhere: one signature puts the player back in the same city.
+       */
+      async function signBackIn(): Promise<void> {
+        if (resigning) return;
+        resigning = true;
+        setPhase({ name: "resigning" });
+        connectionRef.current?.close();
+        connectionRef.current = null;
+
+        try {
+          await login();
+        } catch (error) {
+          resigning = false;
+          if (!alive) return;
+          if (isUserRejection(error)) return setPhase({ name: "cancelled" });
+          return fail(
+            "That sign in did not go through",
+            error instanceof Error ? error.message : "The wallet did not answer. Try again.",
+          );
+        }
+        if (!alive) return;
+
+        const again = await getTicket();
+        resigning = false;
+        if (!alive) return;
+        if (!again.ok) {
+          return fail("The world server would not let us in", `${again.error} Tap below to try again.`);
+        }
+
+        const back = connectWorld(again.data.ticket);
+        connectionRef.current = back;
+        attach(back);
+      }
+
+      function attach(connection: WorldConnection): void {
+        connection.on("welcome", (frame) => {
+          world.welcome(frame);
+          questsRef.current = frame.quests;
+          setQuests(frame.quests);
+          setPhase({ name: "playing" });
+        });
+
+        let spoke = 0;
+        connection.on("state", (frame) => {
+          world.state(frame);
+          if (process.env.NODE_ENV === "production") return;
+          // One line a second while developing: enough to see the room ticking, not enough
+          // to drown the console at twenty frames a second.
+          const now = Date.now();
+          if (now - spoke < 1000) return;
+          spoke = now;
+          const at = world.place();
+          console.info(
+            `[vettai] state tick=${frame.tick} players=${frame.players.length} drones=${frame.drones.length} at=${at.x.toFixed(1)},${at.z.toFixed(1)}`,
+          );
+        });
+
+        connection.on("event", (frame) => {
+          if (frame.kind === "quest") {
+            const next = [
+              ...questsRef.current.filter((quest) => quest.id !== frame.quest.id),
+              frame.quest,
+            ].sort((a, b) => a.kind.localeCompare(b.kind));
+            questsRef.current = next;
+            setQuests(next);
+
+            const name = questLabel(frame.quest.kind);
+            if (frame.quest.state === "done") toast(`${name} complete. Claim at the office`);
+            else toast(`${name} ${frame.quest.progress}/${frame.quest.target}`);
+            return;
+          }
+          if (frame.kind === "gear") {
+            gearRef.current = frame.gear;
+            setGear(frame.gear);
+            world.setGear(frame.gear);
+            toast(`Gear equipped: ${frame.item}`);
+            return;
+          }
+          if (frame.kind === "interact") {
+            // The server has just confirmed the player really is standing at the door, so
+            // the panel opens on its word rather than on the phone's guess.
+            if (frame.target === "office") openSheet("board");
+            if (frame.target === "shop") openSheet("shop");
+            return;
+          }
+          if (frame.kind === "leave") {
+            world.leave(frame.player);
+            return;
+          }
+          if (frame.kind === "error") {
+            const line = refusalText(frame.code);
+            if (line) toast(line);
+          }
+        });
+
+        connection.on("close", (frame) => {
+          if (!alive || !frame.willRetry) return;
+          if (readSession() === null) return void signBackIn();
+          setPhase({ name: "reconnecting" });
+        });
+      }
+
       const connection = connectWorld(ticket.data.ticket);
       connectionRef.current = connection;
+      attach(connection);
 
-      connection.on("welcome", (frame) => {
-        world.welcome(frame);
-        questsRef.current = frame.quests;
-        setQuests(frame.quests);
-        setPhase({ name: "playing" });
-      });
-
-      let spoke = 0;
-      connection.on("state", (frame) => {
-        world.state(frame);
-        if (process.env.NODE_ENV === "production") return;
-        // One line a second while developing: enough to see the room ticking, not enough
-        // to drown the console at twenty frames a second.
-        const now = Date.now();
-        if (now - spoke < 1000) return;
-        spoke = now;
-        const at = world.place();
-        console.info(
-          `[vettai] state tick=${frame.tick} players=${frame.players.length} drones=${frame.drones.length} at=${at.x.toFixed(1)},${at.z.toFixed(1)}`,
-        );
-      });
-
-      connection.on("event", (frame) => {
-        if (frame.kind === "quest") {
-          const next = [
-            ...questsRef.current.filter((quest) => quest.id !== frame.quest.id),
-            frame.quest,
-          ].sort((a, b) => a.kind.localeCompare(b.kind));
-          questsRef.current = next;
-          setQuests(next);
-
-          const name = questLabel(frame.quest.kind);
-          if (frame.quest.state === "done") toast(`${name} complete. Claim at the office`);
-          else toast(`${name} ${frame.quest.progress}/${frame.quest.target}`);
-          return;
-        }
-        if (frame.kind === "gear") {
-          gearRef.current = frame.gear;
-          setGear(frame.gear);
-          world.setGear(frame.gear);
-          toast(`Gear equipped: ${frame.item}`);
-          return;
-        }
-        if (frame.kind === "interact") {
-          // The server has just confirmed the player really is standing at the door, so
-          // the panel opens on its word rather than on the phone's guess.
-          if (frame.target === "office") openSheet("board");
-          if (frame.target === "shop") openSheet("shop");
-          return;
-        }
-        if (frame.kind === "leave") {
-          world.leave(frame.player);
-          return;
-        }
-        if (frame.kind === "error") {
-          const line = refusalText(frame.code);
-          if (line) toast(line);
-        }
-      });
-
-      connection.on("close", (frame) => {
-        if (!alive || !frame.willRetry) return;
-        setPhase({ name: "reconnecting" });
-      });
-
-      const pinged = setInterval(() => setLatency(connection.latency()), 2000);
+      const pinged = setInterval(() => setLatency(connectionRef.current?.latency() ?? null), 2000);
 
       return () => {
         clearInterval(pinged);
@@ -513,6 +561,7 @@ export default function PlayScreen() {
           toasts={toasts}
           latency={latency}
           aimHot={aimHot}
+          firedAt={firedAt}
           prompt={promptLabel(prompt, quests)}
           onInteract={interact}
           onOpenBoard={() => openSheet("board")}
@@ -561,16 +610,21 @@ export default function PlayScreen() {
       </AnimatePresence>
 
       <AnimatePresence>
-        {phase.name === "reconnecting" && (
+        {(phase.name === "reconnecting" || phase.name === "resigning") && (
           <motion.div
-            key="reconnecting"
+            key={phase.name}
             initial={{ opacity: 0, y: -12 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -12 }}
             className="pointer-events-none absolute inset-x-0 top-0 z-30 flex justify-center pt-3"
           >
-            <span className="label-type rounded-btn border border-hunt/40 bg-night/80 px-3 py-2 text-hunt backdrop-blur">
-              Connection dropped. Getting you back in
+            <span
+              data-testid="link-banner"
+              className="label-type rounded-btn border border-hunt/40 bg-night/80 px-3 py-2 text-hunt backdrop-blur"
+            >
+              {phase.name === "resigning"
+                ? "Signing you back in"
+                : "Connection dropped. Getting you back in"}
             </span>
           </motion.div>
         )}
