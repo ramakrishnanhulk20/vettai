@@ -1,0 +1,17 @@
+/* The game owns the whole viewport: no page scroll, no rubber band, no text selection
+   when a thumb slides across the screen. */
+.stage {
+  position: fixed;
+  inset: 0;
+  touch-action: none;
+  overscroll-behavior: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Grain is a poster effect. It costs a full screen composite every frame, so the live
+   game turns off the layer the rest of the site wears. */
+.stage ~ div :global(.grain-layer) {
+  display: none;
+}

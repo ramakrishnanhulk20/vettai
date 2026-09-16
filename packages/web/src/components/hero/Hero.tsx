@@ -224,8 +224,7 @@ export default function Hero() {
         </div>
       </section>
 
-      {/* The rest of the landing page lands here. The link above already points at it. */}
-      <section id="how" className="h-[45svh] w-full bg-night" />
+      <div id="how" className="h-0 w-full" />
     </>
   );
 }
