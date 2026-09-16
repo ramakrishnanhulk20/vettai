@@ -6,6 +6,12 @@
  *
  * Nothing here decides what happens in the world. It turns gestures into the two intents
  * the server accepts: a direction to walk, and a direction to shoot.
+ *
+ * Every pointer that goes down is given a job and kept in a map by its id. A WebView that
+ * swallows a pointerup, or hands the same id on to a second finger, is why the stick used
+ * to stay lit with the body walking off on its own: only the id that went up is ever
+ * released, and a stick that stops reporting while it still holds a direction is checked
+ * against the browser's own capture and let go.
  */
 
 const STICK_RADIUS = 56;
@@ -17,20 +23,40 @@ const PITCH_PER_SCREEN = 1.2;
 const PITCH_MIN = -0.35;
 const PITCH_MAX = 0.6;
 
+/** A look drag has to travel this far before it turns anything, so a tap is never a turn. */
+const LOOK_DEAD_ZONE = 3;
+
 /**
- * The socket budget is twenty move intents a second. Sending a little under that leaves
- * room for timer jitter, and it keeps every intent short enough that the replay in
- * world.ts can reproduce it in one step.
+ * The most one pointer event may turn the view. A pointer id handed on to a second finger
+ * reports the jump between two thumbs as a single move, and without this the street spins.
  */
-const MOVE_EVERY_MS = 55;
+const MAX_DRAG_PX = 140;
+
+/** How long the published yaw takes to settle onto the raw drag. */
+const YAW_SETTLE_MS = 60;
+
+/**
+ * The socket budget is twenty move intents a second, and timer jitter used to push a
+ * nominal eighteen over it. Sends are counted off their own slot rather than off the
+ * wakeup, so the rate is a hard fifteen a second whatever the timer does, and every
+ * intent stays short enough that the replay in world.ts can reproduce it in one step.
+ */
+const MOVE_EVERY_MS = 70;
+const MOVE_POLL_MS = 20;
 
 /** A move intent is resent this often even when nothing changed, so the server never ages it out. */
 const KEEPALIVE_MS = 500;
+
+/** A stick that holds a direction this long without a single pointermove is suspect. */
+const STALE_STICK_MS = 1500;
+const STALE_POLL_MS = 250;
 
 /** A mouse press that travels further than this was a look, not a shot. */
 const CLICK_SLOP = 4;
 
 const ACCENT = "#ff6a2b";
+
+const dev = process.env.NODE_ENV !== "production";
 
 export type MoveIntent = { dx: number; dz: number; yaw: number };
 
@@ -49,12 +75,29 @@ export type ControlsOptions = {
 export type Controls = {
   /** Where the player is looking, read by the camera and the crosshair every frame. */
   look: () => { yaw: number; pitch: number };
+  /**
+   * The thumb as it is right now, turned into a world direction. The world reads this on
+   * every rendered frame, so the body walks at the refresh rate instead of at the rate
+   * intents go out.
+   */
+  move: () => MoveIntent;
   /** Binds the HUD's fire button, so the repeat while held lives in one place. */
   attachFire: (button: HTMLElement) => () => void;
   dispose: () => void;
 };
 
-type Stick = { pointer: number; originX: number; originY: number; x: number; y: number };
+type Role = "stick" | "look" | "fire";
+
+type Stick = {
+  pointer: number;
+  originX: number;
+  originY: number;
+  x: number;
+  y: number;
+  movedAt: number;
+};
+
+type Look = { pointer: number; x: number; y: number; travelled: number; mouse: boolean };
 
 function ringElement(): HTMLDivElement {
   const ring = document.createElement("div");
@@ -93,6 +136,10 @@ function knobElement(): HTMLDivElement {
   return knob;
 }
 
+function clampDrag(value: number): number {
+  return value > MAX_DRAG_PX ? MAX_DRAG_PX : value < -MAX_DRAG_PX ? -MAX_DRAG_PX : value;
+}
+
 export function createControls(options: ControlsOptions): Controls {
   const { surface } = options;
 
@@ -100,13 +147,18 @@ export function createControls(options: ControlsOptions): Controls {
   const knob = knobElement();
   surface.append(ring, knob);
 
+  /** What each pointer that is down is for. The only thing a release is allowed to read. */
+  const roles = new Map<number, Role>();
+
+  let yawTarget = 0;
   let yaw = 0;
+  let yawAt = 0;
   let pitch = 0.08;
   let stick: Stick | null = null;
+  let look: Look | null = null;
   let firstStickDone = false;
 
   const keys = new Set<string>();
-  let look: { pointer: number; x: number; y: number; travelled: number; mouse: boolean } | null = null;
 
   let firing = false;
   let nextShotAt = 0;
@@ -114,7 +166,20 @@ export function createControls(options: ControlsOptions): Controls {
 
   let lastSent: MoveIntent = { dx: 0, dz: 0, yaw: 0 };
   let lastSentAt = 0;
+  let nextSendAt = 0;
   let sequence = 0;
+
+  /** The published yaw eases onto the drag, which is what takes the step out of a turn. */
+  function settleYaw(): void {
+    const now = performance.now();
+    const dt = yawAt === 0 ? 0 : Math.min(0.1, (now - yawAt) / 1000);
+    yawAt = now;
+    if (dt <= 0) return;
+    let gap = yawTarget - yaw;
+    while (gap > Math.PI) gap -= Math.PI * 2;
+    while (gap < -Math.PI) gap += Math.PI * 2;
+    yaw += gap * (1 - Math.exp((-dt * 1000 * 3) / YAW_SETTLE_MS));
+  }
 
   function paintStick(): void {
     if (!stick) {
@@ -171,8 +236,44 @@ export function createControls(options: ControlsOptions): Controls {
     return { dx: dx / length, dz: dz / length, yaw };
   }
 
+  function dropStick(why: string): void {
+    if (!stick) return;
+    if (dev) console.warn(`[vettai] stick pointer ${stick.pointer} let go: ${why}`);
+    stick = null;
+    paintStick();
+  }
+
+  /** Lets go of one pointer id, and only that id. */
+  function release(pointerId: number): void {
+    roles.delete(pointerId);
+    if (stick && stick.pointer === pointerId) {
+      stick = null;
+      paintStick();
+    }
+    if (look && look.pointer === pointerId) look = null;
+  }
+
+  function stopFiring(): void {
+    firing = false;
+    if (trigger !== null) clearInterval(trigger);
+    trigger = null;
+  }
+
+  function releaseAll(): void {
+    roles.clear();
+    stick = null;
+    look = null;
+    paintStick();
+    keys.clear();
+    stopFiring();
+  }
+
   const mover = setInterval(() => {
     const now = performance.now();
+    if (now < nextSendAt) return;
+    nextSendAt = nextSendAt + MOVE_EVERY_MS;
+    if (nextSendAt < now) nextSendAt = now + MOVE_EVERY_MS;
+
     const next = intent();
     const still = next.dx === 0 && next.dz === 0;
     const same =
@@ -180,7 +281,7 @@ export function createControls(options: ControlsOptions): Controls {
       Math.abs(next.dz - lastSent.dz) < 0.01 &&
       Math.abs(next.yaw - lastSent.yaw) < 0.01;
 
-    // A pushed stick goes out every tick even when the direction has not changed. The
+    // A pushed stick goes out every slot even when the direction has not changed. The
     // server keeps applying the last intent it holds, so one intent left standing for
     // half a second is half a second the client cannot replay accurately.
     if (still && same && now - lastSentAt < KEEPALIVE_MS) return;
@@ -189,12 +290,40 @@ export function createControls(options: ControlsOptions): Controls {
     lastSentAt = now;
     sequence += 1;
     options.onMove({ seq: sequence, ...next });
-  }, MOVE_EVERY_MS);
+  }, MOVE_POLL_MS);
+
+  /**
+   * A stick that has held a direction for a second and a half without one pointermove is
+   * either a thumb resting dead still or a pointer the WebView has quietly thrown away.
+   * The browser's own capture tells the two apart: a real thumb still holds it.
+   */
+  const staleWatch = setInterval(() => {
+    if (!stick) return;
+    const pushed = stickVector();
+    if (pushed.forward === 0 && pushed.right === 0) return;
+    if (performance.now() - stick.movedAt < STALE_STICK_MS) return;
+    if (typeof navigator.maxTouchPoints !== "number") return;
+    if (roles.get(stick.pointer) !== "stick") {
+      dropStick("it is no longer a live pointer");
+      return;
+    }
+
+    let held = true;
+    try {
+      held = surface.hasPointerCapture(stick.pointer);
+    } catch {
+      held = false;
+    }
+    if (held) return;
+    roles.delete(stick.pointer);
+    dropStick("the browser dropped its capture");
+  }, STALE_POLL_MS);
 
   function shoot(): void {
     const now = performance.now();
     if (now < nextShotAt) return;
     nextShotAt = now + options.fireIntervalMs();
+    settleYaw();
     options.onFire(yaw, pitch);
   }
 
@@ -205,12 +334,6 @@ export function createControls(options: ControlsOptions): Controls {
     trigger = setInterval(() => {
       if (firing) shoot();
     }, 40);
-  }
-
-  function stopFiring(): void {
-    firing = false;
-    if (trigger !== null) clearInterval(trigger);
-    trigger = null;
   }
 
   /** Capture keeps a thumb that slides off the element still driving it. */
@@ -225,15 +348,23 @@ export function createControls(options: ControlsOptions): Controls {
   function onPointerDown(event: PointerEvent): void {
     const rect = surface.getBoundingClientRect();
     const left = event.clientX - rect.left < rect.width / 2;
+    const role: Role = left && event.pointerType !== "mouse" ? "stick" : "look";
+
+    // A second finger on the same half does not take the job over: the first one keeps it.
+    if (role === "stick" && stick !== null && stick.pointer !== event.pointerId) return;
+    if (role === "look" && look !== null && look.pointer !== event.pointerId) return;
+
+    roles.set(event.pointerId, role);
     capture(surface, event.pointerId);
 
-    if (left && event.pointerType !== "mouse") {
+    if (role === "stick") {
       stick = {
         pointer: event.pointerId,
         originX: event.clientX,
         originY: event.clientY,
         x: event.clientX,
         y: event.clientY,
+        movedAt: performance.now(),
       };
       if (!firstStickDone) {
         firstStickDone = true;
@@ -253,36 +384,60 @@ export function createControls(options: ControlsOptions): Controls {
   }
 
   function onPointerMove(event: PointerEvent): void {
-    if (stick && event.pointerId === stick.pointer) {
+    const role = roles.get(event.pointerId);
+    if (role === undefined) return;
+
+    if (role === "stick") {
+      if (!stick || stick.pointer !== event.pointerId) return;
       stick.x = event.clientX;
       stick.y = event.clientY;
+      stick.movedAt = performance.now();
       paintStick();
       return;
     }
-    if (!look || event.pointerId !== look.pointer) return;
+    if (role !== "look" || !look || look.pointer !== event.pointerId) return;
 
     const rect = surface.getBoundingClientRect();
-    const dx = event.clientX - look.x;
-    const dy = event.clientY - look.y;
+    const dx = clampDrag(event.clientX - look.x);
+    const dy = clampDrag(event.clientY - look.y);
     look.x = event.clientX;
     look.y = event.clientY;
-    look.travelled += Math.abs(dx) + Math.abs(dy);
+    const before = look.travelled;
+    const size = Math.abs(dx) + Math.abs(dy);
+    look.travelled += size;
+    if (look.travelled < LOOK_DEAD_ZONE) return;
 
-    yaw += (dx / Math.max(1, rect.width)) * TURN_PER_SCREEN;
-    pitch -= (dy / Math.max(1, rect.height)) * PITCH_PER_SCREEN;
+    // Only the part of the first move beyond the dead zone turns the view. Dropping the
+    // whole event instead would throw a fast flick away, since a flick can arrive as one
+    // big pointermove rather than a stream of small ones.
+    let turnX = dx;
+    let turnY = dy;
+    if (before < LOOK_DEAD_ZONE && size > 0) {
+      const share = (look.travelled - LOOK_DEAD_ZONE) / size;
+      turnX = dx * share;
+      turnY = dy * share;
+    }
+
+    yawTarget += (turnX / Math.max(1, rect.width)) * TURN_PER_SCREEN;
+    pitch -= (turnY / Math.max(1, rect.height)) * PITCH_PER_SCREEN;
     pitch = Math.min(PITCH_MAX, Math.max(PITCH_MIN, pitch));
   }
 
   function onPointerUp(event: PointerEvent): void {
-    if (stick && event.pointerId === stick.pointer) {
-      stick = null;
-      paintStick();
-      return;
-    }
-    if (!look || event.pointerId !== look.pointer) return;
-    const tap = look.mouse && look.travelled < CLICK_SLOP;
-    look = null;
+    const role = roles.get(event.pointerId);
+    const tap =
+      role === "look" &&
+      look !== null &&
+      look.pointer === event.pointerId &&
+      look.mouse &&
+      look.travelled < CLICK_SLOP;
+    release(event.pointerId);
     if (tap) shoot();
+  }
+
+  function onLostCapture(event: PointerEvent): void {
+    // A WebView that takes the capture away is not going to send the pointerup either.
+    release(event.pointerId);
   }
 
   function onKeyDown(event: KeyboardEvent): void {
@@ -302,30 +457,46 @@ export function createControls(options: ControlsOptions): Controls {
   }
 
   function onBlur(): void {
-    keys.clear();
-    stopFiring();
-    stick = null;
-    paintStick();
+    releaseAll();
+  }
+
+  function onVisibility(): void {
+    if (document.hidden) releaseAll();
   }
 
   surface.addEventListener("pointerdown", onPointerDown);
   surface.addEventListener("pointermove", onPointerMove);
   surface.addEventListener("pointerup", onPointerUp);
   surface.addEventListener("pointercancel", onPointerUp);
+  surface.addEventListener("lostpointercapture", onLostCapture);
   window.addEventListener("keydown", onKeyDown);
   window.addEventListener("keyup", onKeyUp);
   window.addEventListener("blur", onBlur);
+  window.addEventListener("pagehide", onBlur);
+  document.addEventListener("visibilitychange", onVisibility);
 
   return {
-    look: () => ({ yaw, pitch }),
+    look: () => {
+      settleYaw();
+      return { yaw, pitch };
+    },
+
+    move: () => {
+      settleYaw();
+      return intent();
+    },
 
     attachFire(button: HTMLElement) {
       const down = (event: PointerEvent) => {
         event.preventDefault();
+        roles.set(event.pointerId, "fire");
         capture(button, event.pointerId);
         startFiring();
       };
-      const up = () => stopFiring();
+      const up = (event: PointerEvent) => {
+        roles.delete(event.pointerId);
+        stopFiring();
+      };
 
       button.addEventListener("pointerdown", down);
       button.addEventListener("pointerup", up);
@@ -342,14 +513,18 @@ export function createControls(options: ControlsOptions): Controls {
 
     dispose() {
       clearInterval(mover);
+      clearInterval(staleWatch);
       stopFiring();
       surface.removeEventListener("pointerdown", onPointerDown);
       surface.removeEventListener("pointermove", onPointerMove);
       surface.removeEventListener("pointerup", onPointerUp);
       surface.removeEventListener("pointercancel", onPointerUp);
+      surface.removeEventListener("lostpointercapture", onLostCapture);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
+      window.removeEventListener("pagehide", onBlur);
+      document.removeEventListener("visibilitychange", onVisibility);
       ring.remove();
       knob.remove();
     },

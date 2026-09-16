@@ -17,7 +17,7 @@ import { createControls, type Controls } from "@/game/controls";
 import { loadCityAssets, type CityAssets } from "@/game/scene/assets";
 import { loadCharacters } from "@/game/scene/character";
 import { createWorld, type Prompt, type World } from "@/game/world";
-import Hud, { type Toast } from "./Hud";
+import Hud, { type Panel, type Toast } from "./Hud";
 import Ladder from "./Ladder";
 import QuestBoard from "./QuestBoard";
 import Shop from "./Shop";
@@ -80,6 +80,8 @@ export default function PlayScreen() {
   const promptRef = useRef<Prompt | null>(null);
   /** The game loop reads this every frame, so a panel takes the thumb without a re-render. */
   const sheetRef = useRef(false);
+  /** The last ten round trips, for the jitter line in the readout. */
+  const pongsRef = useRef<number[]>([]);
   const celebrateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const reduced = useReducedMotion();
@@ -286,6 +288,9 @@ export default function PlayScreen() {
         you: session.address,
         reduced: Boolean(reduced),
         readLook: () => controlsRef.current?.look() ?? { yaw: 0, pitch: 0 },
+        // A panel is up: the body stands still rather than walking on under the sheet.
+        readMove: () =>
+          sheetRef.current ? { dx: 0, dz: 0 } : (controlsRef.current?.move() ?? { dx: 0, dz: 0 }),
         onAim: setAimHot,
         onPrompt: (next) => {
           promptRef.current = next;
@@ -304,7 +309,7 @@ export default function PlayScreen() {
         surface,
         onMove: (move) => {
           // A panel is up: the body stands still rather than walking on under the sheet,
-          // and the world steps what was sent, so zeroing it here stops both at once.
+          // and the frame loop zeroes its own walk the same way.
           const sent = sheetRef.current ? { ...move, dx: 0, dz: 0 } : move;
           // The world keeps what went out so the server's reply can be replayed against
           // it, and it only keeps what was really sent, not what the thumb asked for.
@@ -355,8 +360,11 @@ export default function PlayScreen() {
         const debug = window as unknown as { vettaiDebug?: unknown };
         debug.vettaiDebug = {
           stats: () => world.stats(),
+          readout: () => world.readout(),
           place: () => world.place(),
           look: () => controlsRef.current?.look() ?? { yaw: 0, pitch: 0 },
+          move: () => controlsRef.current?.move() ?? { dx: 0, dz: 0 },
+          cameraAt: () => world.cameraAt(),
           heap: () =>
             (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory
               ?.usedJSHeapSize ?? null,
@@ -413,6 +421,13 @@ export default function PlayScreen() {
       }
 
       function attach(connection: WorldConnection): void {
+        connection.on("pong", (frame) => {
+          const round = Date.now() - frame.ts;
+          const seen = pongsRef.current;
+          seen.push(round);
+          if (seen.length > 10) seen.shift();
+        });
+
         connection.on("welcome", (frame) => {
           world.welcome(frame);
           questsRef.current = frame.quests;
@@ -534,6 +549,15 @@ export default function PlayScreen() {
     controlsRef.current?.attachFire(button);
   }, []);
 
+  /** What the readout panel reads while it is open. Nothing here runs on a frame. */
+  const readout = useCallback((): Panel | null => {
+    const world = worldRef.current;
+    if (!world) return null;
+    const seen = pongsRef.current;
+    const jitter = seen.length < 2 ? null : Math.max(...seen) - Math.min(...seen);
+    return { ...world.readout(), latency: connectionRef.current?.latency() ?? null, jitter };
+  }, []);
+
   const deepLink = host ? `https://nimpay.app/miniapps/open/${host}/play` : "";
 
   const copyLink = useCallback(() => {
@@ -573,6 +597,7 @@ export default function PlayScreen() {
           showHint={showHint}
           sheetOpen={sheet !== null}
           reduced={Boolean(reduced)}
+          readout={readout}
         />
       )}
 

@@ -19,13 +19,15 @@ import { scenePixelRatio } from "./scene/pixelRatio";
  * happened: other players and the drones are drawn 100 ms behind the clock, between the
  * last two positions the server sent, which is what makes them glide instead of stutter.
  *
- * The player's own body is the exception, and at half a second of round trip it is the
- * whole game. Every move intent that goes out is kept with the time it covered. When a
- * frame comes back the server position is taken as truth, the intents the server has
- * already applied are dropped, and the rest are replayed from that position with the
- * same speed and the same wall sliding. The drawn body eases onto that answer instead of
- * onto the raw server position, which is what stops the walk pulling backwards: the
- * server's answer is half a second old, the replayed one is now.
+ * The player's own body is the exception, and at a quarter of a second of round trip it
+ * is the whole game. The body is walked from the live thumb on every rendered frame, so
+ * it moves at the refresh rate rather than at the rate intents go out.
+ *
+ * Every move intent that goes out is kept with the span it covered. When a frame comes
+ * back the server position is taken as truth, the intents the server has already applied
+ * are dropped, and the rest are replayed from that position. Whatever the replay
+ * disagrees with is held as an offset on top of the walk and bled off over 200 ms, so a
+ * correction is never a step and never a pull backwards: it only ever slows the walk.
  */
 
 /** How far behind the newest frame everything remote is drawn. Two ticks of headroom. */
@@ -36,23 +38,17 @@ const WALK_SPEED = 6;
 const SPRINT_SPEED = 7;
 const EYE_HEIGHT = 1.6;
 
-/** Share of the gap to the replayed position closed each frame. */
-const SMOOTHING = 0.3;
+/** How long a correction takes to bleed away. Three time constants leaves five percent. */
+const CORRECTION_MS = 200;
 
 /**
- * The server applies an intent on its next tick and reports on a tick, so its answer for
- * "now" swings by up to two ticks of walking however good the replay is. Chasing that
- * swing is itself a pull-back, so a gap this small is left alone and only what is beyond
- * it, a wall or a rule the client got wrong, moves the body.
+ * The share of a frame's walk a correction may eat. The body always keeps most of its
+ * step, so a disagreement slows the walk rather than stopping or reversing it.
  */
-const JITTER_METRES = 0.4;
+const BACK_SHARE = 0.6;
 
-/**
- * The most the body is moved by a correction in one frame. A walk step is about a tenth
- * of a metre, so anything under this cannot be seen as a jump: a real disagreement is
- * walked off over a few frames instead of snatched back in one.
- */
-const CORRECTION_CAP = 0.15;
+/** No frame may move the body further than the walk itself, plus a whisker for rounding. */
+const STEP_MARGIN = 1.08;
 
 /** Further out than this and the walk is a lost cause: the body is put where the replay says. */
 const SNAP_METRES = 2;
@@ -60,8 +56,43 @@ const SNAP_METRES = 2;
 /** A replayed intent is walked in steps no longer than this, as the server's tick does. */
 const STEP_CAP = 0.1;
 
+/** The longest frame the walk is integrated over. A longer gap is a stall, not a stride. */
+const FRAME_CAP = 0.05;
+
 /** More than a couple of seconds of unapplied intents means the socket is gone anyway. */
 const PENDING_MAX = 64;
+
+/**
+ * The floor on how long an unacknowledged intent is kept. Anything older than this, or
+ * older than the link's own round trip with room to spare, is dropped: the server will
+ * never apply a move that late, so replaying it only walks the body somewhere the server
+ * will never agree with.
+ */
+const PENDING_AGE_MS = 600;
+
+/**
+ * How much longer than the measured round trip an intent is kept. Pruning tighter than
+ * the round trip would throw away intents the server is still working through, and each
+ * one thrown away is a metre of walking the replay would then take back off the body.
+ */
+const AGE_SLACK = 1.5;
+
+/** The window the readout averages over. */
+const SAMPLE_MS = 1000;
+
+/**
+ * Frame time that means the phone is struggling, and the time that means it recovered.
+ * This is the gap between frames, not the work inside one: WebGL calls are queued, so the
+ * time spent submitting them says nothing about what the card is doing with them. A
+ * phone that cannot keep up stretches the gap, which is the number the player feels.
+ */
+const SLOW_FRAME_MS = 20;
+const WELL_FRAME_MS = 12;
+const SLOW_FOR_MS = 3000;
+const WELL_FOR_MS = 5000;
+
+/** What the renderer drops to when the phone cannot hold the frame rate. */
+const RELIEF_RATIO = 0.75;
 
 /**
  * How far off the camera a drone may sit and still be the one a tap shoots. The server
@@ -89,6 +120,8 @@ const HIT_FLASH_MS = 140;
 
 const ACCENT = 0xff6a2b;
 
+const dev = process.env.NODE_ENV !== "production";
+
 export type Place = { x: number; z: number };
 
 export type Prompt =
@@ -110,6 +143,8 @@ export type WorldOptions = {
   you: string;
   reduced: boolean;
   readLook: () => { yaw: number; pitch: number };
+  /** The thumb as it is on this frame, already turned into a world direction. */
+  readMove: () => { dx: number; dz: number };
   /** Fires only when the answer changes, so the HUD never re-renders per frame. */
   onAim: (hot: boolean) => void;
   onPrompt: (prompt: Prompt | null) => void;
@@ -145,8 +180,39 @@ export type World = {
     triangles: number;
     correction: number;
     maxCorrection: number;
+    /** The correction still bleeding off the walk, in metres. */
+    offset: number;
+    /** How far the body moved on the last frame, and the worst frame of the last second. */
+    step: number;
+    worstStep: number;
+    stepCap: number;
   };
+  /** Everything the readout panel shows, read on a timer rather than every frame. */
+  readout: () => Readout;
+  /** Where the camera sits, so a test can prove it is not standing inside a building. */
+  cameraAt: () => { x: number; y: number; z: number };
   dispose: () => void;
+};
+
+export type Readout = {
+  fps: number;
+  frameMs: number;
+  /** Time spent drawing the frame, as against the gap between frames. */
+  workMs: number;
+  /** How far the server's answer was from the drawn body, worst of the last second. */
+  errorMetres: number;
+  /** Move intents that went out in the last second. */
+  sendRate: number;
+  calls: number;
+  triangles: number;
+  pixelRatio: number;
+  width: number;
+  height: number;
+  bufferWidth: number;
+  bufferHeight: number;
+  webgl: number;
+  gpu: string;
+  reliefMode: boolean;
 };
 
 type Sample = { t: number; x: number; y: number; z: number; yaw: number };
@@ -221,6 +287,18 @@ export function createWorld(options: WorldOptions): World {
   renderer.setClearColor(NIGHT, 1);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.18;
+
+  /** The card the phone actually draws with, when the browser is willing to name it. */
+  const gpu = ((): string => {
+    try {
+      const gl = renderer.getContext();
+      const info = gl.getExtension("WEBGL_debug_renderer_info");
+      if (info === null) return "not reported";
+      return String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL));
+    } catch {
+      return "not reported";
+    }
+  })();
 
   const scene = new THREE.Scene();
   addNightLights(scene, map.size);
@@ -297,16 +375,16 @@ export function createWorld(options: WorldOptions): World {
   let mySkin = "default";
   let marker: THREE.Mesh | null = null;
   let gear: Gear = { blaster: "mk1", skin: "default", sprint: false };
+  /** The walk the client believes in: the server's last word, plus everything since. */
   let predicted: Place = { x: map.spawn.x, z: map.spawn.z };
-  /** The same walk, run from the newest server position with the intents it has not seen. */
-  let truth: Place = { x: map.spawn.x, z: map.spawn.z };
+  /** What is actually drawn: that walk, plus the correction still bleeding off it. */
+  let body: Place = { x: map.spawn.x, z: map.spawn.z };
+  let offsetX = 0;
+  let offsetZ = 0;
   const pending: (SentMove & { at: number })[] = [];
-  /**
-   * The body walks the intents that were sent, not the thumb as it is right now. The
-   * server walks exactly these, so the two agree at the start and the end of a walk
-   * instead of disagreeing by one sample, which is the jolt a phone feels as a pull-back.
-   */
-  let applied: { dx: number; dz: number } = { dx: 0, dz: 0 };
+  /** The live thumb on the last frame, and the moment it last changed direction. */
+  let heading: { dx: number; dz: number } = { dx: 0, dz: 0 };
+  let headingSince = 0;
   let shield = 3;
   let downed = false;
   let lastFrameAt = 0;
@@ -314,6 +392,19 @@ export function createWorld(options: WorldOptions): World {
   let promptNow: Prompt | null = null;
   let lastCorrection = 0;
   let maxCorrection = 0;
+  let lastStep = 0;
+  let stepCap = 0;
+  /** Rolling windows the readout averages: frame times, render steps, intents, errors. */
+  const frameTimes: { t: number; ms: number }[] = [];
+  const workTimes: { t: number; ms: number }[] = [];
+  const stepSizes: { t: number; step: number }[] = [];
+  const sends: number[] = [];
+  const errors: { t: number; metres: number }[] = [];
+  let slowSince = 0;
+  let wellSince = 0;
+  let reliefMode = false;
+  /** How old the newest acknowledged intent is: the link's round trip, as measured here. */
+  let ackAgeMs = 0;
   let firedAt = 0;
   let shotFresh = false;
   const shotEnd = new THREE.Vector3();
@@ -459,7 +550,9 @@ export function createWorld(options: WorldOptions): World {
     }
     if (event.kind === "respawn" && event.player === you) {
       predicted = { x: event.x, z: event.z };
-      truth = { x: event.x, z: event.z };
+      body = { x: event.x, z: event.z };
+      offsetX = 0;
+      offsetZ = 0;
       pending.length = 0;
       rig.snap();
       options.onEvent({ kind: "respawn" });
@@ -481,7 +574,7 @@ export function createWorld(options: WorldOptions): World {
     let found: Prompt | null = null;
     let closest = INTERACT_RANGE;
     for (const [prompt, place] of candidates) {
-      const range = Math.hypot(place.x - predicted.x, place.z - predicted.z);
+      const range = Math.hypot(place.x - body.x, place.z - body.z);
       if (range > closest) continue;
       closest = range;
       found = prompt;
@@ -495,6 +588,11 @@ export function createWorld(options: WorldOptions): World {
     if (a.kind === "landmark" && b.kind === "landmark") return a.index === b.index;
     if (a.kind === "courier" && b.kind === "courier") return a.point === b.point;
     return true;
+  }
+
+  /** How old an unacknowledged intent has to be before it is given up on. */
+  function staleAfter(): number {
+    return Math.max(PENDING_AGE_MS, ackAgeMs * AGE_SLACK);
   }
 
   /** One walk the way the server walks it: its speed, in slices, sliding along the walls. */
@@ -519,15 +617,35 @@ export function createWorld(options: WorldOptions): World {
 
   /**
    * The server's answer for this player turned into a position for now: rewind to where it
-   * says the body is, drop the intents it has already applied, and walk the rest again.
-   * A frame without `seq` comes from a server that does not echo yet, and is read as
-   * "everything applied", which is the behaviour this replaced.
+   * says the body is, drop the intents it has already applied or that are now too old for
+   * it to ever apply, and walk the rest again. A frame without `seq` comes from a server
+   * that does not echo yet, and is read as everything applied.
+   *
+   * Whatever is left between that answer and the drawn body becomes the offset, which the
+   * frame loop bleeds away. The drawn body does not move here at all: a correction that
+   * moved it would be the step this whole file exists to avoid.
    */
   function reconcile(wire: PlayerWire): void {
-    const applied = typeof wire.seq === "number" ? wire.seq : Number.POSITIVE_INFINITY;
-    while (pending.length > 0 && (pending[0] as SentMove).seq <= applied) pending.shift();
+    const seen = typeof wire.seq === "number" ? wire.seq : Number.POSITIVE_INFINITY;
+    const now = performance.now();
 
-    const until = lastFrameAt > 0 ? lastFrameAt : performance.now();
+    // The newest intent the server has owned up to tells this client what its own round
+    // trip really is, without a ping and without trusting the clocks to agree.
+    let acked = 0;
+    for (const entry of pending) {
+      if (entry.seq > seen) break;
+      acked = now - entry.at;
+    }
+    if (acked > 0) ackAgeMs = Math.max(acked, ackAgeMs * 0.9);
+
+    const stale = staleAfter();
+    while (pending.length > 0) {
+      const oldest = pending[0] as SentMove & { at: number };
+      if (oldest.seq > seen && now - oldest.at <= stale) break;
+      pending.shift();
+    }
+
+    const until = lastFrameAt > 0 ? lastFrameAt : now;
     let place: Place = { x: wire.x, z: wire.z };
     for (let index = 0; index < pending.length; index++) {
       const move = pending[index] as SentMove & { at: number };
@@ -535,45 +653,84 @@ export function createWorld(options: WorldOptions): World {
       const ends = Math.min(after === undefined ? until : after.at, until);
       place = stepAlong(place, move.dx, move.dz, (ends - move.at) / 1000);
     }
-    truth = place;
+
+    predicted = place;
+    offsetX = body.x - place.x;
+    offsetZ = body.z - place.z;
+
+    const error = Math.hypot(offsetX, offsetZ);
+    lastCorrection = error;
+    if (error > maxCorrection) maxCorrection = error;
+    errors.push({ t: now, metres: error });
+    while (errors.length > 0 && now - (errors[0] as { t: number }).t > SAMPLE_MS) errors.shift();
+
+    // Two metres out is not a disagreement any more, it is a different game.
+    if (error <= SNAP_METRES) return;
+    offsetX = 0;
+    offsetZ = 0;
+    body = { x: place.x, z: place.z };
   }
 
-  function stepLocal(dt: number, look: { yaw: number; pitch: number }): number {
-    const walked = stepAlong(predicted, applied.dx, applied.dz, dt);
-    const travelled = Math.hypot(walked.x - predicted.x, walked.z - predicted.z);
+  /**
+   * One rendered frame of walking. The walk comes from the live thumb, and the correction
+   * rides on top as an offset that decays, is never allowed to eat more than part of the
+   * step, and is never allowed to carry the body further than a walk would.
+   */
+  function stepLocal(
+    dt: number,
+    dir: { dx: number; dz: number },
+    look: { yaw: number; pitch: number },
+  ): number {
+    const speed = gear.sprint ? SPRINT_SPEED : WALK_SPEED;
+    const fromX = body.x;
+    const fromZ = body.z;
+
+    const walked = stepAlong(predicted, dir.dx, dir.dz, dt);
+    const forward = Math.hypot(walked.x - predicted.x, walked.z - predicted.z);
     predicted = walked;
 
-    // The replayed body takes the same step in the same frame, so the gap between the two
-    // only ever closes. Easing toward a position that stands still is what used to drag
-    // the player backwards on a slow connection.
-    truth = stepAlong(truth, applied.dx, applied.dz, dt);
+    const keep = Math.exp((-dt * 1000 * 3) / CORRECTION_MS);
+    let nextX = offsetX * keep;
+    let nextZ = offsetZ * keep;
 
-    const gap = Math.hypot(truth.x - predicted.x, truth.z - predicted.z);
-    const real = gap - JITTER_METRES;
-    if (gap > SNAP_METRES) {
-      lastCorrection = gap;
-      predicted = { x: truth.x, z: truth.z };
-    } else if (real > 0) {
-      const wanted = real * SMOOTHING;
-      const step = Math.min(wanted, CORRECTION_CAP);
-      const share = step / gap;
-      lastCorrection = step;
-      predicted = {
-        x: predicted.x + (truth.x - predicted.x) * share,
-        z: predicted.z + (truth.z - predicted.z) * share,
-      };
-    } else {
-      lastCorrection = 0;
+    const given = (nextX - offsetX) * dir.dx + (nextZ - offsetZ) * dir.dz;
+    const floor = -BACK_SHARE * forward;
+    if (given < floor) {
+      nextX += dir.dx * (floor - given);
+      nextZ += dir.dz * (floor - given);
     }
-    if (lastCorrection > maxCorrection) maxCorrection = lastCorrection;
+
+    let stepX = walked.x + nextX - fromX;
+    let stepZ = walked.z + nextZ - fromZ;
+    const length = Math.hypot(stepX, stepZ);
+    stepCap = speed * dt * STEP_MARGIN;
+    if (length > stepCap) {
+      const share = stepCap / length;
+      stepX *= share;
+      stepZ *= share;
+    }
+
+    // The offset is a straight line, so the spot it lands on is slid too: a correction is
+    // not allowed to post the body through a wall the walk itself went around.
+    body = slideAgainstBoxes(
+      { x: fromX, z: fromZ },
+      { x: fromX + stepX, z: fromZ + stepZ },
+      PLAYER_RADIUS,
+      boxes,
+    );
+    offsetX = body.x - predicted.x;
+    offsetZ = body.z - predicted.z;
+
+    const travelled = Math.hypot(body.x - fromX, body.z - fromZ);
+    lastStep = travelled;
 
     if (me) {
-      me.group.position.set(predicted.x, 0, predicted.z);
+      me.group.position.set(body.x, 0, body.z);
       me.group.rotation.y = look.yaw;
       me.setMoving(dt > 0 ? travelled / dt : 0);
       me.update(dt);
     }
-    if (marker) marker.position.set(predicted.x, 0.03, predicted.z);
+    if (marker) marker.position.set(body.x, 0.03, body.z);
 
     return travelled;
   }
@@ -598,7 +755,7 @@ export function createWorld(options: WorldOptions): World {
    * server counts, so pointing roughly at a drone is enough.
    */
   function assist(look: { yaw: number; pitch: number }): Shot | null {
-    eye.set(predicted.x, EYE_HEIGHT, predicted.z);
+    eye.set(body.x, EYE_HEIGHT, body.z);
 
     let best: Shot | null = null;
     for (const drone of drones.values()) {
@@ -659,9 +816,9 @@ export function createWorld(options: WorldOptions): World {
     // Minus the yaw's cosine puts the blaster on the side of the body the camera sees as
     // the right hand, rather than hiding it behind the player's back.
     muzzleAt.set(
-      predicted.x + along.x * MUZZLE_FORWARD - Math.cos(yaw) * MUZZLE_SIDE,
+      body.x + along.x * MUZZLE_FORWARD - Math.cos(yaw) * MUZZLE_SIDE,
       MUZZLE_HEIGHT,
-      predicted.z + along.z * MUZZLE_FORWARD + Math.sin(yaw) * MUZZLE_SIDE,
+      body.z + along.z * MUZZLE_FORWARD + Math.sin(yaw) * MUZZLE_SIDE,
     );
 
     tracer.position.copy(muzzleAt);
@@ -770,10 +927,50 @@ export function createWorld(options: WorldOptions): World {
     }
   }
 
+  /**
+   * A phone that cannot hold the frame rate for three seconds is given fewer pixels to
+   * draw, and gets them back once it has been comfortable for five. The window is cleared
+   * on a switch so the new pixel count is judged on its own frames.
+   */
+  function watchFrameRate(now: number): void {
+    if (frameTimes.length < 12) return;
+    let total = 0;
+    for (const entry of frameTimes) total += entry.ms;
+    const average = total / frameTimes.length;
+
+    if (average > SLOW_FRAME_MS) {
+      wellSince = 0;
+      if (slowSince === 0) slowSince = now;
+    } else if (average < WELL_FRAME_MS) {
+      slowSince = 0;
+      if (wellSince === 0) wellSince = now;
+    } else {
+      slowSince = 0;
+      wellSince = 0;
+    }
+
+    const fall = !reliefMode && slowSince > 0 && now - slowSince >= SLOW_FOR_MS;
+    const rise = reliefMode && wellSince > 0 && now - wellSince >= WELL_FOR_MS;
+    if (!fall && !rise) return;
+
+    reliefMode = fall;
+    slowSince = 0;
+    wellSince = 0;
+    frameTimes.length = 0;
+    workTimes.length = 0;
+    resize();
+  }
+
+  /** What the phone is asked to draw per CSS pixel, less when it cannot keep up. */
+  function targetRatio(): number {
+    const base = scenePixelRatio();
+    return reliefMode ? Math.min(base, RELIEF_RATIO) : base;
+  }
+
   function resize(): void {
     const width = canvas.clientWidth || window.innerWidth;
     const height = canvas.clientHeight || window.innerHeight;
-    renderer.setPixelRatio(scenePixelRatio());
+    renderer.setPixelRatio(targetRatio());
     renderer.setSize(width, height, false);
     camera.aspect = width / Math.max(1, height);
     // Three measures the field of view vertically, so a portrait phone would otherwise
@@ -797,9 +994,11 @@ export function createWorld(options: WorldOptions): World {
       const mine = frame.players.find((wire) => wire.id === you);
       if (mine) {
         predicted = { x: mine.x, z: mine.z };
-        truth = { x: mine.x, z: mine.z };
+        body = { x: mine.x, z: mine.z };
+        offsetX = 0;
+        offsetZ = 0;
         pending.length = 0;
-        applied = { dx: 0, dz: 0 };
+        heading = { dx: 0, dz: 0 };
         gear = mine.gear;
         shield = mine.shield;
         options.onShield(shield);
@@ -852,9 +1051,29 @@ export function createWorld(options: WorldOptions): World {
     },
 
     noteMove(move) {
-      applied = { dx: move.dx, dz: move.dz };
-      pending.push({ ...move, at: performance.now() });
+      const now = performance.now();
+      const last = pending[pending.length - 1];
+      // Each intent covers from its own stamp until the next one's, so a resend of the
+      // same direction starts now: the intent before it already covered the gap. Only a
+      // change of direction is backdated, to the moment the thumb actually turned, which
+      // is what puts the replay on the path the frames walked rather than one slot behind.
+      const since = headingSince > 0 ? headingSince : now;
+      const same =
+        last !== undefined &&
+        Math.abs(last.dx - move.dx) < 0.01 &&
+        Math.abs(last.dz - move.dz) < 0.01;
+      let at = now;
+      if (last === undefined) at = Math.min(now, since);
+      else if (!same) at = Math.min(now, Math.max(since, last.at));
+      pending.push({ ...move, at });
+      const stale = staleAfter();
+      while (pending.length > 1 && now - (pending[0] as { at: number }).at > stale) {
+        pending.shift();
+      }
       if (pending.length > PENDING_MAX) pending.shift();
+
+      sends.push(now);
+      while (sends.length > 0 && now - (sends[0] as number) > SAMPLE_MS) sends.shift();
     },
 
     fire(yaw, pitch) {
@@ -874,15 +1093,38 @@ export function createWorld(options: WorldOptions): World {
     },
 
     frame(now) {
-      const dt = lastFrameAt === 0 ? 0.016 : Math.min(0.1, (now - lastFrameAt) / 1000);
+      const enter = performance.now();
+      const gap = lastFrameAt === 0 ? 16 : now - lastFrameAt;
+      const dt = lastFrameAt === 0 ? 0.016 : Math.min(FRAME_CAP, gap / 1000);
       lastFrameAt = now;
 
       const look = options.readLook();
-      stepLocal(dt, look);
+      const wanted = options.readMove();
+      const moving = wanted.dx !== 0 || wanted.dz !== 0;
+      const wasMoving = heading.dx !== 0 || heading.dz !== 0;
+      const turned =
+        moving !== wasMoving ||
+        (moving && wanted.dx * heading.dx + wanted.dz * heading.dz < 0.999);
+      if (turned) headingSince = now;
+      heading = wanted;
+
+      const step = stepLocal(dt, wanted, look);
+      frameTimes.push({ t: now, ms: gap });
+      while (frameTimes.length > 0 && now - (frameTimes[0] as { t: number }).t > SAMPLE_MS) {
+        frameTimes.shift();
+      }
+      stepSizes.push({ t: now, step });
+      while (stepSizes.length > 0 && now - (stepSizes[0] as { t: number }).t > SAMPLE_MS) {
+        stepSizes.shift();
+      }
+      if (dev && moving && (step <= 0 || step > stepCap + 1e-6)) {
+        console.warn(`[vettai] render step ${step.toFixed(4)} m against a cap of ${stepCap.toFixed(4)} m`);
+      }
+
       drawRemotes(now - INTERPOLATION_MS, dt, now);
 
-      rig.update(camera, predicted, look.yaw, look.pitch, blockers, dt);
-      lampGlow.update(lamps, predicted.x, predicted.z);
+      rig.update(camera, body, look.yaw, look.pitch, blockers, dt);
+      lampGlow.update(lamps, body.x, body.z);
 
       const shot = assist(look);
       paintRing(shot);
@@ -901,6 +1143,12 @@ export function createWorld(options: WorldOptions): World {
       }
 
       renderer.render(scene, camera);
+
+      workTimes.push({ t: now, ms: performance.now() - enter });
+      while (workTimes.length > 0 && now - (workTimes[0] as { t: number }).t > SAMPLE_MS) {
+        workTimes.shift();
+      }
+      watchFrameRate(now);
     },
 
     resume(now) {
@@ -909,14 +1157,58 @@ export function createWorld(options: WorldOptions): World {
 
     resize,
 
-    place: () => ({ x: predicted.x, z: predicted.z }),
+    place: () => ({ x: body.x, z: body.z }),
 
-    stats: () => ({
-      calls: renderer.info.render.calls,
-      triangles: renderer.info.render.triangles,
-      correction: lastCorrection,
-      maxCorrection,
-    }),
+    cameraAt: () => ({ x: camera.position.x, y: camera.position.y, z: camera.position.z }),
+
+    stats: () => {
+      let worstStep = 0;
+      for (const entry of stepSizes) if (entry.step > worstStep) worstStep = entry.step;
+      return {
+        calls: renderer.info.render.calls,
+        triangles: renderer.info.render.triangles,
+        correction: lastCorrection,
+        maxCorrection,
+        offset: Math.hypot(offsetX, offsetZ),
+        step: lastStep,
+        worstStep,
+        stepCap,
+      };
+    },
+
+    readout: () => {
+      const now = performance.now();
+      while (sends.length > 0 && now - (sends[0] as number) > SAMPLE_MS) sends.shift();
+      while (errors.length > 0 && now - (errors[0] as { t: number }).t > SAMPLE_MS) errors.shift();
+
+      let total = 0;
+      for (const entry of frameTimes) total += entry.ms;
+      let work = 0;
+      for (const entry of workTimes) work += entry.ms;
+      let worstError = 0;
+      for (const entry of errors) if (entry.metres > worstError) worstError = entry.metres;
+
+      const buffer = new THREE.Vector2();
+      renderer.getDrawingBufferSize(buffer);
+
+      return {
+        fps: frameTimes.length,
+        frameMs: frameTimes.length > 0 ? total / frameTimes.length : 0,
+        workMs: workTimes.length > 0 ? work / workTimes.length : 0,
+        errorMetres: worstError,
+        sendRate: sends.length,
+        calls: renderer.info.render.calls,
+        triangles: renderer.info.render.triangles,
+        pixelRatio: renderer.getPixelRatio(),
+        width: canvas.clientWidth || window.innerWidth,
+        height: canvas.clientHeight || window.innerHeight,
+        bufferWidth: Math.round(buffer.x),
+        bufferHeight: Math.round(buffer.y),
+        webgl: renderer.capabilities.isWebGL2 ? 2 : 1,
+        gpu,
+        reliefMode,
+      };
+    },
 
     dispose() {
       for (const [, entry] of players) dropPlayer(entry);

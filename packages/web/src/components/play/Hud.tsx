@@ -1,7 +1,9 @@
 "use client";
 
+import { useCallback, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import type { QuestView } from "@/lib/api";
+import type { Readout } from "@/game/world";
 import styles from "./play.module.css";
 
 /**
@@ -15,6 +17,18 @@ import styles from "./play.module.css";
  */
 
 export type Toast = { id: string; text: string };
+
+/** What the round trip number opens: everything the phone knows about its own frame. */
+export type Panel = Readout & { latency: number | null; jitter: number | null };
+
+/**
+ * Bumped by hand whenever a build goes out to a phone, so a screenshot of the readout
+ * says which build it came from.
+ */
+const BUILD = "vettai-2026-09-16-c";
+
+/** How often the open panel reads the world. Twice a second is legible and near free. */
+const PANEL_MS = 500;
 
 export type HudProps = {
   shield: number;
@@ -40,6 +54,8 @@ export type HudProps = {
   /** While a panel is up the thumb belongs to the panel, so the controls step back. */
   sheetOpen: boolean;
   reduced: boolean;
+  /** Read on a timer while the readout is open, never on a frame. */
+  readout?: () => Panel | null;
 };
 
 const MAX_SHIELD = 3;
@@ -77,8 +93,32 @@ export default function Hud({
   showHint,
   sheetOpen,
   reduced,
+  readout,
 }: HudProps) {
   const claimable = quests.some((quest) => quest.state === "done");
+  const [openReadout, setOpenReadout] = useState(false);
+  const [panel, setPanel] = useState<Panel | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!openReadout || !readout) return;
+    const read = () => setPanel(readout());
+    read();
+    const timer = setInterval(read, PANEL_MS);
+    return () => clearInterval(timer);
+  }, [openReadout, readout]);
+
+  const copyReadout = useCallback(() => {
+    if (!panel) return;
+    try {
+      void navigator.clipboard?.writeText(readoutText(panel)).then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1800);
+      });
+    } catch {
+      // A WebView with no clipboard is not a reason to break the game.
+    }
+  }, [panel]);
 
   return (
     <div className="pointer-events-none absolute inset-0 z-20 select-none">
@@ -115,12 +155,13 @@ export default function Hud({
         <span className="label-type text-paper/45">Shield</span>
       </div>
 
+      <div className="absolute right-4 top-[max(1rem,env(safe-area-inset-top))] flex w-40 flex-col items-end gap-1.5 text-right">
       <button
         type="button"
         onClick={onOpenBoard}
         data-testid="hud-quests"
         aria-label="Open the day's jobs"
-        className={`pointer-events-auto absolute right-4 top-[max(1rem,env(safe-area-inset-top))] flex w-40 flex-col items-end gap-1.5 text-right transition-opacity duration-300 ${
+        className={`pointer-events-auto flex w-full flex-col items-end gap-1.5 text-right transition-opacity duration-300 ${
           sheetOpen ? "opacity-30" : "opacity-100"
         }`}
       >
@@ -155,15 +196,63 @@ export default function Hud({
             {payouts === 1 ? "1 payout on its way" : `${payouts} payouts on their way`}
           </span>
         )}
+      </button>
+
         {latency !== null && (
-          <span className="mt-1 font-mono text-[10px] text-paper/30">{latency} ms</span>
+          <button
+            type="button"
+            onClick={() => setOpenReadout((was) => !was)}
+            data-testid="latency"
+            aria-label="Show what this phone is doing"
+            aria-expanded={openReadout}
+            className={`pointer-events-auto mt-1 font-mono text-[10px] tracking-wide transition-colors duration-200 hover:text-hunt ${
+              openReadout ? "text-hunt" : "text-paper/30"
+            }`}
+          >
+            {latency} ms
+          </button>
         )}
         {latency !== null && latency > 250 && (
           <span className="font-mono text-[10px] text-paper/30" data-testid="far-note">
             far from the server
           </span>
         )}
-      </button>
+
+        <AnimatePresence>
+          {openReadout && (
+            <motion.div
+              key="readout"
+              data-testid="readout"
+              initial={{ opacity: 0, y: reduced ? 0 : -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: reduced ? 0 : -8 }}
+              transition={{ duration: reduced ? 0 : 0.22, ease: "easeOut" }}
+              className={`pointer-events-auto mt-1 w-[15.5rem] shrink-0 border border-line bg-night/85 p-2.5 text-left backdrop-blur-sm ${styles.readout}`}
+            >
+              {panel === null ? (
+                <p className="font-mono text-[10px] text-paper/40">reading the frame</p>
+              ) : (
+                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-[3px] font-mono text-[10px] leading-tight">
+                  {readoutRows(panel).map(([label, value]) => (
+                    <div key={label} className="contents">
+                      <dt className="text-paper/45">{label}</dt>
+                      <dd className="truncate text-right text-paper/85">{value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+              <button
+                type="button"
+                onClick={copyReadout}
+                data-testid="readout-copy"
+                className="label-type mt-2 w-full border border-line px-2 py-1.5 text-paper/60 transition-colors duration-200 hover:border-hunt hover:text-paper"
+              >
+                {copied ? "copied" : "copy"}
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
 
       <div className="pointer-events-none absolute inset-x-0 top-[max(5.5rem,calc(env(safe-area-inset-top)+5rem))] flex flex-col items-center gap-2">
         <AnimatePresence initial={false}>
@@ -267,6 +356,32 @@ export default function Hud({
       </motion.button>
     </div>
   );
+}
+
+function readoutRows(panel: Panel): [string, string][] {
+  return [
+    ["fps", String(panel.fps)],
+    ["frame", `${panel.frameMs.toFixed(1)} ms`],
+    ["drawing", `${panel.workMs.toFixed(1)} ms`],
+    ["round trip", panel.latency === null ? "waiting" : `${panel.latency} ms`],
+    ["jitter", panel.jitter === null ? "waiting" : `${panel.jitter} ms`],
+    ["off server", `${panel.errorMetres.toFixed(2)} m`],
+    ["intents", `${panel.sendRate}/s`],
+    ["draw calls", String(panel.calls)],
+    ["triangles", String(panel.triangles)],
+    ["pixel ratio", panel.pixelRatio.toFixed(2)],
+    ["canvas", `${panel.width}x${panel.height} (${panel.bufferWidth}x${panel.bufferHeight})`],
+    ["webgl", String(panel.webgl)],
+    ["gpu", panel.gpu],
+    ["build", BUILD],
+    ["mode", panel.reliefMode ? "performance mode" : "full"],
+  ];
+}
+
+function readoutText(panel: Panel): string {
+  return readoutRows(panel)
+    .map(([label, value]) => `${label}: ${value}`)
+    .join("\n");
 }
 
 /**

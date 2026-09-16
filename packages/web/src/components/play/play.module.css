@@ -49,3 +49,22 @@
     outline: 1px solid var(--hunt);
   }
 }
+
+/* The readout is a field instrument, not a settings dialog: a hairline of accent across
+   the top edge, and the grain kept to a whisper so the numbers stay readable. */
+.readout {
+  position: relative;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 106, 43, 0.55),
+    0 18px 40px rgba(0, 0, 0, 0.55);
+}
+
+.readout::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: var(--grain);
+  opacity: 0.06;
+  mix-blend-mode: overlay;
+  pointer-events: none;
+}
