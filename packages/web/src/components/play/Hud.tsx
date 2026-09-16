@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import type { QuestView } from "@/lib/api";
 import type { Readout } from "@/game/world";
+import Compass from "./Compass";
 import styles from "./play.module.css";
 
 /**
@@ -33,12 +34,17 @@ const PANEL_MS = 500;
 export type HudProps = {
   shield: number;
   quests: QuestView[];
+  /** The one thing to do next. The sentence comes from React, the metres from the frame. */
+  objective: { sentence: string } | null;
+  /** When a carried parcel goes cold, as a clock reading, or null when nothing is carried. */
+  carryUntil: number | null;
   toasts: Toast[];
   latency: number | null;
   aimHot: boolean;
   /** The moment of the last shot this phone drew, which kicks the crosshair. */
   firedAt: number;
-  prompt: { text: string } | null;
+  /** The action for the place the player is standing on, accent when it is the objective. */
+  prompt: { text: string; primary: boolean } | null;
   onInteract: () => void;
   /** The quest strip and the Board button both lead to the same place. */
   onOpenBoard: () => void;
@@ -78,6 +84,8 @@ function questCount(quest: QuestView): string {
 export default function Hud({
   shield,
   quests,
+  objective,
+  carryUntil,
   toasts,
   latency,
   aimHot,
@@ -137,7 +145,9 @@ export default function Hud({
         )}
       </AnimatePresence>
 
-      <div className="absolute left-4 top-[max(1rem,env(safe-area-inset-top))] flex flex-col gap-2">
+      <Compass reduced={reduced} />
+
+      <div className="absolute left-4 top-[max(3.1rem,calc(env(safe-area-inset-top)+2.6rem))] flex flex-col gap-2">
         <div key={paidAt} className={`flex gap-1.5 ${paidAt > 0 ? styles.payoutPulse : ""}`}>
           {Array.from({ length: MAX_SHIELD }, (_, index) => (
             <motion.span
@@ -153,9 +163,10 @@ export default function Hud({
           ))}
         </div>
         <span className="label-type text-paper/45">Shield</span>
+        <Objective objective={objective} carryUntil={carryUntil} reduced={reduced} />
       </div>
 
-      <div className="absolute right-4 top-[max(1rem,env(safe-area-inset-top))] flex w-40 flex-col items-end gap-1.5 text-right">
+      <div className="absolute right-4 top-[max(3.1rem,calc(env(safe-area-inset-top)+2.6rem))] flex w-40 flex-col items-end gap-1.5 text-right">
       <button
         type="button"
         onClick={onOpenBoard}
@@ -254,7 +265,7 @@ export default function Hud({
         </AnimatePresence>
       </div>
 
-      <div className="pointer-events-none absolute inset-x-0 top-[max(5.5rem,calc(env(safe-area-inset-top)+5rem))] flex flex-col items-center gap-2">
+      <div className="pointer-events-none absolute inset-x-0 top-[max(9.5rem,calc(env(safe-area-inset-top)+9rem))] flex flex-col items-center gap-2 px-6">
         <AnimatePresence initial={false}>
           {toasts.map((item) => (
             <motion.div
@@ -289,13 +300,17 @@ export default function Hud({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 12 }}
             transition={{ duration: reduced ? 0 : 0.3, ease: "easeOut" }}
-            className="absolute inset-x-0 bottom-[max(12rem,calc(env(safe-area-inset-bottom)+11rem))] flex justify-center gap-2"
+            className="absolute inset-x-0 bottom-[max(9.5rem,calc(env(safe-area-inset-bottom)+8.5rem))] flex items-center justify-center gap-2 px-6"
           >
             <button
               type="button"
               onClick={onInteract}
               data-testid="interact"
-              className="pointer-events-auto rounded-btn border border-hunt bg-night/80 px-4 py-2.5 text-sm text-paper backdrop-blur transition-colors duration-200 hover:bg-hunt hover:text-night active:bg-hunt active:text-night"
+              className={`pointer-events-auto flex min-h-[56px] items-center rounded-btn px-6 text-base backdrop-blur transition-transform duration-200 hover:scale-[1.02] active:scale-[0.98] ${
+                prompt.primary
+                  ? "bg-hunt font-medium text-night shadow-[0_14px_38px_rgba(255,106,43,0.35)]"
+                  : "border border-hunt bg-night/80 text-paper hover:bg-hunt hover:text-night"
+              }`}
             >
               {prompt.text}
             </button>
@@ -304,7 +319,7 @@ export default function Hud({
                 type="button"
                 onClick={onOpenBoard}
                 data-testid="board-button"
-                className="label-type pointer-events-auto rounded-btn border border-line bg-night/80 px-3 py-2.5 text-paper/70 backdrop-blur transition-colors duration-200 hover:border-hunt hover:text-paper"
+                className="label-type pointer-events-auto flex min-h-[56px] items-center rounded-btn border border-line bg-night/80 px-3 text-paper/70 backdrop-blur transition-colors duration-200 hover:border-hunt hover:text-paper"
               >
                 Board
               </button>
@@ -355,6 +370,68 @@ export default function Hud({
         Fire
       </motion.button>
     </div>
+  );
+}
+
+/**
+ * The line that answers "what now". The words change only when the job changes, so they
+ * come from React; the metres change every frame, so they arrive as a CSS variable the
+ * render loop writes and this span prints. Nothing here renders sixty times a second.
+ */
+function Objective({
+  objective,
+  carryUntil,
+  reduced,
+}: {
+  objective: { sentence: string } | null;
+  carryUntil: number | null;
+  reduced: boolean;
+}) {
+  return (
+    <AnimatePresence mode="wait">
+      {objective && (
+        <motion.div
+          key={objective.sentence}
+          initial={{ opacity: 0, y: reduced ? 0 : 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: reduced ? 0 : -6 }}
+          transition={{ duration: reduced ? 0 : 0.3, ease: "easeOut" }}
+          data-testid="objective"
+          className={`mt-0.5 max-w-[64vw] border-l-2 border-hunt bg-night/55 py-1.5 pl-2.5 pr-3 backdrop-blur-sm ${styles.objective}`}
+        >
+          <p className="flex items-baseline gap-2">
+            <span className="display-type text-[1.05rem] uppercase leading-none tracking-[0.01em] text-paper">
+              {objective.sentence}
+            </span>
+            <span aria-hidden data-testid="objective-range" className={styles.range} />
+          </p>
+          {carryUntil !== null && <Countdown until={carryUntil} />}
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
+/** The parcel's two minutes, counted down once a second. It goes red in the last twenty. */
+function Countdown({ until }: { until: number }) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(timer);
+  }, []);
+
+  const left = Math.max(0, until - now);
+  const seconds = Math.ceil(left / 1000);
+  const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+
+  return (
+    <span
+      data-testid="carry-clock"
+      className={`label-type mt-1 block ${left <= 20_000 ? "text-bad" : "text-hunt"}`}
+    >
+      {left === 0 ? "the parcel went cold, pick it up again" : `${clock} left on the parcel`}
+    </span>
   );
 }
 

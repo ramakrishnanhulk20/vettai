@@ -11,6 +11,16 @@ import {
   type QuestView,
 } from "@/lib/api";
 import { isUserRejection, sign } from "@/lib/nimiq";
+import type { WorldMap } from "@/game/map";
+import {
+  chooseObjective,
+  groundRange,
+  metres,
+  nearestSpot,
+  trackable,
+  worldSpots,
+  type MarkerSpot,
+} from "@/game/markers";
 import Sheet, { SheetRow } from "./Sheet";
 import type { ClaimsFeed } from "./useClaims";
 import { explorer, localMoment, nim, shortHash, streakDay, utcDate, type Network } from "./format";
@@ -29,6 +39,13 @@ export type QuestBoardProps = {
   reduced: boolean;
   /** The claim that just landed, so the row that earned it lights up. */
   celebrate: string | null;
+  /** The city, for working out how far each job is from the door the player is standing at. */
+  map: WorldMap | null;
+  /** Where the player is standing. The body holds still while the board is up. */
+  place: { x: number; z: number } | null;
+  /** The job the player pinned, or null while the game is choosing for them. */
+  tracked: string | null;
+  onTrack: (questId: string | null) => void;
   onQuests: (quests: QuestView[]) => void;
   onLadder: () => void;
   onClose: () => void;
@@ -69,6 +86,48 @@ function progressOf(quest: QuestView): { done: number; text: string } {
   return { done: quest.progress, text: "Turning up is the whole job" };
 }
 
+export type Wayline = {
+  /** The same sentence the objective line uses, so the board and the HUD never disagree. */
+  sentence: string;
+  /** Metres from where the player is standing, or null when the target is a live drone. */
+  range: string | null;
+  /** The courier's two ends, each with its own distance. */
+  legs: { text: string; range: string | null }[];
+};
+
+/**
+ * What a single job asks for, measured from the door the player is standing at. The
+ * sentence comes from the same chooser the tracked objective uses, handed one quest.
+ */
+function waylineFor(
+  quest: QuestView,
+  map: WorldMap | null,
+  place: { x: number; z: number } | null,
+  spots: MarkerSpot[],
+): Wayline | null {
+  const objective = chooseObjective({ quests: [quest], pinned: quest.id, seenShop: true });
+  if (!objective) return null;
+
+  const rangeTo = (x: number, z: number) => (place ? metres(groundRange(place, { x, z })) : null);
+  const spot = place ? nearestSpot(objective, spots, place) : null;
+
+  const legs: Wayline["legs"] = [];
+  if (quest.kind === "courier" && quest.route && map) {
+    const from = map.courier[quest.route.from];
+    const to = map.courier[quest.route.to];
+    if (from) {
+      legs.push({ text: `pick up at P${quest.route.from + 1}`, range: rangeTo(from.x, from.z) });
+    }
+    if (to) legs.push({ text: `drop at P${quest.route.to + 1}`, range: rangeTo(to.x, to.z) });
+  }
+
+  return {
+    sentence: objective.sentence,
+    range: spot && place ? metres(groundRange(place, spot)) : null,
+    legs,
+  };
+}
+
 /** Midnight UTC in the reader's own clock, which is when a capped claim is looked at again. */
 function tomorrowLocal(): string {
   const now = new Date();
@@ -90,6 +149,10 @@ export default function QuestBoard({
   network,
   reduced,
   celebrate,
+  map,
+  place,
+  tracked,
+  onTrack,
   onQuests,
   onLadder,
   onClose,
@@ -170,6 +233,7 @@ export default function QuestBoard({
   );
 
   const sorted = [...quests].sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind));
+  const spots = map ? worldSpots(map, quests) : [];
   const today = day ?? new Date().toISOString().slice(0, 10);
   const ready = sorted.filter(
     (quest) => quest.state === "done" && !claims.byQuest.has(quest.id) && quest.rewardLuna !== "0",
@@ -203,11 +267,30 @@ export default function QuestBoard({
         </span>
       </motion.div>
 
+      <div className="flex items-center justify-between gap-3 pt-3">
+        <span className="label-type text-paper/35">
+          {tracked === null ? "Tracking the next job for you" : "Tracking your pick"}
+        </span>
+        {tracked !== null && (
+          <button
+            type="button"
+            onClick={() => onTrack(null)}
+            data-testid="track-auto"
+            className="label-type rounded-btn border border-line px-3 py-1.5 text-paper/60 transition-colors duration-200 hover:border-hunt hover:text-paper"
+          >
+            Auto
+          </button>
+        )}
+      </div>
+
       <ul>
         {sorted.map((quest, index) => (
           <SheetRow key={quest.id} index={index} reduced={reduced}>
             <Row
               quest={quest}
+              wayline={waylineFor(quest, map, place, spots)}
+              tracking={tracked === quest.id}
+              onTrack={() => onTrack(tracked === quest.id ? null : quest.id)}
               claim={claims.byQuest.get(quest.id) ?? null}
               busy={busy?.questId === quest.id ? busy.step : null}
               trouble={trouble?.questId === quest.id ? trouble.text : null}
@@ -243,6 +326,9 @@ export default function QuestBoard({
 
 type RowProps = {
   quest: QuestView;
+  wayline: Wayline | null;
+  tracking: boolean;
+  onTrack: () => void;
   claim: ClaimView | null;
   busy: "signing" | "sending" | null;
   trouble: string | null;
@@ -256,6 +342,9 @@ type RowProps = {
 
 function Row({
   quest,
+  wayline,
+  tracking,
+  onTrack,
   claim,
   busy,
   trouble,
@@ -309,6 +398,41 @@ function Row({
         </div>
       )}
 
+      {wayline && (
+        <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2">
+          <p className="display-type text-[1.05rem] uppercase leading-none tracking-[0.01em] text-paper">
+            {wayline.sentence}
+            {wayline.range && (
+              <span className="ml-2 font-mono text-xs normal-case tracking-normal text-hunt">
+                {wayline.range}
+              </span>
+            )}
+          </p>
+          {trackable(quest) && (
+            <button
+              type="button"
+              onClick={onTrack}
+              data-testid={`track-${quest.kind}`}
+              className={`label-type ml-auto rounded-btn px-3 py-2 transition-colors duration-200 ${
+                tracking
+                  ? "bg-hunt text-night"
+                  : "border border-line text-paper/60 hover:border-hunt hover:text-paper"
+              }`}
+            >
+              {tracking ? "Tracking" : "Track"}
+            </button>
+          )}
+        </div>
+      )}
+
+      {wayline && wayline.legs.length > 0 && (
+        <p className="label-type mt-2 text-paper/45" data-testid={`legs-${quest.kind}`}>
+          {wayline.legs
+            .map((leg) => (leg.range === null ? leg.text : `${leg.text} ${leg.range}`))
+            .join(", ")}
+        </p>
+      )}
+
       <div className={quiet ? "" : "mt-3"}>
         <State
           quest={quest}
@@ -333,7 +457,7 @@ function State({
   reduced,
   onClaim,
   onCancel,
-}: Omit<RowProps, "trouble" | "streak" | "celebrating">) {
+}: Omit<RowProps, "trouble" | "streak" | "celebrating" | "wayline" | "tracking" | "onTrack">) {
   if (busy) {
     return (
       <div className="flex items-center justify-between gap-3">

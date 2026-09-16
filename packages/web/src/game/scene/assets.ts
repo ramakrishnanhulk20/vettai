@@ -1,10 +1,11 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { type Look, PALETTE } from "./materials";
 
 /** One building type, ready to instance: base at y 0, centred on x and z. */
 export type BuildingAsset = {
   geometry: THREE.BufferGeometry;
-  material: THREE.MeshLambertMaterial;
+  material: THREE.MeshLambertMaterial | THREE.MeshStandardMaterial;
   footprint: number;
   height: number;
 };
@@ -63,8 +64,49 @@ function nightMaterial(source: THREE.Material): THREE.MeshLambertMaterial {
   return new THREE.MeshLambertMaterial({ map, color: 0x8b95ab });
 }
 
+/**
+ * A tower is one flat value under a hemisphere light, which is why the block used to read
+ * as cardboard. The second look gives each type its own concrete, a rough standard shader
+ * so the lamps and the neon leave a sheen on the walls, and a gradient baked into the
+ * vertices that sinks the first few floors into the street's own shadow. No new texture
+ * and no new draw call: the instancing is untouched.
+ */
+function facadeMaterial(source: THREE.Material, type: number): THREE.MeshStandardMaterial {
+  const map = (source as THREE.MeshStandardMaterial).map ?? null;
+  if (map) map.anisotropy = 1;
+  const tint = PALETTE.facade[type % PALETTE.facade.length] ?? 0x8f99ad;
+  return new THREE.MeshStandardMaterial({
+    map,
+    color: tint,
+    roughness: 0.85,
+    metalness: 0.06,
+    vertexColors: true,
+  });
+}
+
+/** How dark the wall is where it meets the pavement, and how fast it climbs out of it. */
+const FOOT_SHADE = 0.4;
+const CLIMB = 0.55;
+
+function shadeFacade(geometry: THREE.BufferGeometry, height: number): void {
+  const spots = geometry.getAttribute("position");
+  const shades = new Float32Array(spots.count * 3);
+  const tall = Math.max(height, 0.001);
+
+  for (let point = 0; point < spots.count; point += 1) {
+    const lift = Math.min(Math.max(spots.getY(point) / tall, 0), 1);
+    const shade = FOOT_SHADE + (1 - FOOT_SHADE) * Math.pow(lift, CLIMB);
+    shades[point * 3] = shade;
+    shades[point * 3 + 1] = shade;
+    shades[point * 3 + 2] = shade;
+  }
+
+  geometry.setAttribute("color", new THREE.BufferAttribute(shades, 3));
+}
+
 export async function loadCityAssets(
   onProgress?: (done: number, total: number) => void,
+  look: Look = "v1",
 ): Promise<CityAssets> {
   // Every building file points at the same colormap.png; without the cache the browser
   // asks the server for it once per model.
@@ -87,11 +129,12 @@ export async function loadCityAssets(
       const box = geometry.boundingBox;
       if (!box) throw new Error("that building model has no bounds");
 
+      const source = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+      if (look === "v2") shadeFacade(geometry, box.max.y);
+
       buildings[type] = {
         geometry,
-        material: nightMaterial(
-          Array.isArray(mesh.material) ? mesh.material[0] : mesh.material,
-        ),
+        material: look === "v2" ? facadeMaterial(source, type) : nightMaterial(source),
         footprint: Math.max(box.max.x - box.min.x, box.max.z - box.min.z),
         height: box.max.y,
       };

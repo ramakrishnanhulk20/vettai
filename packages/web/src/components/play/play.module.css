@@ -68,3 +68,138 @@
   mix-blend-mode: overlay;
   pointer-events: none;
 }
+
+/* The objective line. The words are React's, the metres are the frame's: the render loop
+   writes --objective-range and this prints it, so the distance can count down at sixty
+   frames a second without a single re-render. */
+.objective {
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+
+.range {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  color: var(--hunt);
+  white-space: nowrap;
+}
+
+.range::after {
+  content: var(--objective-range, "");
+}
+
+/* The compass strip. Two hundred pixels of city, a hundred of them to each side. Every
+   tick is parked with a transform the render loop writes, never with a React render, and
+   the rule underneath fades at both ends so the strip reads as a horizon, not a box.
+   Nothing here may declare the tick variables: a value set on this element would shadow
+   the one the render loop writes on the root, and every tick would sit dark forever. */
+
+.compassRule {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 17px;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    rgba(243, 239, 231, 0) 0%,
+    rgba(243, 239, 231, 0.28) 22%,
+    rgba(243, 239, 231, 0.28) 78%,
+    rgba(243, 239, 231, 0) 100%
+  );
+}
+
+/* Straight ahead, so a tick sitting on it means "walk". */
+.compassAhead {
+  position: absolute;
+  left: 50%;
+  top: 13px;
+  width: 1px;
+  height: 9px;
+  margin-left: -0.5px;
+  background: rgba(243, 239, 231, 0.55);
+}
+
+.compassTarget {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  will-change: transform;
+}
+
+.compassBlade {
+  width: 2px;
+  height: 18px;
+  background: var(--hunt);
+  box-shadow: 0 0 10px rgba(255, 106, 43, 0.8);
+}
+
+.compassRange {
+  margin-top: 1px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--hunt);
+  white-space: nowrap;
+  opacity: var(--cmp-t-far, 0);
+}
+
+.compassRange::after {
+  content: var(--cmp-t-range, "");
+}
+
+.compassPlace {
+  position: absolute;
+  left: 50%;
+  top: 4px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  color: rgba(243, 239, 231, 0.6);
+  will-change: transform;
+}
+
+.compassDrone {
+  position: absolute;
+  left: 50%;
+  top: 15px;
+  width: 3px;
+  height: 5px;
+  background: var(--bad);
+  will-change: transform;
+}
+
+.compassEdge {
+  position: absolute;
+  top: 9px;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--hunt);
+}
+
+.compassEdgeLeft {
+  left: -11px;
+  opacity: var(--cmp-t-left, 0);
+}
+
+.compassEdgeRight {
+  right: -11px;
+  opacity: var(--cmp-t-right, 0);
+}
+
+/* The corners of a lens, faked in CSS, the same one the look test wears. It costs
+   nothing and it is the difference between a render and a shot. */
+.vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    120% 90% at 50% 45%,
+    transparent 38%,
+    rgba(4, 6, 12, 0.55) 88%,
+    rgba(3, 4, 9, 0.82) 100%
+  );
+}

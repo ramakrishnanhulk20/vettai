@@ -5,11 +5,22 @@ import { createCameraRig, type Blocker } from "./camera";
 import type { Box, WorldMap } from "./map";
 import { segmentHitsBox, slideAgainstBoxes } from "./slide";
 import type { SentMove } from "./controls";
+import {
+  createMarkers,
+  type DroneSight,
+  type MarkerReadout,
+  type MarkerSpot,
+  type Markers,
+  type Objective,
+} from "./markers";
 import type { CityAssets } from "./scene/assets";
-import { buildCity, disposeCity, lampSpots } from "./scene/city";
+import { createAtmosphere, type Atmosphere } from "./scene/atmosphere";
+import { animateCity, buildCity, disposeCity, lampSpots } from "./scene/city";
 import { createCharacter, type Character } from "./scene/character";
 import { animateDrone, createDrone, disposeDrone, disposeDrones } from "./scene/drone";
-import { addLampGlow, addNightLights, NIGHT } from "./scene/lights";
+import { addLampGlow, addNightLights } from "./scene/lights";
+import { tuneRenderer, type Look } from "./scene/materials";
+import { createNeon, type Neon } from "./scene/neon";
 import { scenePixelRatio } from "./scene/pixelRatio";
 
 /**
@@ -120,6 +131,9 @@ const HIT_FLASH_MS = 140;
 
 const ACCENT = 0xff6a2b;
 
+/** The look Ram approved on the lab page. The hero still runs the first one. */
+const LOOK: Look = "v2";
+
 const dev = process.env.NODE_ENV !== "production";
 
 export type Place = { x: number; z: number };
@@ -159,6 +173,12 @@ export type World = {
   setGear: (gear: Gear) => void;
   /** Keeps a move intent that has just gone out, so the reply can be replayed against it. */
   noteMove: (move: SentMove) => void;
+  /** The places worth a beam of light right now, worked out from the day's quest rows. */
+  setMarkers: (spots: MarkerSpot[]) => void;
+  /** The one thing to do next, which the brightest beam and the compass both follow. */
+  setObjective: (objective: Objective | null) => void;
+  /** What the wayfinding layer is drawing, so a test can count it and read the target. */
+  markers: () => MarkerReadout;
   /**
    * Draws the shot on this phone at once and answers with the aim to send: the drone the
    * player is pointing near, or the camera's own aim when there is none.
@@ -284,9 +304,7 @@ export function createWorld(options: WorldOptions): World {
     powerPreference: "high-performance",
   });
   renderer.setPixelRatio(scenePixelRatio());
-  renderer.setClearColor(NIGHT, 1);
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.18;
+  tuneRenderer(renderer, LOOK);
 
   /** The card the phone actually draws with, when the browser is willing to name it. */
   const gpu = ((): string => {
@@ -301,16 +319,25 @@ export function createWorld(options: WorldOptions): World {
   })();
 
   const scene = new THREE.Scene();
-  addNightLights(scene, map.size);
+  addNightLights(scene, map.size, LOOK);
 
   const camera = new THREE.PerspectiveCamera(60, 1, 0.2, 520);
   const rig = createCameraRig();
 
-  const city = buildCity(map, assets);
+  const city = buildCity(map, assets, LOOK);
   scene.add(city);
+
+  const sky: Atmosphere = createAtmosphere(map);
+  scene.add(sky.group);
+  const neon: Neon = createNeon(map);
+  scene.add(neon.group);
 
   const lamps = lampSpots(map);
   const lampGlow = addLampGlow(scene);
+
+  const markers: Markers = createMarkers({ scene, reduced });
+  /** Refilled each frame: a handful of readings for the beacons, the strip and the rings. */
+  const sighted: DroneSight[] = [];
 
   const boxes: Box[] = map.buildings.map((building) => building.aabb);
   const blockers: Blocker[] = map.buildings.map((building) => ({
@@ -411,7 +438,7 @@ export function createWorld(options: WorldOptions): World {
   let ringShown = false;
 
   function characterFor(skin: string): Character {
-    const character = createCharacter(skin);
+    const character = createCharacter(skin, LOOK);
     scene.add(character.group);
     return character;
   }
@@ -477,7 +504,7 @@ export function createWorld(options: WorldOptions): World {
   function trackDrone(wire: DroneWire, at: number): void {
     const known = drones.get(wire.id);
     if (!known) {
-      const group = createDrone();
+      const group = createDrone(LOOK);
       group.position.set(wire.x, wire.y, wire.z);
       scene.add(group);
       const view: DroneView = { group, track: { samples: [] }, hp: wire.hp, flashUntil: 0 };
@@ -1126,6 +1153,21 @@ export function createWorld(options: WorldOptions): World {
       rig.update(camera, body, look.yaw, look.pitch, blockers, dt);
       lampGlow.update(lamps, body.x, body.z);
 
+      // The sky, the signs and the lamp flicker all run off one clock, held still when
+      // the phone asks for less motion.
+      const sceneTime = reduced ? 0 : now / 1000;
+      animateCity(city, sceneTime);
+      neon.update(sceneTime);
+      sky.update(sceneTime, camera.position);
+
+      sighted.length = 0;
+      for (const drone of drones.values()) {
+        if (drone.hp <= 0) continue;
+        const at = drone.group.position;
+        sighted.push({ x: at.x, y: at.y, z: at.z });
+      }
+      markers.frame(now, camera, body, look.yaw, sighted);
+
       const shot = assist(look);
       paintRing(shot);
       fadeShot(now);
@@ -1156,6 +1198,12 @@ export function createWorld(options: WorldOptions): World {
     },
 
     resize,
+
+    setMarkers: (spots) => markers.setSpots(spots),
+
+    setObjective: (objective) => markers.setObjective(objective),
+
+    markers: () => markers.readout(),
 
     place: () => ({ x: body.x, z: body.z }),
 
@@ -1251,7 +1299,12 @@ export function createWorld(options: WorldOptions): World {
       document.documentElement.style.setProperty("--aim-on", "0");
       ringShown = false;
 
+      markers.dispose();
       disposeDrones();
+      scene.remove(neon.group);
+      neon.dispose();
+      scene.remove(sky.group);
+      sky.dispose();
       lampGlow.dispose();
       disposeCity(city, assets);
       scene.remove(city);

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   getHealth,
@@ -14,6 +14,15 @@ import { isUserRejection, waitForProvider } from "@/lib/nimiq";
 import { login, me, readSession } from "@/lib/session";
 import { connectWorld, type WorldConnection } from "@/lib/ws";
 import { createControls, type Controls } from "@/game/controls";
+import type { WorldMap } from "@/game/map";
+import {
+  chooseObjective,
+  groundRange,
+  metres,
+  worldSpots,
+  type MarkerSpot,
+  type Objective,
+} from "@/game/markers";
 import { loadCityAssets, type CityAssets } from "@/game/scene/assets";
 import { loadCharacters } from "@/game/scene/character";
 import { createWorld, type Prompt, type World } from "@/game/world";
@@ -45,7 +54,12 @@ type Phase =
 
 const PROVIDER_WAIT_MS = 15_000;
 const HINT_KEY = "vettai.hint.stick";
+const SHOP_KEY = "vettai.seen.shop";
+const FIRST_MINUTE_KEY = "vettai.firstminute";
 const TOAST_MS = 2600;
+
+/** The parcel's window, the same two minutes COURIER_WINDOW_MS gives it on the server. */
+const COURIER_WINDOW_MS = 120_000;
 
 /** Four shots a second with the mk1 blaster, six with the mk2, as the simulation allows. */
 const FIRE_INTERVAL: Record<Gear["blaster"], number> = { mk1: 250, mk2: 167 };
@@ -63,6 +77,52 @@ function questLabel(kind: QuestView["kind"]): string {
   return "Streak";
 }
 
+/** The nearest landmark this quest has not counted yet, in metres, or null when all are done. */
+function nextLandmarkRange(map: WorldMap, quest: QuestView, at: { x: number; z: number }): number | null {
+  let best: number | null = null;
+  map.landmarks.forEach((place, index) => {
+    if (quest.visited?.[index]) return;
+    const range = groundRange(at, place);
+    if (best === null || range < best) best = range;
+  });
+  return best;
+}
+
+/**
+ * What a quest event says out loud. Every one of these ends on the next thing to do, so a
+ * player is never told a number without being told where to take it.
+ */
+function questStep(quest: QuestView, map: WorldMap | null, at: { x: number; z: number } | null): string {
+  const name = questLabel(quest.kind);
+
+  if (quest.state !== "open") {
+    const reward = nim(quest.rewardLuna);
+    const money = reward === "0" ? "" : `${reward} NIM `;
+    if (quest.kind === "courier") return `Delivered. ${money}ready at the office`;
+    return `${name} complete. Claim ${money}at the office`;
+  }
+
+  if (quest.kind === "courier") {
+    return quest.carrying === true
+      ? "Parcel picked up. Deliver it in 2:00"
+      : "The parcel went cold. Pick it up again";
+  }
+
+  if (quest.kind === "landmarks") {
+    const reached = quest.visited?.filter(Boolean).length ?? quest.progress;
+    const next = map && at ? nextLandmarkRange(map, quest, at) : null;
+    const tail = next === null ? "" : ` Next one ${metres(next)}`;
+    return `Landmark ${reached} of ${quest.target}.${tail}`;
+  }
+
+  if (quest.kind === "hunt") {
+    const left = Math.max(0, quest.target - quest.progress);
+    return left === 0 ? "Drone down" : `Drone down. ${left} more for the hunt`;
+  }
+
+  return `${name} ${quest.progress}/${quest.target}`;
+}
+
 function refusalText(code: string): string | null {
   if (code === "too far") return "Too far away. Walk closer.";
   if (code === "unknown place") return "Nothing to do here.";
@@ -77,6 +137,7 @@ export default function PlayScreen() {
   const connectionRef = useRef<WorldConnection | null>(null);
   const gearRef = useRef<Gear>({ blaster: "mk1", skin: "default", sprint: false });
   const questsRef = useRef<QuestView[]>([]);
+  const mapRef = useRef<WorldMap | null>(null);
   const promptRef = useRef<Prompt | null>(null);
   /** The game loop reads this every frame, so a panel takes the thumb without a re-render. */
   const sheetRef = useRef(false);
@@ -107,11 +168,41 @@ export default function PlayScreen() {
   const [celebrate, setCelebrate] = useState<string | null>(null);
   const [paidAt, setPaidAt] = useState(0);
 
+  const [worldMap, setWorldMap] = useState<WorldMap | null>(null);
+  /** The job the player pinned on the board. Null means the game is choosing. */
+  const [pinned, setPinned] = useState<string | null>(null);
+  /** Starts true so the shop is never the first thing suggested before storage is read. */
+  const [seenShop, setSeenShop] = useState(true);
+  const [carryUntil, setCarryUntil] = useState<number | null>(null);
+  /** Where the player was standing when a panel went up, which is where it stays. */
+  const [standingAt, setStandingAt] = useState<{ x: number; z: number } | null>(null);
+  /** Which of the three first minute lines is up, or null once they are all behind us. */
+  const [lesson, setLesson] = useState<number | null>(null);
+
   useEffect(() => {
     setHost(window.location.host);
     setShowHint(window.localStorage.getItem(HINT_KEY) === null);
+    if (window.localStorage.getItem(FIRST_MINUTE_KEY) === null) setLesson(0);
+    setSeenShop(window.localStorage.getItem(SHOP_KEY) !== null);
     setAddress(readSession()?.address ?? "");
   }, []);
+
+  const objective = useMemo(
+    () => chooseObjective({ quests, pinned, seenShop }),
+    [pinned, quests, seenShop],
+  );
+  const spots = useMemo(() => (worldMap ? worldSpots(worldMap, quests) : []), [quests, worldMap]);
+
+  // The scene is built inside the boot effect, which may not have run yet when the first
+  // quests land, so the latest choice is kept here and pushed again the moment it exists.
+  const objectiveRef = useRef<Objective | null>(null);
+  const spotsRef = useRef<MarkerSpot[]>([]);
+  useEffect(() => {
+    objectiveRef.current = objective;
+    spotsRef.current = spots;
+    worldRef.current?.setMarkers(spots);
+    worldRef.current?.setObjective(objective);
+  }, [objective, spots]);
 
   const [wantExplorer, setWantExplorer] = useState(false);
 
@@ -130,6 +221,33 @@ export default function PlayScreen() {
     const entry: Toast = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, text };
     setToasts((live) => [...live, entry].slice(-3));
     setTimeout(() => setToasts((live) => live.filter((item) => item.id !== entry.id)), TOAST_MS);
+  }, []);
+
+  /**
+   * A quest moved. The line the player sees is the next step, and a courier leg also
+   * starts the two minute clock here: the wire says the parcel is in hand but not when it
+   * was picked up, so the clock runs from the moment this phone was told.
+   */
+  const announce = useCallback(
+    (quest: QuestView) => {
+      if (quest.kind === "courier") {
+        const carrying = quest.state === "open" && quest.carrying === true;
+        setCarryUntil(carrying ? Date.now() + COURIER_WINDOW_MS : null);
+      }
+      toast(questStep(quest, mapRef.current, worldRef.current?.place() ?? null));
+    },
+    [toast],
+  );
+
+  /** A lesson is over when the player does the thing it taught, or when they tap it away. */
+  const lessonDone = useCallback((step: number) => {
+    setLesson((current) => {
+      if (current === null || current !== step) return current;
+      const next = current + 1;
+      if (next < LESSONS.length) return next;
+      window.localStorage.setItem(FIRST_MINUTE_KEY, "seen");
+      return null;
+    });
   }, []);
 
   const retry = useCallback(() => {
@@ -175,7 +293,14 @@ export default function PlayScreen() {
   const openSheet = useCallback((next: "board" | "shop" | "ladder") => {
     sheetRef.current = true;
     setSheet(next);
-  }, []);
+    setStandingAt(worldRef.current?.place() ?? null);
+    if (next === "board") lessonDone(2);
+    // A player who has seen the shop once is never sent back to it by the game itself.
+    if (next === "shop") {
+      window.localStorage.setItem(SHOP_KEY, "seen");
+      setSeenShop(true);
+    }
+  }, [lessonDone]);
 
   const closeSheet = useCallback(() => {
     sheetRef.current = false;
@@ -261,9 +386,12 @@ export default function PlayScreen() {
       if (!mapResult.ok) {
         return fail("The city did not load", `${mapResult.error} Tap below to try again.`);
       }
+      mapRef.current = mapResult.data;
+      setWorldMap(mapResult.data);
 
       try {
-        assets = await loadCityAssets(step);
+        // The city look Ram approved. The facades carry it, so it is chosen at load.
+        assets = await loadCityAssets(step, "v2");
         await loadCharacters(step);
       } catch {
         if (!alive) return;
@@ -298,12 +426,20 @@ export default function PlayScreen() {
         },
         onShield: setShield,
         onEvent: (event) => {
-          if (event.kind === "kill") return toast("Drone down");
+          if (event.kind === "kill") {
+            // The hunt's own frame is a breath behind and carries the count, so the kill
+            // only speaks when there is no open hunt to speak for it.
+            const hunt = questsRef.current.find((quest) => quest.kind === "hunt");
+            if (hunt && hunt.state === "open") return;
+            return toast("Drone down");
+          }
           if (event.kind === "downed") return toast("Downed. Back at the office in 3");
           if (event.kind === "shieldHit") return setHitAt(Date.now());
         },
       });
       worldRef.current = world;
+      world.setMarkers(spotsRef.current);
+      world.setObjective(objectiveRef.current);
 
       const controls = createControls({
         surface,
@@ -320,12 +456,14 @@ export default function PlayScreen() {
           if (sheetRef.current) return;
           const shot = worldRef.current?.fire(yaw, pitch) ?? { yaw, pitch };
           setFiredAt(Date.now());
+          lessonDone(1);
           connectionRef.current?.send({ t: "fire", yaw: shot.yaw, pitch: shot.pitch });
         },
         fireIntervalMs: () => FIRE_INTERVAL[gearRef.current.blaster] ?? FIRE_INTERVAL.mk1,
         onFirstStick: () => {
           window.localStorage.setItem(HINT_KEY, "seen");
           setShowHint(false);
+          lessonDone(0);
         },
       });
       controlsRef.current = controls;
@@ -361,6 +499,7 @@ export default function PlayScreen() {
         debug.vettaiDebug = {
           stats: () => world.stats(),
           readout: () => world.readout(),
+          markers: () => world.markers(),
           place: () => world.place(),
           look: () => controlsRef.current?.look() ?? { yaw: 0, pitch: 0 },
           move: () => controlsRef.current?.move() ?? { dx: 0, dz: 0 },
@@ -459,9 +598,7 @@ export default function PlayScreen() {
             questsRef.current = next;
             setQuests(next);
 
-            const name = questLabel(frame.quest.kind);
-            if (frame.quest.state === "done") toast(`${name} complete. Claim at the office`);
-            else toast(`${name} ${frame.quest.progress}/${frame.quest.target}`);
+            announce(frame.quest);
             return;
           }
           if (frame.kind === "gear") {
@@ -520,7 +657,7 @@ export default function PlayScreen() {
       later?.();
       drop();
     };
-  }, [attempt, openSheet, reduced, toast]);
+  }, [announce, attempt, lessonDone, openSheet, reduced, toast]);
 
   const interact = useCallback(() => {
     const target = promptRef.current;
@@ -572,6 +709,8 @@ export default function PlayScreen() {
     <div className={`${styles.stage} overflow-hidden bg-night`}>
       <canvas ref={canvasRef} className="absolute inset-0 block h-full w-full" />
 
+      {playing && <div aria-hidden className={styles.vignette} />}
+
       <div
         ref={surfaceRef}
         className={`absolute inset-0 select-none ${sheet ? "pointer-events-none" : "touch-none"}`}
@@ -582,11 +721,13 @@ export default function PlayScreen() {
         <Hud
           shield={shield}
           quests={quests}
+          objective={objective}
+          carryUntil={carryUntil}
           toasts={toasts}
           latency={latency}
           aimHot={aimHot}
           firedAt={firedAt}
-          prompt={promptLabel(prompt, quests)}
+          prompt={promptAction(prompt, quests, objective)}
           onInteract={interact}
           onOpenBoard={() => openSheet("board")}
           nearOffice={prompt?.kind === "office"}
@@ -594,12 +735,18 @@ export default function PlayScreen() {
           paidAt={paidAt}
           attachFire={attachFire}
           hitAt={hitAt}
-          showHint={showHint}
+          showHint={showHint && lesson === null}
           sheetOpen={sheet !== null}
           reduced={Boolean(reduced)}
           readout={readout}
         />
       )}
+
+      <AnimatePresence>
+        {playing && lesson !== null && sheet === null && (
+          <FirstMinute lesson={lesson} reduced={Boolean(reduced)} onTap={() => lessonDone(lesson)} />
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {sheet === "board" && (
@@ -610,6 +757,10 @@ export default function PlayScreen() {
             network={network}
             reduced={Boolean(reduced)}
             celebrate={celebrate}
+            map={worldMap}
+            place={standingAt}
+            tracked={pinned}
+            onTrack={setPinned}
             onQuests={takeQuests}
             onLadder={() => openSheet("ladder")}
             onClose={closeSheet}
@@ -717,22 +868,138 @@ export default function PlayScreen() {
   );
 }
 
-/** The label under the thumb, worked out from the place and the day's courier route. */
-function promptLabel(
+/**
+ * The button the thumb reaches for when the player is standing on something. It says the
+ * action, not the place, and it wears the accent when the place is the tracked objective.
+ */
+function promptAction(
   prompt: Prompt | null,
   quests: QuestView[],
-): { text: string } | null {
+  objective: Objective | null,
+): { text: string; primary: boolean } | null {
   if (!prompt) return null;
-  if (prompt.kind === "office") return { text: "Tap: Office" };
-  if (prompt.kind === "shop") return { text: "Tap: Shop" };
-  if (prompt.kind === "landmark") return { text: `Tap: Landmark ${prompt.index + 1}` };
+  const tracked = (id: string) => objective?.spots.includes(id) === true;
+
+  if (prompt.kind === "office") return { text: "Open the board", primary: tracked("office") };
+  if (prompt.kind === "shop") return { text: "Open the shop", primary: tracked("shop") };
+  if (prompt.kind === "landmark") {
+    return { text: "Visit landmark", primary: tracked(`landmark:${prompt.index}`) };
+  }
 
   const courier = quests.find((quest) => quest.kind === "courier");
   if (!courier || courier.state !== "open" || !courier.route) return null;
   const carrying = courier.carrying === true;
-  if (!carrying && courier.route.from === prompt.point) return { text: "Tap: Pick up the parcel" };
-  if (carrying && courier.route.to === prompt.point) return { text: "Tap: Deliver the parcel" };
+  const primary = tracked("courier");
+  if (!carrying && courier.route.from === prompt.point) return { text: "Pick up", primary };
+  if (carrying && courier.route.to === prompt.point) return { text: "Deliver", primary };
   return null;
+}
+
+/**
+ * The first minute, and only ever the first. Three lines, each one dismissed by doing the
+ * thing it asks for or by tapping it. Everything but the words is left clickable, so the
+ * lesson can be finished with the thumb it is teaching.
+ */
+const LESSONS = [
+  {
+    step: "Walk",
+    title: "Drag left to walk, drag right to look",
+    note: "Two thumbs, no buttons to learn.",
+  },
+  {
+    step: "Shoot",
+    title: "Tap FIRE when the ring is on a drone",
+    note: "The ring picks the drone out for you.",
+  },
+  {
+    step: "Get paid",
+    title: "Bounties are paid to your wallet at the office",
+    note: "Follow the orange beam, claim at the board.",
+  },
+];
+
+function FirstMinute({
+  lesson,
+  reduced,
+  onTap,
+}: {
+  lesson: number;
+  reduced: boolean;
+  onTap: () => void;
+}) {
+  const words = LESSONS[lesson];
+  if (!words) return null;
+
+  const glow = ["18% 82%", "84% 86%", "16% 16%"][lesson] ?? "50% 50%";
+
+  return (
+    <motion.div
+      key="first-minute"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: reduced ? 0 : 0.5, ease: EASE }}
+      data-testid="first-minute"
+      className="pointer-events-none absolute inset-0 z-30"
+    >
+      <div
+        aria-hidden
+        className="absolute inset-0"
+        style={{
+          background: `radial-gradient(70% 45% at ${glow}, rgba(255,106,43,0.18) 0%, rgba(11,15,26,0.82) 45%, rgba(11,15,26,0.88) 100%)`,
+        }}
+      />
+
+      {lesson === 0 && <Ghost className="bottom-[20%] left-[16%] h-28 w-28" reduced={reduced} />}
+      {lesson === 1 && (
+        <Ghost
+          className="bottom-[max(2.5rem,calc(env(safe-area-inset-bottom)+1.5rem))] right-6 h-[72px] w-[72px]"
+          reduced={reduced}
+        />
+      )}
+      {lesson === 2 && (
+        <Ghost
+          className="left-3 top-[max(2.8rem,calc(env(safe-area-inset-top)+2.3rem))] h-24 w-56 rounded-btn"
+          reduced={reduced}
+        />
+      )}
+
+      <AnimatePresence mode="wait">
+        <motion.button
+          key={lesson}
+          type="button"
+          onClick={onTap}
+          initial={{ opacity: 0, y: reduced ? 0 : 22 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: reduced ? 0 : -16 }}
+          transition={{ duration: reduced ? 0 : 0.5, ease: EASE }}
+          data-testid="first-minute-tap"
+          className="pointer-events-auto absolute left-6 right-6 top-[38%] text-left"
+        >
+          <span className="label-type text-hunt">
+            {lesson + 1} / {LESSONS.length} &#183; {words.step}
+          </span>
+          <span className="display-type mt-3 block max-w-[14ch] text-[clamp(2rem,9vw,3.4rem)] uppercase leading-[0.92] tracking-[-0.02em] text-paper">
+            {words.title}
+          </span>
+          <span className="mt-3 block max-w-[32ch] text-base text-paper/60">{words.note}</span>
+          <span className="label-type mt-5 block text-paper/35">Tap to carry on</span>
+        </motion.button>
+      </AnimatePresence>
+    </motion.div>
+  );
+}
+
+/** The outline that says where to put the thumb. It breathes unless the phone says not to. */
+function Ghost({ className, reduced }: { className: string; reduced: boolean }) {
+  return (
+    <motion.span
+      aria-hidden
+      animate={reduced ? { opacity: 0.5 } : { opacity: [0.25, 0.75, 0.25], scale: [1, 1.06, 1] }}
+      transition={reduced ? { duration: 0 } : { duration: 2.2, repeat: Infinity, ease: "easeInOut" }}
+      className={`absolute rounded-full border-2 border-hunt ${className}`}
+    />
+  );
 }
 
 type PanelProps = {

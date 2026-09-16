@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { addRim, type Look } from "./materials";
 
 /**
  * The people on the street. Kenney's Blocky Characters ship the three clips this game
@@ -31,6 +32,12 @@ type Loaded = {
 };
 
 const cache = new Map<string, Loaded>();
+
+/** One rimmed material per skin, shared by every body wearing it in the second look. */
+const rimmed = new Map<string, THREE.MeshLambertMaterial>();
+
+/** Shoulder height on a 1.8 m body, where the accent strip sits. */
+const SHOULDER = 1.36;
 
 export function isSkin(value: string): value is Skin {
   return (SKINS as readonly string[]).includes(value);
@@ -118,11 +125,40 @@ function gaitFor(speed: number): Gait {
  * One body, ready to be put on the street. The model and its materials are shared with
  * every other character wearing the same skin; only the mixer belongs to this one.
  */
-export function createCharacter(skin: string): Character {
-  const loaded = cache.get(isSkin(skin) ? skin : "default") ?? cache.get("default");
+/**
+ * The same skin with a fresnel edge and a strip of the accent across the shoulders. On a
+ * street this dark a body without a rim is a silhouette-shaped hole, and the strip is
+ * what tells you at a glance that the shape down the road is a player.
+ */
+function rimSkin(skin: string, source: THREE.MeshLambertMaterial): THREE.MeshLambertMaterial {
+  const found = rimmed.get(skin);
+  if (found) return found;
+
+  const material = source.clone();
+  material.color.setHex(0xc2ccdf);
+  addRim(material, {
+    colour: 0x7fa8ff,
+    strength: 0.95,
+    band: { at: SHOULDER, width: 0.05, colour: 0xff6a2b },
+  });
+  rimmed.set(skin, material);
+  return material;
+}
+
+export function createCharacter(skin: string, look: Look = "v1"): Character {
+  const wearing = isSkin(skin) ? skin : "default";
+  const loaded = cache.get(wearing) ?? cache.get("default");
   if (!loaded) throw new Error("the characters have not been loaded yet");
 
   const model = loaded.model.clone(true);
+  if (look === "v2") {
+    model.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const material = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+      if (material) mesh.material = rimSkin(wearing, material as THREE.MeshLambertMaterial);
+    });
+  }
   const group = stand(model);
   const mixer = new THREE.AnimationMixer(model);
 
@@ -169,6 +205,9 @@ export function createCharacter(skin: string): Character {
 
 /** Frees the shared models. Call once, when the game screen goes away. */
 export function disposeCharacters(): void {
+  for (const material of rimmed.values()) material.dispose();
+  rimmed.clear();
+
   for (const loaded of cache.values()) {
     loaded.model.traverse((child) => {
       const mesh = child as THREE.Mesh;

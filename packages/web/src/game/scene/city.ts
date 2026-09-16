@@ -1,11 +1,15 @@
 import * as THREE from "three";
 import type { BuildingAsset, CityAssets } from "./assets";
 import type { WorldMap } from "../map";
+import { glowTexture, type Look, noiseTexture, PALETTE } from "./materials";
 
 /**
  * The block, drawn from the map the server generated. One InstancedMesh per building type
  * keeps the whole city inside about two dozen draw calls, which is the budget the live
  * game has to share on a phone.
+ *
+ * The second look is additive: every branch below is guarded by `look`, so the first look
+ * draws exactly what it drew before the second one was written.
  */
 
 const LOT_FILL = 0.84;
@@ -22,6 +26,18 @@ const LAMP = "rgba(255,168,92,0.34)";
 
 const PARK_COLOR = 0x14271c;
 const WINDOW_COLOR = 0xffb35c;
+
+/** The wet street: darker tarmac, brighter paint, a kerb that catches the lamps. */
+const ASPHALT_V2 = "#0f141d";
+const PAVEMENT_V2 = "#1d2432";
+const KERB_V2 = "#39445a";
+const LANE_V2 = "rgba(226,232,246,0.62)";
+
+/** How far a lamp's pool of light reaches across the road, in metres. */
+const POOL_RADIUS = 5.2;
+
+/** One window in twenty is on a bad ballast and flickers. */
+const FLICKER_SHARE = 0.05;
 
 /** Same seeded generator on every load, so the lit windows never move between visits. */
 function mulberry32(seed: number): () => number {
@@ -93,6 +109,146 @@ function streetTexture(map: WorldMap): THREE.CanvasTexture {
   return texture;
 }
 
+/**
+ * The same cell, repainted for the second look: darker tarmac with blotches of old
+ * repair, a kerb line bright enough to catch a lamp, a zebra across the mouth of the
+ * junction, and no baked light pools. The pools are real geometry now, so they land
+ * under the lamp that is actually standing there.
+ */
+function streetTextureV2(map: WorldMap): THREE.CanvasTexture {
+  const cell = map.lotSize + map.street;
+  const px = STREET_TILE_PX / cell;
+  const canvas = document.createElement("canvas");
+  canvas.width = STREET_TILE_PX;
+  canvas.height = STREET_TILE_PX;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("this browser gave no 2d canvas for the street");
+
+  ctx.fillStyle = ASPHALT_V2;
+  ctx.fillRect(0, 0, STREET_TILE_PX, STREET_TILE_PX);
+
+  // Patches of newer and older tarmac. Without them the road is one flat value and the
+  // camera slides over it as if it were a backdrop.
+  const patches = mulberry32(0x4d21);
+  for (let patch = 0; patch < 90; patch += 1) {
+    const size = (6 + patches() * 42) * (px / 8);
+    const shade = patches() > 0.5 ? "rgba(255,255,255,0.022)" : "rgba(0,0,0,0.05)";
+    ctx.fillStyle = shade;
+    ctx.beginPath();
+    ctx.ellipse(
+      patches() * STREET_TILE_PX,
+      patches() * STREET_TILE_PX,
+      size,
+      size * (0.4 + patches() * 0.8),
+      patches() * Math.PI,
+      0,
+      Math.PI * 2,
+    );
+    ctx.fill();
+  }
+
+  const lotStart = map.street * px;
+  const lotSize = map.lotSize * px;
+  ctx.fillStyle = KERB_V2;
+  ctx.fillRect(lotStart - 1.1 * px, lotStart - 1.1 * px, lotSize + 2.2 * px, lotSize + 2.2 * px);
+  ctx.fillStyle = PAVEMENT_V2;
+  ctx.fillRect(lotStart, lotStart, lotSize, lotSize);
+
+  // Paving slabs, drawn as hairlines rather than tiles: at four metres up the eye reads
+  // the rhythm, not the stone.
+  ctx.strokeStyle = "rgba(0,0,0,0.3)";
+  ctx.lineWidth = Math.max(1, 0.05 * px);
+  for (let slab = 1; slab * 2 * px < map.lotSize * px; slab += 1) {
+    const at = lotStart + slab * 2 * px;
+    ctx.beginPath();
+    ctx.moveTo(at, lotStart);
+    ctx.lineTo(at, lotStart + lotSize);
+    ctx.moveTo(lotStart, at);
+    ctx.lineTo(lotStart + lotSize, at);
+    ctx.stroke();
+  }
+
+  const centre = (map.street / 2) * px;
+  ctx.strokeStyle = LANE_V2;
+  ctx.lineWidth = 0.18 * px;
+  ctx.setLineDash([2.2 * px, 2.4 * px]);
+  ctx.beginPath();
+  ctx.moveTo(centre, map.street * px);
+  ctx.lineTo(centre, STREET_TILE_PX);
+  ctx.moveTo(map.street * px, centre);
+  ctx.lineTo(STREET_TILE_PX, centre);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // The crossing at the junction, worn down the middle where the tyres run.
+  ctx.fillStyle = "rgba(226,232,246,0.34)";
+  for (let bar = 0; bar < 5; bar += 1) {
+    ctx.fillRect(lotStart + (bar * 1.5 + 0.4) * px, 0.9 * px, 0.7 * px, 2.1 * px);
+    ctx.fillRect(0.9 * px, lotStart + (bar * 1.5 + 0.4) * px, 2.1 * px, 0.7 * px);
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  const cells = map.size / cell;
+  texture.repeat.set(cells, cells);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
+  return texture;
+}
+
+/**
+ * How wet each patch of road is. Rain has run to the gutters and dried on the crown, so
+ * the noise is stretched along the streets rather than sprinkled evenly.
+ */
+function wetness(map: WorldMap): THREE.Texture {
+  const texture = noiseTexture(0x2c8f, 128, 0.55);
+  const cells = map.size / (map.lotSize + map.street);
+  texture.repeat.set(cells * 0.5, cells * 2);
+  return texture;
+}
+
+/**
+ * The pool of light under every lamp, as one instanced disc. A point light per lamp is
+ * hundreds of lights the phone cannot pay for; this is the part of that light the player
+ * actually looks at.
+ */
+function lampPools(map: WorldMap): THREE.InstancedMesh {
+  const spots = lampSpots(map);
+  const count = spots.length / 2;
+
+  const disc = new THREE.CircleGeometry(POOL_RADIUS, 20);
+  disc.rotateX(-Math.PI / 2);
+
+  const pools = new THREE.InstancedMesh(
+    disc,
+    new THREE.MeshBasicMaterial({
+      map: glowTexture([
+        { at: 0, colour: "rgba(255,196,138,0.85)" },
+        { at: 0.35, colour: "rgba(255,150,80,0.34)" },
+        { at: 1, colour: "rgba(255,120,40,0)" },
+      ]),
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false,
+    }),
+    count,
+  );
+  pools.name = "lampPools";
+  pools.renderOrder = 1;
+
+  const dummy = new THREE.Object3D();
+  for (let index = 0; index < count; index += 1) {
+    dummy.position.set(spots[index * 2] as number, 0.035, spots[index * 2 + 1] as number);
+    dummy.updateMatrix();
+    pools.setMatrixAt(index, dummy.matrix);
+  }
+  pools.instanceMatrix.needsUpdate = true;
+  pools.computeBoundingSphere();
+  return pools;
+}
+
 function flatPlane(size: number): THREE.PlaneGeometry {
   const plane = new THREE.PlaneGeometry(size, size);
   plane.rotateX(-Math.PI / 2);
@@ -159,7 +315,7 @@ const FACES: { rotation: number; axis: "x" | "z"; sign: number }[] = [
  * Lit windows, as two InstancedMeshes: a sharp amber quad and a wider faint one over it.
  * That second pass is the glow, which is why this scene needs no postprocessing.
  */
-function windows(placed: Placed[]): THREE.Group {
+function windows(placed: Placed[], look: Look): THREE.Group {
   const dummy = new THREE.Object3D();
   const offset = new THREE.Vector3();
   const up = new THREE.Vector3(0, 1, 0);
@@ -213,18 +369,35 @@ function windows(placed: Placed[]): THREE.Group {
   // Capped at its own opacity the glow still reads from across the block.
   const glow = new THREE.InstancedMesh(
     pane,
-    new THREE.MeshBasicMaterial({
-      color: WINDOW_COLOR,
-      transparent: true,
-      opacity: 0.18,
-      depthWrite: false,
-      toneMapped: false,
-    }),
+    look === "v2"
+      ? new THREE.MeshBasicMaterial({
+          color: WINDOW_COLOR,
+          map: glowTexture([
+            { at: 0, colour: "rgba(255,255,255,0.9)" },
+            { at: 0.35, colour: "rgba(255,255,255,0.32)" },
+            { at: 1, colour: "rgba(255,255,255,0)" },
+          ]),
+          transparent: true,
+          opacity: 0.5,
+          depthWrite: false,
+          toneMapped: false,
+          blending: THREE.AdditiveBlending,
+        })
+      : new THREE.MeshBasicMaterial({
+          color: WINDOW_COLOR,
+          transparent: true,
+          opacity: 0.18,
+          depthWrite: false,
+          toneMapped: false,
+        }),
     matrices.length,
   );
 
   const wide = new THREE.Matrix4();
-  const halo = new THREE.Matrix4().makeScale(2.3, 1.9, 1);
+  const halo =
+    look === "v2"
+      ? new THREE.Matrix4().makeScale(3.4, 2.8, 1)
+      : new THREE.Matrix4().makeScale(2.3, 1.9, 1);
   matrices.forEach((matrix, index) => {
     lit.setMatrixAt(index, matrix);
     wide.copy(matrix).multiply(halo);
@@ -237,7 +410,72 @@ function windows(placed: Placed[]): THREE.Group {
   glow.renderOrder = 2;
 
   group.add(lit, glow);
+  if (look === "v2") tintWindows(group, lit, glow, matrices.length);
   return group;
+}
+
+/**
+ * The second look's windows: three warm tints, a few cold offices somebody left a strip
+ * light on in, and one in twenty on a failing ballast. Per instance colour keeps all of
+ * it inside the same two draw calls, and the flicker only touches the card when a
+ * window actually changes state.
+ */
+function tintWindows(
+  group: THREE.Group,
+  lit: THREE.InstancedMesh,
+  glow: THREE.InstancedMesh,
+  count: number,
+): void {
+  (lit.material as THREE.MeshBasicMaterial).color.setHex(0xffffff);
+  (glow.material as THREE.MeshBasicMaterial).color.setHex(0xffffff);
+
+  const rng = mulberry32(0x8817);
+  const shade = new THREE.Color();
+  const flicker: number[] = [];
+  const phase: number[] = [];
+  const rate: number[] = [];
+  const bright: number[] = [];
+
+  for (let index = 0; index < count; index += 1) {
+    const cold = rng() > 0.92;
+    const warm = PALETTE.windowWarm[Math.min(2, Math.floor(rng() * 3))] ?? WINDOW_COLOR;
+    const hex = cold ? PALETTE.windowCold : warm;
+    shade.setHex(hex);
+    lit.setColorAt(index, shade);
+    glow.setColorAt(index, shade);
+
+    if (rng() < FLICKER_SHARE) {
+      flicker.push(index);
+      phase.push(rng() * 12);
+      rate.push(1.6 + rng() * 5.5);
+      bright.push(hex);
+    }
+  }
+  if (lit.instanceColor) lit.instanceColor.needsUpdate = true;
+  if (glow.instanceColor) glow.instanceColor.needsUpdate = true;
+
+  const state = new Uint8Array(flicker.length).fill(1);
+  const dim = new THREE.Color();
+
+  group.userData.tick = (elapsed: number) => {
+    let changed = false;
+    for (let slot = 0; slot < flicker.length; slot += 1) {
+      const wave = Math.sin(elapsed * (rate[slot] as number) + (phase[slot] as number));
+      const on = wave > -0.55 ? 1 : 0;
+      if (on === state[slot]) continue;
+      state[slot] = on;
+      changed = true;
+      const index = flicker[slot] as number;
+      const hex = bright[slot] as number;
+      shade.setHex(hex);
+      dim.setHex(hex).multiplyScalar(0.16);
+      lit.setColorAt(index, on === 1 ? shade : dim);
+      glow.setColorAt(index, on === 1 ? shade : dim);
+    }
+    if (!changed) return;
+    if (lit.instanceColor) lit.instanceColor.needsUpdate = true;
+    if (glow.instanceColor) glow.instanceColor.needsUpdate = true;
+  };
 }
 
 /** Lamps stand this far apart along a street, and this high. */
@@ -341,21 +579,31 @@ function streetLamps(map: WorldMap): THREE.InstancedMesh {
   return lamps;
 }
 
-export function buildCity(map: WorldMap, assets: CityAssets): THREE.Group {
+export function buildCity(map: WorldMap, assets: CityAssets, look: Look = "v1"): THREE.Group {
   const city = new THREE.Group();
   city.name = "city";
 
   const outskirts = new THREE.Mesh(
     flatPlane(map.size * 4),
-    new THREE.MeshBasicMaterial({ color: 0x080b12 }),
+    new THREE.MeshBasicMaterial({ color: look === "v2" ? 0x0a0e18 : 0x080b12 }),
   );
   outskirts.position.y = -0.08;
   city.add(outskirts);
 
-  const ground = new THREE.Mesh(
-    flatPlane(map.size),
-    new THREE.MeshLambertMaterial({ map: streetTexture(map) }),
-  );
+  // The wet road is the one standard material in the scene. There is no reflection probe
+  // behind it: the shine is the specular highlight of the two lamp lights and the warm
+  // key, which is all a phone can spare and all a night street needs.
+  const roadMaterial =
+    look === "v2"
+      ? new THREE.MeshStandardMaterial({
+          map: streetTextureV2(map),
+          roughnessMap: wetness(map),
+          roughness: 0.85,
+          metalness: 0.32,
+        })
+      : new THREE.MeshLambertMaterial({ map: streetTexture(map) });
+
+  const ground = new THREE.Mesh(flatPlane(map.size), roadMaterial);
   city.add(ground);
 
   if (map.parks.length > 0) {
@@ -399,8 +647,20 @@ export function buildCity(map: WorldMap, assets: CityAssets): THREE.Group {
   }
 
   city.add(streetLamps(map));
-  city.add(windows(placed));
+  if (look === "v2") city.add(lampPools(map));
+  city.add(windows(placed, look));
   return city;
+}
+
+/**
+ * Moves whatever in the city moves: at the moment that is the failing windows. Safe to
+ * call on a first look city, which has nothing to move.
+ */
+export function animateCity(city: THREE.Group, elapsed: number): void {
+  city.traverse((child) => {
+    const tick = child.userData.tick as ((at: number) => void) | undefined;
+    tick?.(elapsed);
+  });
 }
 
 /** Frees what buildCity made itself. The shared building assets are freed by CityAssets. */
@@ -415,8 +675,9 @@ export function disposeCity(city: THREE.Group, assets: CityAssets): void {
     const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
     for (const material of materials) {
       if (keep.has(material)) continue;
-      const lambert = material as THREE.MeshLambertMaterial;
-      lambert.map?.dispose();
+      const textured = material as THREE.MeshStandardMaterial;
+      textured.map?.dispose();
+      textured.roughnessMap?.dispose();
       material.dispose();
     }
   });
