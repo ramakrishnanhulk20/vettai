@@ -83,6 +83,12 @@ export type Controls = {
   move: () => MoveIntent;
   /** Binds the HUD's fire button, so the repeat while held lives in one place. */
   attachFire: (button: HTMLElement) => () => void;
+  /**
+   * Puts the move counter back where a room says it is. A reconnect starts the server's
+   * count again at zero, so a client that kept counting would send numbers the server has
+   * never seen and the world would replay every unacknowledged intent before catching up.
+   */
+  resetSequence: (seq: number) => void;
   dispose: () => void;
 };
 
@@ -486,6 +492,12 @@ export function createControls(options: ControlsOptions): Controls {
     move: () => {
       settleYaw();
       return intent();
+    },
+
+    resetSequence(seq) {
+      sequence = Number.isFinite(seq) && seq > 0 ? Math.floor(seq) : 0;
+      lastSent = { dx: 0, dz: 0, yaw: 0 };
+      lastSentAt = 0;
     },
 
     attachFire(button: HTMLElement) {

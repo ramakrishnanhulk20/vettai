@@ -8,6 +8,10 @@ const nextConfig: NextConfig = {
   // folder the dev server is holding open.
   distDir: process.env.NEXT_DIST_DIR ?? ".next",
 
+  // The dev overlay button parks itself over the walk stick and the loading bar, which is
+  // the one corner of the screen a phone screenshot cannot afford to lose.
+  devIndicators: false,
+
   // Next writes its own AGENTS.md and CLAUDE.md on every dev start. This repo
   // keeps those names for its own private files, so the generator stays off.
   agentRules: false,

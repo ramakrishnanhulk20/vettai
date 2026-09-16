@@ -104,6 +104,8 @@ export type Health = {
   network: "TestAlbatross" | "MainAlbatross";
   rooms: number;
   online: number;
+  /** What one wallet may be paid in a day, in NIM. Absent on a world that does not say. */
+  dailyCapNim?: string;
 };
 
 export type LadderWeek = {

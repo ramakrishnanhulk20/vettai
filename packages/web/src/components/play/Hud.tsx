@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import type { QuestView } from "@/lib/api";
+import type { Objective } from "@/game/markers";
 import type { Readout } from "@/game/world";
 import Compass from "./Compass";
 import styles from "./play.module.css";
@@ -18,6 +19,14 @@ import styles from "./play.module.css";
  */
 
 export type Toast = { id: string; text: string };
+
+/**
+ * What the place under the player's feet offers. A `do` is a button; a `note` is a line
+ * that answers "why is there no button here" without the server ever being asked.
+ */
+export type PromptAction =
+  | { kind: "do"; text: string; primary: boolean }
+  | { kind: "note"; text: string };
 
 /** What the round trip number opens: everything the phone knows about its own frame. */
 export type Panel = Readout & { latency: number | null; jitter: number | null };
@@ -35,7 +44,7 @@ export type HudProps = {
   shield: number;
   quests: QuestView[];
   /** The one thing to do next. The sentence comes from React, the metres from the frame. */
-  objective: { sentence: string } | null;
+  objective: Objective | null;
   /** When a carried parcel goes cold, as a clock reading, or null when nothing is carried. */
   carryUntil: number | null;
   toasts: Toast[];
@@ -44,19 +53,21 @@ export type HudProps = {
   /** The moment of the last shot this phone drew, which kicks the crosshair. */
   firedAt: number;
   /** The action for the place the player is standing on, accent when it is the objective. */
-  prompt: { text: string; primary: boolean } | null;
+  prompt: PromptAction | null;
   onInteract: () => void;
-  /** The quest strip and the Board button both lead to the same place. */
+  /** The quest strip leads to the board, and so does the action button at the door. */
   onOpenBoard: () => void;
-  nearOffice: boolean;
   /** Claims the treasury has not finished sending yet. */
   payouts: number;
+  /** Claims the treasury is holding, which the board explains in full. */
+  held: number;
+  /** True when the hold is the pool running dry rather than a cap that lifts at midnight. */
+  heldOnPool: boolean;
   /** The moment the last payout landed, which flashes the shield bars. */
   paidAt: number;
   attachFire: (button: HTMLElement | null) => void;
   /** The moment the last shield bar was lost, which flashes the edge of the screen. */
   hitAt: number;
-  showHint: boolean;
   /** While a panel is up the thumb belongs to the panel, so the controls step back. */
   sheetOpen: boolean;
   reduced: boolean;
@@ -93,17 +104,17 @@ export default function Hud({
   prompt,
   onInteract,
   onOpenBoard,
-  nearOffice,
   payouts,
+  held,
+  heldOnPool,
   paidAt,
   attachFire,
   hitAt,
-  showHint,
   sheetOpen,
   reduced,
   readout,
 }: HudProps) {
-  const claimable = quests.some((quest) => quest.state === "done");
+  const claimable = quests.some((quest) => quest.state === "done" && Number(quest.rewardLuna) > 0);
   const [openReadout, setOpenReadout] = useState(false);
   const [panel, setPanel] = useState<Panel | null>(null);
   const [copied, setCopied] = useState(false);
@@ -207,6 +218,12 @@ export default function Hud({
             {payouts === 1 ? "1 payout on its way" : `${payouts} payouts on their way`}
           </span>
         )}
+        {held > 0 && (
+          <span className="mt-1 font-mono text-[11px] text-paper/70" data-testid="held-line">
+            {held === 1 ? "1 payout held" : `${held} payouts held`}
+            {heldOnPool ? ", pool exhausted" : " until tomorrow"}
+          </span>
+        )}
       </button>
 
         {latency !== null && (
@@ -228,42 +245,46 @@ export default function Hud({
             far from the server
           </span>
         )}
-
-        <AnimatePresence>
-          {openReadout && (
-            <motion.div
-              key="readout"
-              data-testid="readout"
-              initial={{ opacity: 0, y: reduced ? 0 : -8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: reduced ? 0 : -8 }}
-              transition={{ duration: reduced ? 0 : 0.22, ease: "easeOut" }}
-              className={`pointer-events-auto mt-1 w-[15.5rem] shrink-0 border border-line bg-night/85 p-2.5 text-left backdrop-blur-sm ${styles.readout}`}
-            >
-              {panel === null ? (
-                <p className="font-mono text-[10px] text-paper/40">reading the frame</p>
-              ) : (
-                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-[3px] font-mono text-[10px] leading-tight">
-                  {readoutRows(panel).map(([label, value]) => (
-                    <div key={label} className="contents">
-                      <dt className="text-paper/45">{label}</dt>
-                      <dd className="truncate text-right text-paper/85">{value}</dd>
-                    </div>
-                  ))}
-                </dl>
-              )}
-              <button
-                type="button"
-                onClick={copyReadout}
-                data-testid="readout-copy"
-                className="label-type mt-2 w-full border border-line px-2 py-1.5 text-paper/60 transition-colors duration-200 hover:border-hunt hover:text-paper"
-              >
-                {copied ? "copied" : "copy"}
-              </button>
-            </motion.div>
-          )}
-        </AnimatePresence>
       </div>
+
+      {/* The instrument panel lives on the left, under the shield, and is held short of the
+          middle of the screen: the crosshair is the one thing it may never sit on. */}
+      <AnimatePresence>
+        {openReadout && (
+          <motion.div
+            key="readout"
+            data-testid="readout"
+            initial={{ opacity: 0, y: reduced ? 0 : -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: reduced ? 0 : -8 }}
+            transition={{ duration: reduced ? 0 : 0.22, ease: "easeOut" }}
+            className={`pointer-events-auto absolute left-4 top-[max(9.4rem,calc(env(safe-area-inset-top)+8.9rem))] max-h-[calc(46svh-9.4rem)] w-max max-w-[60%] overflow-y-auto border border-line bg-night/85 p-2.5 text-left backdrop-blur-sm ${styles.readout}`}
+          >
+            {panel === null ? (
+              <p className="font-mono text-[9px] text-paper/40 min-[390px]:text-[10px]">
+                reading the frame
+              </p>
+            ) : (
+              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-[3px] font-mono text-[9px] leading-tight min-[390px]:text-[10px]">
+                {readoutRows(panel).map(([label, value]) => (
+                  <div key={label} className="contents">
+                    <dt className="text-paper/45">{label}</dt>
+                    <dd className="truncate text-right text-paper/85">{value}</dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+            <button
+              type="button"
+              onClick={copyReadout}
+              data-testid="readout-copy"
+              className="label-type mt-2 w-full border border-line px-2 py-1.5 text-paper/60 transition-colors duration-200 hover:border-hunt hover:text-paper"
+            >
+              {copied ? "copied" : "copy"}
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <div className="pointer-events-none absolute inset-x-0 top-[max(9.5rem,calc(env(safe-area-inset-top)+9rem))] flex flex-col items-center gap-2 px-6">
         <AnimatePresence initial={false}>
@@ -302,43 +323,28 @@ export default function Hud({
             transition={{ duration: reduced ? 0 : 0.3, ease: "easeOut" }}
             className="absolute inset-x-0 bottom-[max(9.5rem,calc(env(safe-area-inset-bottom)+8.5rem))] flex items-center justify-center gap-2 px-6"
           >
-            <button
-              type="button"
-              onClick={onInteract}
-              data-testid="interact"
-              className={`pointer-events-auto flex min-h-[56px] items-center rounded-btn px-6 text-base backdrop-blur transition-transform duration-200 hover:scale-[1.02] active:scale-[0.98] ${
-                prompt.primary
-                  ? "bg-hunt font-medium text-night shadow-[0_14px_38px_rgba(255,106,43,0.35)]"
-                  : "border border-hunt bg-night/80 text-paper hover:bg-hunt hover:text-night"
-              }`}
-            >
-              {prompt.text}
-            </button>
-            {nearOffice && (
+            {prompt.kind === "do" ? (
               <button
                 type="button"
-                onClick={onOpenBoard}
-                data-testid="board-button"
-                className="label-type pointer-events-auto flex min-h-[56px] items-center rounded-btn border border-line bg-night/80 px-3 text-paper/70 backdrop-blur transition-colors duration-200 hover:border-hunt hover:text-paper"
+                onClick={onInteract}
+                data-testid="interact"
+                className={`pointer-events-auto flex min-h-[56px] items-center rounded-btn px-6 text-base backdrop-blur transition-transform duration-200 hover:scale-[1.02] active:scale-[0.98] ${
+                  prompt.primary
+                    ? "bg-hunt font-medium text-night shadow-[0_14px_38px_rgba(255,106,43,0.35)]"
+                    : "border border-hunt bg-night/80 text-paper hover:bg-hunt hover:text-night"
+                }`}
               >
-                Board
+                {prompt.text}
               </button>
+            ) : (
+              <span
+                data-testid="prompt-note"
+                className="label-type rounded-btn border border-line bg-night/70 px-4 py-3 text-paper/60 backdrop-blur"
+              >
+                {prompt.text}
+              </span>
             )}
           </motion.div>
-        )}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {showHint && !sheetOpen && (
-          <motion.span
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: reduced ? 0 : 0.6, delay: reduced ? 0 : 0.8 }}
-            className="label-type absolute bottom-[max(6rem,calc(env(safe-area-inset-bottom)+5rem))] left-6 text-paper/40"
-          >
-            Drag here to walk
-          </motion.span>
         )}
       </AnimatePresence>
 
@@ -383,10 +389,11 @@ function Objective({
   carryUntil,
   reduced,
 }: {
-  objective: { sentence: string } | null;
+  objective: Objective | null;
   carryUntil: number | null;
   reduced: boolean;
 }) {
+  const elsewhere = objective !== null && !objective.spots.includes("courier");
   return (
     <AnimatePresence mode="wait">
       {objective && (
@@ -405,15 +412,18 @@ function Objective({
             </span>
             <span aria-hidden data-testid="objective-range" className={styles.range} />
           </p>
-          {carryUntil !== null && <Countdown until={carryUntil} />}
+          {carryUntil !== null && <Countdown until={carryUntil} dim={elsewhere} />}
         </motion.div>
       )}
     </AnimatePresence>
   );
 }
 
-/** The parcel's two minutes, counted down once a second. It goes red in the last twenty. */
-function Countdown({ until }: { until: number }) {
+/**
+ * The parcel's two minutes, counted down once a second. It goes red in the last twenty,
+ * and steps back to a whisper while the player is being pointed at a different job.
+ */
+function Countdown({ until, dim }: { until: number; dim: boolean }) {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -429,6 +439,7 @@ function Countdown({ until }: { until: number }) {
     <span
       data-testid="carry-clock"
       className={`label-type mt-1 block ${left <= 20_000 ? "text-bad" : "text-hunt"}`}
+      style={{ opacity: dim ? 0.6 : 1 }}
     >
       {left === 0 ? "the parcel went cold, pick it up again" : `${clock} left on the parcel`}
     </span>

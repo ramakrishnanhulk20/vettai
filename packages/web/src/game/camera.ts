@@ -13,8 +13,16 @@ import { segmentHitsBox } from "./slide";
  * back to a wall should never fill the screen with brick.
  */
 
+/**
+ * How far back and how high the camera sits. A portrait phone measures its field of view
+ * vertically, so the same boom that frames a laptop shot fills a third of a phone screen
+ * with the player's own back. Portrait stands further off and higher, and gets the street
+ * back.
+ */
 const BOOM = 4.6;
 const LIFT = 2.3;
+const PORTRAIT_BOOM = 6;
+const PORTRAIT_LIFT = 3.2;
 const EYE = 1.5;
 
 /** Where the shot is framed: chest height on the player, six metres down the street. */
@@ -96,13 +104,13 @@ export function createCameraRig(): CameraRig {
   let placed = false;
 
   /** The free length of the head to camera line, walked coarsely then narrowed. */
-  function freeReach(blockers: readonly Blocker[], climb: number): number {
-    if (!crosses(head, full, blockers)) return BOOM;
+  function freeReach(blockers: readonly Blocker[], climb: number, boomNow: number): number {
+    if (!crosses(head, full, blockers)) return boomNow;
 
     let low = 0;
-    let stop = BOOM;
+    let stop = boomNow;
     for (let slice = 1; slice <= MARCH; slice++) {
-      const reach = (BOOM * slice) / MARCH;
+      const reach = (boomNow * slice) / MARCH;
       probe.copy(head).addScaledVector(back, reach);
       probe.y = EYE + climb * reach;
       if (crosses(head, probe, blockers)) {
@@ -127,30 +135,35 @@ export function createCameraRig(): CameraRig {
       const dt = Math.min(Math.max(deltaSeconds, 0), 0.1);
       head.set(at.x, EYE, at.z);
 
+      const portrait = camera.aspect < 1;
+      const wide = portrait ? PORTRAIT_BOOM : BOOM;
+      const rise = portrait ? PORTRAIT_LIFT : LIFT;
+
       const flat = Math.cos(pitch);
       back.set(-Math.sin(yaw), 0, -Math.cos(yaw));
       ahead.set(Math.sin(yaw) * flat, Math.sin(pitch), Math.cos(yaw) * flat);
 
       // Height is linear in boom length, so the head to camera line is straight and every
       // probe along it sits exactly where the camera would.
-      const climb = LIFT / BOOM - Math.sin(pitch);
-      full.copy(head).addScaledVector(back, BOOM);
-      full.y = EYE + climb * BOOM;
+      const climb = rise / wide - Math.sin(pitch);
+      full.copy(head).addScaledVector(back, wide);
+      full.y = EYE + climb * wide;
 
       nearby.length = 0;
       for (const building of blockers) {
         const box = building.aabb;
         if (
-          at.x > box.minX - BOOM - 2 &&
-          at.x < box.maxX + BOOM + 2 &&
-          at.z > box.minZ - BOOM - 2 &&
-          at.z < box.maxZ + BOOM + 2
+          at.x > box.minX - wide - 2 &&
+          at.x < box.maxX + wide + 2 &&
+          at.z > box.minZ - wide - 2 &&
+          at.z < box.maxZ + wide + 2
         ) {
           nearby.push(building);
         }
       }
 
-      const free = nearby.length === 0 ? BOOM : Math.max(0, freeReach(nearby, climb) - CLEARANCE);
+      const free =
+        nearby.length === 0 ? wide : Math.max(0, freeReach(nearby, climb, wide) - CLEARANCE);
       const wantHigh = free < MIN_BOOM ? 1 : 0;
 
       const settle = 1 - Math.exp((-dt * 1000 * 3) / SETTLE_MS);
@@ -185,7 +198,7 @@ export function createCameraRig(): CameraRig {
 
       // Easing toward a spot in front of a wall would walk the camera through the wall on
       // the way, so a jump is taken in one frame and only the follow is smoothed.
-      const jumped = wanted.distanceTo(camera.position) > BOOM;
+      const jumped = wanted.distanceTo(camera.position) > wide;
       if (!placed || jumped || high > 0.5) {
         camera.position.copy(wanted);
         placed = true;
@@ -201,8 +214,9 @@ export function createCameraRig(): CameraRig {
     },
 
     snap() {
+      // Boom is worked out from scratch on the next frame, which is where the shape of the
+      // screen is known, so nothing is guessed here.
       placed = false;
-      boom = BOOM;
       high = 0;
     },
   };

@@ -249,6 +249,21 @@ const LABEL_CELL = 8;
 
 const RING_RADIUS = 1.7;
 
+/**
+ * The answer a place gives back when it has just paid out: a ring thrown across the road
+ * and a glow lifting off the player. It is drawn from the event frame, so it lands with
+ * the step rather than after the database has been asked.
+ */
+const PULSE_MS = 640;
+const PULSE_RING_FROM = 1.1;
+const PULSE_RING_TO = 6.6;
+/** Reduced motion keeps the answer but not the travel: one ring, held, then faded out. */
+const PULSE_RING_STILL = 3.4;
+const PULSE_GLOW_RISE = 1.3;
+const PULSE_GLOW_HALF = 1.25;
+/** The readout holds the answer a little longer than the scene draws it, so a check sees it. */
+const PULSE_REPORT_MS = 2000;
+
 /** Drones further out than this are somebody else's problem, on the strip and in the scene. */
 const DRONE_SIGHT_M = 60;
 
@@ -300,11 +315,15 @@ export type MarkerReadout = {
   tracked: string | null;
   /** What the objective line is printing as its distance right now. */
   range: string;
+  /** The last landmark, pickup or deliver the world answered, while the answer is live. */
+  pulse: { spot: string | null; ageMs: number } | null;
 };
 
 export type Markers = {
   setSpots: (spots: MarkerSpot[]) => void;
   setObjective: (objective: Objective | null) => void;
+  /** A place just paid off: light it, throw a ring across it, lift a glow off the player. */
+  touch: (place: Place, spotId: string | null, now: number) => void;
   frame: (
     now: number,
     camera: THREE.PerspectiveCamera,
@@ -384,6 +403,38 @@ function ringTexture(): HTMLCanvasElement {
   return canvas;
 }
 
+/**
+ * Two cells on one sheet, so the ring on the ground and the glow on the player cost one
+ * draw call between them: a hard ring on the left, a soft blob on the right.
+ */
+function pulseTexture(): HTMLCanvasElement {
+  const canvas = document.createElement("canvas");
+  canvas.width = 256;
+  canvas.height = 128;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return canvas;
+
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 9;
+  ctx.beginPath();
+  ctx.arc(64, 64, 52, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.lineWidth = 3;
+  ctx.globalAlpha = 0.5;
+  ctx.beginPath();
+  ctx.arc(64, 64, 38, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  const blob = ctx.createRadialGradient(192, 64, 2, 192, 64, 62);
+  blob.addColorStop(0, "rgba(255,255,255,1)");
+  blob.addColorStop(0.45, "rgba(255,255,255,0.35)");
+  blob.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = blob;
+  ctx.fillRect(128, 0, 128, 128);
+  return canvas;
+}
+
 function additive(map: THREE.Texture | null): THREE.MeshBasicMaterial {
   return new THREE.MeshBasicMaterial({
     map,
@@ -428,6 +479,12 @@ export function createMarkers({ scene, reduced }: MarkersOptions): Markers {
   rings.renderOrder = 4;
   scene.add(rings);
 
+  const pulseMap = new THREE.CanvasTexture(pulseTexture());
+  const pulses = new THREE.Mesh(quadGeometry(2, true), additive(pulseMap));
+  pulses.frustumCulled = false;
+  pulses.renderOrder = 5;
+  scene.add(pulses);
+
   const beamPosition = beams.geometry.getAttribute("position") as THREE.BufferAttribute;
   const beamColour = beams.geometry.getAttribute("color") as THREE.BufferAttribute;
   const labelPosition = labels.geometry.getAttribute("position") as THREE.BufferAttribute;
@@ -436,6 +493,18 @@ export function createMarkers({ scene, reduced }: MarkersOptions): Markers {
   const ringPosition = rings.geometry.getAttribute("position") as THREE.BufferAttribute;
   const ringColour = rings.geometry.getAttribute("color") as THREE.BufferAttribute;
   const ringUv = rings.geometry.getAttribute("uv") as THREE.BufferAttribute;
+  const pulsePosition = pulses.geometry.getAttribute("position") as THREE.BufferAttribute;
+  const pulseColour = pulses.geometry.getAttribute("color") as THREE.BufferAttribute;
+  const pulseUv = pulses.geometry.getAttribute("uv") as THREE.BufferAttribute;
+
+  // Quad zero reads the ring cell, quad one the soft blob beside it.
+  for (const [quad, from] of [[0, 0], [1, 0.5]] as const) {
+    pulseUv.setXY(quad * 4, from, 0);
+    pulseUv.setXY(quad * 4 + 1, from + 0.5, 0);
+    pulseUv.setXY(quad * 4 + 2, from + 0.5, 1);
+    pulseUv.setXY(quad * 4 + 3, from, 1);
+  }
+  pulseUv.needsUpdate = true;
 
   for (let quad = 0; quad < MAX_RINGS; quad += 1) {
     ringUv.setXY(quad * 4, 0, 0);
@@ -449,6 +518,9 @@ export function createMarkers({ scene, reduced }: MarkersOptions): Markers {
   let objective: Objective | null = null;
   let trackedId: string | null = null;
   let rangeText = "";
+  let touchedAt = 0;
+  let touchedSpot: string | null = null;
+  const touchedPlace: Place = { x: 0, z: 0 };
 
   const root = document.documentElement;
   const written = new Map<string, string>();
@@ -504,8 +576,17 @@ export function createMarkers({ scene, reduced }: MarkersOptions): Markers {
       if (!next) rangeText = "";
     },
 
+    touch(place, spotId, now) {
+      touchedAt = now;
+      touchedSpot = spotId;
+      touchedPlace.x = place.x;
+      touchedPlace.z = place.z;
+    },
+
     frame(now, camera, at, yaw, drones) {
       const pulse = reduced ? 1 : 0.76 + 0.24 * Math.sin(now / 260);
+      // How far through its answer a touched place is: 0 as it lands, 1 once it is over.
+      const answer = touchedAt === 0 ? 1 : Math.min(1, (now - touchedAt) / PULSE_MS);
       camera.matrixWorld.extractBasis(right, up, forward);
       const camX = camera.position.x;
       const camZ = camera.position.z;
@@ -602,7 +683,10 @@ export function createMarkers({ scene, reduced }: MarkersOptions): Markers {
         const near = Math.max(0, Math.min(1, (range - 1.5) / 3));
         // Additive light saturates fast: past about two thirds the accent turns white and
         // stops reading as a colour at all, so the brightest beam stops short of that.
-        const strength = (tracked ? 0.8 : 0.38) * (lively ? pulse : 1) * near;
+        const base = (tracked ? 0.8 : 0.38) * (lively ? pulse : 1) * near;
+        // A place that has just been touched takes the light up for as long as it answers.
+        const lit = touchedSpot === spot.id && answer < 1 ? (1 - answer) * 0.55 : 0;
+        const strength = Math.min(0.95, base + lit);
 
         const x0 = spot.x - rx * BEAM_HALF_WIDTH;
         const z0 = spot.z - rz * BEAM_HALF_WIDTH;
@@ -673,6 +757,48 @@ export function createMarkers({ scene, reduced }: MarkersOptions): Markers {
         }
       }
 
+      if (answer < 1) {
+        const fade = 1 - answer;
+        const radius = reduced
+          ? PULSE_RING_STILL
+          : PULSE_RING_FROM + (PULSE_RING_TO - PULSE_RING_FROM) * (1 - fade * fade);
+        const ringAlpha = fade * 0.95;
+        const corners: [number, number][] = [
+          [-1, -1],
+          [1, -1],
+          [1, 1],
+          [-1, 1],
+        ];
+        corners.forEach(([sx, sz], corner) => {
+          pulsePosition.setXYZ(
+            corner,
+            touchedPlace.x + sx * radius,
+            0.08,
+            touchedPlace.z + sz * radius,
+          );
+          pulseColour.setXYZW(corner, ACCENT_LIGHT[0], ACCENT_LIGHT[1], ACCENT_LIGHT[2], ringAlpha);
+        });
+
+        // The glow belongs to the player, not to the place, so it follows them while it lasts.
+        const lift = 1 + (reduced ? 0.4 : PULSE_GLOW_RISE * answer);
+        const glowAlpha = fade * (reduced ? 0.6 : 0.8);
+        corners.forEach(([sx, sy], corner) => {
+          const quad = 4 + corner;
+          pulsePosition.setXYZ(
+            quad,
+            at.x + right.x * PULSE_GLOW_HALF * sx + up.x * PULSE_GLOW_HALF * sy,
+            lift + right.y * PULSE_GLOW_HALF * sx + up.y * PULSE_GLOW_HALF * sy,
+            at.z + right.z * PULSE_GLOW_HALF * sx + up.z * PULSE_GLOW_HALF * sy,
+          );
+          pulseColour.setXYZW(quad, ACCENT_LIGHT[0], ACCENT_LIGHT[1], ACCENT_LIGHT[2], glowAlpha);
+        });
+      } else {
+        hideQuad(pulsePosition, pulseColour, 0);
+        hideQuad(pulsePosition, pulseColour, 1);
+      }
+
+      pulsePosition.needsUpdate = true;
+      pulseColour.needsUpdate = true;
       beamPosition.needsUpdate = true;
       beamColour.needsUpdate = true;
       labelPosition.needsUpdate = true;
@@ -683,7 +809,7 @@ export function createMarkers({ scene, reduced }: MarkersOptions): Markers {
     },
 
     readout: () => ({
-      meshes: 3,
+      meshes: 4,
       spots: spots.map((spot) => ({
         id: spot.id,
         label: spot.label,
@@ -693,16 +819,22 @@ export function createMarkers({ scene, reduced }: MarkersOptions): Markers {
       })),
       tracked: trackedId,
       range: rangeText,
+      pulse: (() => {
+        if (touchedAt === 0) return null;
+        const ageMs = Math.round(performance.now() - touchedAt);
+        return ageMs > PULSE_REPORT_MS ? null : { spot: touchedSpot, ageMs };
+      })(),
     }),
 
     dispose() {
-      for (const mesh of [beams, labels, rings]) {
+      for (const mesh of [beams, labels, rings, pulses]) {
         scene.remove(mesh);
         mesh.geometry.dispose();
         (mesh.material as THREE.Material).dispose();
       }
       labelMap.dispose();
       ringMap.dispose();
+      pulseMap.dispose();
       for (const name of written.keys()) root.style.removeProperty(name);
       written.clear();
     },

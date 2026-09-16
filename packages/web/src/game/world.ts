@@ -129,6 +129,9 @@ const SPARK_LIFE = 0.7;
 const WRECK_FALL = 0.9;
 const HIT_FLASH_MS = 140;
 
+/** How long the reduced motion kill flash is up: a frame at sixty, plus a little slack. */
+const KILL_FLASH_MS = 70;
+
 const ACCENT = 0xff6a2b;
 
 /** The look Ram approved on the lab page. The hero still runs the first one. */
@@ -211,6 +214,8 @@ export type World = {
   readout: () => Readout;
   /** Where the camera sits, so a test can prove it is not standing inside a building. */
   cameraAt: () => { x: number; y: number; z: number };
+  /** When the reduced motion kill flash last fired, so a check can prove it did. */
+  killFlashAt: () => number;
   dispose: () => void;
 };
 
@@ -392,6 +397,22 @@ export function createWorld(options: WorldOptions): World {
   muzzle.visible = false;
   scene.add(muzzle);
 
+  /** The white frame a kill gets when the phone has asked for less motion. */
+  const killFlashMaterial = new THREE.SpriteMaterial({
+    color: 0xffffff,
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+    blending: THREE.AdditiveBlending,
+    toneMapped: false,
+  });
+  const killFlash = new THREE.Sprite(killFlashMaterial);
+  killFlash.scale.setScalar(2.6);
+  killFlash.renderOrder = 5;
+  killFlash.visible = false;
+  scene.add(killFlash);
+  let killFlashAt = 0;
+
   const players = new Map<string, RemotePlayer>();
   const drones = new Map<string, DroneView>();
   const bolts = new Map<string, { mesh: THREE.Mesh; track: Track; seenAt: number }>();
@@ -562,12 +583,33 @@ export function createWorld(options: WorldOptions): World {
       wrecks.push({ group: view.group, started: now, fromY: view.group.position.y });
     }
     burst(at.x, at.y, at.z, now);
+    // No sparks under reduced motion, so the kill is carried by one white frame over the
+    // drone instead. The window is a frame and a bit, so a dropped frame cannot eat it.
+    if (reduced) {
+      killFlash.position.set(at.x, at.y, at.z);
+      killFlashAt = now;
+    }
   }
 
   function handleEvent(event: TickEvent, now: number): void {
     if (event.kind === "hit" || event.kind === "droneHit") {
       const view = event.kind === "hit" ? drones.get(event.drone) : null;
       if (view) view.flashUntil = now + HIT_FLASH_MS;
+      return;
+    }
+    // The three quiet jobs. The quest toast is a database round trip away, so the city
+    // answers on the frame the event arrives: the beam lifts, a ring crosses the road and
+    // a glow comes off the player.
+    if (event.kind === "landmark") {
+      if (event.player !== you) return;
+      const place = map.landmarks[event.index];
+      if (place) markers.touch(place, `landmark:${event.index}`, now);
+      return;
+    }
+    if (event.kind === "pickup" || event.kind === "deliver") {
+      if (event.player !== you) return;
+      const place = map.courier[event.point];
+      if (place) markers.touch(place, "courier", now);
       return;
     }
     if (event.kind === "kill") {
@@ -1168,6 +1210,8 @@ export function createWorld(options: WorldOptions): World {
       }
       markers.frame(now, camera, body, look.yaw, sighted);
 
+      killFlash.visible = killFlashAt > 0 && now - killFlashAt < KILL_FLASH_MS;
+
       const shot = assist(look);
       paintRing(shot);
       fadeShot(now);
@@ -1208,6 +1252,8 @@ export function createWorld(options: WorldOptions): World {
     place: () => ({ x: body.x, z: body.z }),
 
     cameraAt: () => ({ x: camera.position.x, y: camera.position.y, z: camera.position.z }),
+
+    killFlashAt: () => killFlashAt,
 
     stats: () => {
       let worstStep = 0;
@@ -1296,6 +1342,8 @@ export function createWorld(options: WorldOptions): World {
       scene.remove(muzzle);
       muzzleGeometry.dispose();
       muzzleMaterial.dispose();
+      scene.remove(killFlash);
+      killFlashMaterial.dispose();
       document.documentElement.style.setProperty("--aim-on", "0");
       ringShown = false;
 

@@ -36,6 +36,8 @@ export type QuestBoardProps = {
   quests: QuestView[];
   claims: ClaimsFeed;
   network: Network | null;
+  /** What one wallet may be paid in a day, as the world states it, or null when it will not. */
+  dailyCapNim: string | null;
   reduced: boolean;
   /** The claim that just landed, so the row that earned it lights up. */
   celebrate: string | null;
@@ -60,6 +62,28 @@ const NAMES: Record<QuestKind, string> = {
 };
 
 const ORDER: QuestKind[] = ["hunt", "courier", "landmarks", "landlord", "streak"];
+
+const LUNA = 100_000;
+
+/** The states the treasury has already committed money to. A hold was never granted. */
+const GRANTED = new Set<ClaimView["state"]>(["queued", "sending", "sent", "paid"]);
+
+/**
+ * What is left of this wallet's day. The claims list is the same evidence the server
+ * counts the cap from, so the board can say it without being told. A world that does not
+ * publish its cap gets no line at all rather than a guess.
+ */
+function payableLeft(rows: ClaimView[], capNim: string | null, today: string): string | null {
+  if (capNim === null) return null;
+  const cap = Number(capNim);
+  if (!Number.isFinite(cap) || cap <= 0) return null;
+
+  const used = rows
+    .filter((row) => row.createdAt.slice(0, 10) === today && GRANTED.has(row.state))
+    .reduce((sum, row) => sum + Number(row.amountLuna), 0);
+
+  return `Today: ${nim(Math.max(0, cap * LUNA - used))} of ${capNim} NIM still payable`;
+}
 
 type Busy = { questId: string; step: "signing" | "sending" };
 
@@ -147,6 +171,7 @@ export default function QuestBoard({
   quests,
   claims,
   network,
+  dailyCapNim,
   reduced,
   celebrate,
   map,
@@ -239,6 +264,7 @@ export default function QuestBoard({
     (quest) => quest.state === "done" && !claims.byQuest.has(quest.id) && quest.rewardLuna !== "0",
   );
   const readyLuna = ready.reduce((sum, quest) => sum + Number(quest.rewardLuna), 0);
+  const capLine = payableLeft(claims.claims, dailyCapNim, today);
 
   return (
     <Sheet
@@ -249,6 +275,12 @@ export default function QuestBoard({
       reduced={reduced}
       onClose={onClose}
     >
+      {capLine && (
+        <p className="label-type pb-3 text-paper/40" data-testid="cap-line">
+          {capLine}
+        </p>
+      )}
+
       <motion.div
         initial={{ opacity: 0, y: reduced ? 0 : 14 }}
         animate={{ opacity: 1, y: 0 }}

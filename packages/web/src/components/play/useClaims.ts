@@ -7,11 +7,14 @@ import { getClaims, type ClaimView } from "@/lib/api";
  * Every payout this wallet has asked for, kept current while any of them is still moving.
  *
  * The treasury sends on its own clock, so the only way the phone learns that money landed
- * is to ask. The poll runs while something is in flight and stops when nothing is, which
- * is what keeps a parked game off the server.
+ * is to ask. Something in flight is a minute away at most, so it is asked after every few
+ * seconds. A held payout waits for the next UTC midnight, so it is asked once a minute:
+ * slow enough to cost nothing, often enough that a release shows up on its own rather
+ * than on a reload. Nothing moving and nothing held means no poll at all.
  */
 
 const POLL_MS = 3000;
+const HELD_POLL_MS = 60_000;
 
 const MOVING = new Set<ClaimView["state"]>(["queued", "sending", "sent"]);
 
@@ -20,6 +23,10 @@ export type ClaimsFeed = {
   /** The newest claim per quest, which is the one a board row is about. */
   byQuest: Map<string, ClaimView>;
   inFlight: number;
+  /** Payouts the treasury is holding, which a player must be told about outside the board. */
+  held: number;
+  /** True when a hold is the pool running dry, which has no date on it. */
+  heldOnPool: boolean;
   loaded: boolean;
   refresh: () => Promise<void>;
 };
@@ -62,6 +69,9 @@ export function useClaims(enabled: boolean, onPaid: (claim: ClaimView) => void):
   }, []);
 
   const inFlight = claims.filter((claim) => MOVING.has(claim.state)).length;
+  const heldClaims = claims.filter((claim) => claim.state === "held");
+  const held = heldClaims.length;
+  const heldOnPool = heldClaims.some((claim) => claim.error === "pool");
 
   useEffect(() => {
     if (!enabled) return;
@@ -69,10 +79,11 @@ export function useClaims(enabled: boolean, onPaid: (claim: ClaimView) => void):
   }, [enabled, refresh]);
 
   useEffect(() => {
-    if (!enabled || inFlight === 0) return;
-    const timer = setInterval(() => void refresh(), POLL_MS);
+    if (!enabled) return;
+    if (inFlight === 0 && held === 0) return;
+    const timer = setInterval(() => void refresh(), inFlight > 0 ? POLL_MS : HELD_POLL_MS);
     return () => clearInterval(timer);
-  }, [enabled, inFlight, refresh]);
+  }, [enabled, held, inFlight, refresh]);
 
-  return { claims, byQuest: newestByQuest(claims), inFlight, loaded, refresh };
+  return { claims, byQuest: newestByQuest(claims), inFlight, held, heldOnPool, loaded, refresh };
 }

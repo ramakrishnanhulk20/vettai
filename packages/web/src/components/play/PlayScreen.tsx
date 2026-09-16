@@ -26,7 +26,7 @@ import {
 import { loadCityAssets, type CityAssets } from "@/game/scene/assets";
 import { loadCharacters } from "@/game/scene/character";
 import { createWorld, type Prompt, type World } from "@/game/world";
-import Hud, { type Panel, type Toast } from "./Hud";
+import Hud, { type Panel, type PromptAction, type Toast } from "./Hud";
 import Ladder from "./Ladder";
 import QuestBoard from "./QuestBoard";
 import Shop from "./Shop";
@@ -53,7 +53,6 @@ type Phase =
   | { name: "error"; title: string; body: string };
 
 const PROVIDER_WAIT_MS = 15_000;
-const HINT_KEY = "vettai.hint.stick";
 const SHOP_KEY = "vettai.seen.shop";
 const FIRST_MINUTE_KEY = "vettai.firstminute";
 const TOAST_MS = 2600;
@@ -157,9 +156,10 @@ export default function PlayScreen() {
   const [aimHot, setAimHot] = useState(false);
   const [firedAt, setFiredAt] = useState(0);
   const [prompt, setPrompt] = useState<Prompt | null>(null);
+  /** Where the player stood when that prompt appeared, which is what its distances mean. */
+  const [promptAt, setPromptAt] = useState<{ x: number; z: number } | null>(null);
   const [latency, setLatency] = useState<number | null>(null);
   const [hitAt, setHitAt] = useState(0);
-  const [showHint, setShowHint] = useState(false);
 
   const [sheet, setSheet] = useState<"board" | "shop" | "ladder" | null>(null);
   const [gear, setGear] = useState<Gear>({ blaster: "mk1", skin: "default", sprint: false });
@@ -181,7 +181,6 @@ export default function PlayScreen() {
 
   useEffect(() => {
     setHost(window.location.host);
-    setShowHint(window.localStorage.getItem(HINT_KEY) === null);
     if (window.localStorage.getItem(FIRST_MINUTE_KEY) === null) setLesson(0);
     setSeenShop(window.localStorage.getItem(SHOP_KEY) !== null);
     setAddress(readSession()?.address ?? "");
@@ -205,17 +204,24 @@ export default function PlayScreen() {
   }, [objective, spots]);
 
   const [wantExplorer, setWantExplorer] = useState(false);
+  /** What one wallet may be paid today, as the world server states it, or null if it will not. */
+  const [dailyCapNim, setDailyCapNim] = useState<string | null>(null);
+  const askedHealth = useRef(false);
 
-  // Which chain the payouts are on decides which explorer a transaction points at, and it
-  // is only worth asking once there is a transaction to point at. The world serves this
-  // outside /api, so a refusal is not an error: the hash is then shown as plain text
-  // rather than as a link to the wrong chain.
+  // Two things come off the same call: which chain a payout links to, and what the day's
+  // cap is for the line on the board. It is asked once, the first time either is wanted.
+  // The world serves this outside /api, so a refusal is not an error: the board then says
+  // nothing about the cap and a hash is shown as text rather than as the wrong link.
   useEffect(() => {
-    if (!wantExplorer || network !== null) return;
+    if (!wantExplorer && sheet !== "board") return;
+    if (askedHealth.current) return;
+    askedHealth.current = true;
     void getHealth().then((result) => {
-      if (result.ok) setNetwork(result.data.network);
+      if (!result.ok) return;
+      setNetwork(result.data.network);
+      setDailyCapNim(result.data.dailyCapNim ?? null);
     });
-  }, [network, wantExplorer]);
+  }, [sheet, wantExplorer]);
 
   const toast = useCallback((text: string) => {
     const entry: Toast = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, text };
@@ -423,10 +429,15 @@ export default function PlayScreen() {
         onPrompt: (next) => {
           promptRef.current = next;
           setPrompt(next);
+          setPromptAt(world.place());
         },
         onShield: setShield,
         onEvent: (event) => {
           if (event.kind === "kill") {
+            // With sparks off there is nothing in the scene holding the moment for the
+            // half second the hunt's count takes to come back, so the word goes out now
+            // and the count follows it.
+            if (reduced) return toast("Drone down");
             // The hunt's own frame is a breath behind and carries the count, so the kill
             // only speaks when there is no open hunt to speak for it.
             const hunt = questsRef.current.find((quest) => quest.kind === "hunt");
@@ -460,11 +471,7 @@ export default function PlayScreen() {
           connectionRef.current?.send({ t: "fire", yaw: shot.yaw, pitch: shot.pitch });
         },
         fireIntervalMs: () => FIRE_INTERVAL[gearRef.current.blaster] ?? FIRE_INTERVAL.mk1,
-        onFirstStick: () => {
-          window.localStorage.setItem(HINT_KEY, "seen");
-          setShowHint(false);
-          lessonDone(0);
-        },
+        onFirstStick: () => lessonDone(0),
       });
       controlsRef.current = controls;
 
@@ -500,6 +507,7 @@ export default function PlayScreen() {
           stats: () => world.stats(),
           readout: () => world.readout(),
           markers: () => world.markers(),
+          killFlashAt: () => world.killFlashAt(),
           place: () => world.place(),
           look: () => controlsRef.current?.look() ?? { yaw: 0, pitch: 0 },
           move: () => controlsRef.current?.move() ?? { dx: 0, dz: 0 },
@@ -569,6 +577,11 @@ export default function PlayScreen() {
 
         connection.on("welcome", (frame) => {
           world.welcome(frame);
+          // A room counts move intents from zero. The thumb has to count from the same
+          // place, or the first frames back replay every intent the old room never
+          // acknowledged. The world clears what it was holding in welcome().
+          const mine = frame.players.find((wire) => wire.id === frame.you);
+          controlsRef.current?.resetSequence(mine?.seq ?? 0);
           questsRef.current = frame.quests;
           setQuests(frame.quests);
           setPhase({ name: "playing" });
@@ -727,15 +740,15 @@ export default function PlayScreen() {
           latency={latency}
           aimHot={aimHot}
           firedAt={firedAt}
-          prompt={promptAction(prompt, quests, objective)}
+          prompt={promptAction(prompt, quests, objective, worldMap, promptAt)}
           onInteract={interact}
           onOpenBoard={() => openSheet("board")}
-          nearOffice={prompt?.kind === "office"}
           payouts={claims.inFlight}
+          held={claims.held}
+          heldOnPool={claims.heldOnPool}
           paidAt={paidAt}
           attachFire={attachFire}
           hitAt={hitAt}
-          showHint={showHint && lesson === null}
           sheetOpen={sheet !== null}
           reduced={Boolean(reduced)}
           readout={readout}
@@ -755,6 +768,7 @@ export default function PlayScreen() {
             quests={quests}
             claims={claims}
             network={network}
+            dailyCapNim={dailyCapNim}
             reduced={Boolean(reduced)}
             celebrate={celebrate}
             map={worldMap}
@@ -817,8 +831,8 @@ export default function PlayScreen() {
             transition={{ duration: reduced ? 0 : 0.5, ease: EASE }}
             className="absolute inset-0 z-40 flex flex-col justify-end"
           >
-            {/* SWAP: poster still. Until the city is built the screen is lit by hand: one
-                cold light source high on the left, one hunt coloured glow on the horizon. */}
+            {/* The screen before the city: one cold light high on the left, the street's own
+                orange on the horizon, and the block's rooflines standing in the haze. */}
             {phase.name !== "connecting" && (
               <div
                 aria-hidden
@@ -833,6 +847,7 @@ export default function PlayScreen() {
               aria-hidden
               className="pointer-events-none absolute -right-40 top-[16%] h-[520px] w-[520px] rounded-full border border-hunt/12"
             />
+            <Skyline reduced={Boolean(reduced)} />
             <div
               aria-hidden
               className="pointer-events-none absolute inset-x-0 bottom-0 h-1/2"
@@ -845,7 +860,7 @@ export default function PlayScreen() {
               className="absolute inset-0"
               style={{
                 background:
-                  "linear-gradient(to top, #0b0f1a 8%, rgba(11,15,26,0.92) 42%, rgba(11,15,26,0.45) 100%)",
+                  "linear-gradient(to top, #0b0f1a 15%, rgba(11,15,26,0.88) 33%, rgba(11,15,26,0.18) 62%, rgba(11,15,26,0) 100%)",
               }}
             />
             <div className="label-type absolute inset-x-0 top-0 flex items-center justify-between gap-3 border-b border-line px-6 pb-3 pt-[max(1.25rem,env(safe-area-inset-top))] text-paper/35">
@@ -853,6 +868,31 @@ export default function PlayScreen() {
               <span>The hunt</span>
               <span className="text-hunt/70">Nimiq Pay</span>
             </div>
+
+            {/* The first paint comes off the server, so what it starts at may not depend on
+                a media query this phone has and that render did not. Only the travel does. */}
+            <motion.div
+              initial={{ opacity: 0, y: 18 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={reduced ? { duration: 0 } : { duration: 0.7, ease: EASE, delay: 0.1 }}
+              data-testid="loading-mark"
+              className="absolute left-6 top-[max(4.5rem,calc(env(safe-area-inset-top)+3.6rem))] flex items-center gap-3"
+            >
+              <motion.span
+                aria-hidden
+                animate={reduced ? { rotate: 45 } : { rotate: [45, 135, 45] }}
+                transition={
+                  reduced ? { duration: 0 } : { duration: 7, repeat: Infinity, ease: "easeInOut" }
+                }
+                className="block h-4 w-4 shrink-0 bg-hunt"
+              />
+              <span
+                className="display-type uppercase leading-none text-paper"
+                style={{ fontSize: "clamp(2.2rem,11vw,3.4rem)", letterSpacing: "-0.03em" }}
+              >
+                Vettai
+              </span>
+            </motion.div>
             <Panel
               phase={phase}
               reduced={Boolean(reduced)}
@@ -876,23 +916,35 @@ function promptAction(
   prompt: Prompt | null,
   quests: QuestView[],
   objective: Objective | null,
-): { text: string; primary: boolean } | null {
+  map: WorldMap | null,
+  at: { x: number; z: number } | null,
+): PromptAction | null {
   if (!prompt) return null;
   const tracked = (id: string) => objective?.spots.includes(id) === true;
+  const act = (text: string, primary: boolean): PromptAction => ({ kind: "do", text, primary });
 
-  if (prompt.kind === "office") return { text: "Open the board", primary: tracked("office") };
-  if (prompt.kind === "shop") return { text: "Open the shop", primary: tracked("shop") };
+  if (prompt.kind === "office") return act("Open the board", tracked("office"));
+  if (prompt.kind === "shop") return act("Open the shop", tracked("shop"));
   if (prompt.kind === "landmark") {
-    return { text: "Visit landmark", primary: tracked(`landmark:${prompt.index}`) };
+    return act("Visit landmark", tracked(`landmark:${prompt.index}`));
   }
 
   const courier = quests.find((quest) => quest.kind === "courier");
   if (!courier || courier.state !== "open" || !courier.route) return null;
   const carrying = courier.carrying === true;
   const primary = tracked("courier");
-  if (!carrying && courier.route.from === prompt.point) return { text: "Pick up", primary };
-  if (carrying && courier.route.to === prompt.point) return { text: "Deliver", primary };
-  return null;
+  if (!carrying && courier.route.from === prompt.point) return act("Pick up", primary);
+  if (carrying && courier.route.to === prompt.point) return act("Deliver", primary);
+
+  // One of the other six points. The server would throw an interact here away without a
+  // word, so the phone answers instead: this is not the one, and here is the one that is.
+  const wanted = carrying ? courier.route.to : courier.route.from;
+  const spot = map?.courier[wanted] ?? null;
+  const away = spot && at ? `, ${metres(groundRange(at, spot))}` : "";
+  return {
+    kind: "note",
+    text: `Not this one. ${carrying ? "Deliver" : "Pick up"} at P${wanted + 1}${away}`,
+  };
 }
 
 /**
@@ -1051,6 +1103,8 @@ function Panel({ phase, reduced, deepLink, copied, onCopy, onRetry }: PanelProps
       : COPY[phase.name];
   if (!words) return null;
 
+  const status = statusOf(phase);
+
   const rise = {
     initial: { opacity: 0, y: 26 },
     animate: { opacity: 1, y: 0 },
@@ -1086,13 +1140,7 @@ function Panel({ phase, reduced, deepLink, copied, onCopy, onRetry }: PanelProps
       >
         {phase.name === "loading" && <Progress percent={phase.percent} />}
 
-        {(phase.name === "provider" || phase.name === "signing" || phase.name === "connecting") && (
-          <Waiting
-            label={
-              phase.name === "signing" ? "Confirm in Nimiq Pay" : "This takes a moment, not a minute"
-            }
-          />
-        )}
+        {status && <Status text={status} />}
 
         {phase.name === "outside" && (
           <div className="flex flex-col gap-3">
@@ -1126,12 +1174,100 @@ function Panel({ phase, reduced, deepLink, copied, onCopy, onRetry }: PanelProps
   );
 }
 
-function Waiting({ label }: { label: string }) {
+/** One honest line for the wait that is actually happening. */
+function Status({ text }: { text: string }) {
   return (
-    <div className="flex items-center gap-3">
+    <div className="mt-4 flex items-center gap-3" data-testid="loading-status">
       <span className="live-dot h-2 w-2 rounded-full bg-hunt" />
-      <span className="label-type text-paper/45">{label}</span>
+      <span className="label-type text-paper/45">{text}</span>
     </div>
+  );
+}
+
+function statusOf(phase: Phase): string | null {
+  if (phase.name === "provider") return "looking for the wallet";
+  if (phase.name === "signing") return "waiting for your signature";
+  if (phase.name === "loading") return "loading the block";
+  if (phase.name === "connecting") return "joining the street";
+  return null;
+}
+
+/**
+ * The block, as a rooftop line. Towers are written down rather than random, so the screen
+ * a judge waits on is the same one every time, and the lit windows are the only warm
+ * thing above the horizon.
+ */
+const TOWERS: [number, number, number][] = [
+  [0, 46, 86],
+  [42, 30, 132],
+  [70, 54, 62],
+  [120, 38, 158],
+  [155, 26, 104],
+  [178, 62, 186],
+  [236, 34, 120],
+  [266, 44, 74],
+  [306, 30, 148],
+  [332, 58, 98],
+  [386, 40, 170],
+  [422, 34, 66],
+  [452, 48, 126],
+  [496, 44, 90],
+];
+
+/** Lit windows, worked out from the towers so one can never hang in the sky. */
+const WINDOWS: [number, number][] = TOWERS.flatMap(([x, width, height], tower) => {
+  const rows = Math.max(1, Math.floor((height - 18) / 15));
+  const columns = Math.max(1, Math.floor((width - 8) / 12));
+  const lit: [number, number][] = [];
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      if ((tower * 5 + row * 3 + column * 7) % 5 > 1) continue;
+      lit.push([x + 6 + column * 12, 200 - height + 12 + row * 15]);
+    }
+  }
+  return lit;
+});
+
+function Skyline({ reduced }: { reduced: boolean }) {
+  return (
+    <motion.div
+      aria-hidden
+      data-testid="skyline"
+      initial={{ opacity: 0, y: 26 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={reduced ? { duration: 0 } : { duration: 1.1, ease: EASE, delay: 0.15 }}
+      className="pointer-events-none absolute inset-x-0 bottom-0 h-[52svh] max-h-[440px] min-h-[220px]"
+    >
+      <span
+        className="absolute inset-x-0 top-0 h-32 -translate-y-1/2"
+        style={{
+          background:
+            "radial-gradient(70% 100% at 50% 100%, rgba(255,106,43,0.22) 0%, rgba(255,106,43,0) 70%)",
+        }}
+      />
+      <svg
+        viewBox="0 0 540 200"
+        preserveAspectRatio="none"
+        className="absolute inset-0 h-full w-full"
+      >
+        <defs>
+          <linearGradient id="vettai-tower" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#2b3a63" />
+            <stop offset="100%" stopColor="#111a2e" />
+          </linearGradient>
+        </defs>
+        {TOWERS.map(([x, width, height]) => (
+          <rect key={`${x}`} x={x} y={200 - height} width={width} height={height} fill="url(#vettai-tower)" />
+        ))}
+        {WINDOWS.map(([x, y]) => (
+          <rect key={`${x}-${y}`} x={x} y={y} width={6} height={2} fill="#ff6a2b" opacity="0.75" />
+        ))}
+      </svg>
+      <span
+        className="absolute inset-x-0 bottom-0 h-2/3"
+        style={{ background: "linear-gradient(to top, #0b0f1a 12%, rgba(11,15,26,0) 100%)" }}
+      />
+    </motion.div>
   );
 }
 
