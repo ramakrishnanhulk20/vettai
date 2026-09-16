@@ -11,21 +11,37 @@ import { addRim, glowTexture as softGlow, type Look } from "./materials";
  * The second look is a real machine rather than a box: a flattened hull with a canopy
  * and a camera ball, four arms out to lit motor pods, rotor discs under blur rings, a
  * red beacon and a white underlight that puts a pool of light on the street below it.
- * Seven draw calls, and the drone is the thing the whole game is about.
+ * Four draw calls: the airframe, the discs, the blur rings and the beacon are welded into
+ * one mesh that spins and blinks in its own vertex shader, then the halo, the belly light
+ * and the ground pool. Twelve drones on screen have to fit the draw budget.
  */
 
 const ROTOR_SPEED = 26;
 const BLINK_PERIOD = 1.2;
 const BLINK_ON = 0.16;
 
+/**
+ * What the merged look's shader moves by, one set per drone: the rotor angle, the clock
+ * the blur rings breathe on, whether they breathe at all, and the beacon's blink.
+ */
+type Drive = {
+  angle: { value: number };
+  time: { value: number };
+  swell: { value: number };
+  beaconScale: { value: number };
+  beaconLit: { value: number };
+};
+
 type DroneParts = {
-  rotors: THREE.InstancedMesh;
-  beacon: THREE.Mesh;
-  beaconMaterial: THREE.MeshBasicMaterial;
+  /** First look only: the rotors and the beacon are their own meshes there. */
+  rotors?: THREE.InstancedMesh;
+  beacon?: THREE.Mesh;
+  beaconMaterial?: THREE.MeshBasicMaterial;
   halo: THREE.Sprite;
   haloMaterial: THREE.SpriteMaterial;
-  /** Second look only: the blur rings, the belly light and the pool it throws down. */
-  blur?: THREE.InstancedMesh;
+  /** Second look only: the hull material it owns, the belly light and the pool. */
+  hull?: THREE.MeshLambertMaterial;
+  drive?: Drive;
   under?: THREE.Sprite;
   underMaterial?: THREE.SpriteMaterial;
   pool?: THREE.Mesh;
@@ -117,21 +133,79 @@ type SharedTwo = {
   beaconGlow: THREE.Texture;
   whiteGlow: THREE.Texture;
   body: THREE.BufferGeometry;
-  rotor: THREE.BufferGeometry;
-  blur: THREE.BufferGeometry;
-  beacon: THREE.BufferGeometry;
   pool: THREE.BufferGeometry;
-  hull: THREE.MeshLambertMaterial;
-  blade: THREE.MeshBasicMaterial;
-  ring: THREE.MeshBasicMaterial;
 };
 
 let sharedTwo: SharedTwo | null = null;
 
 /**
+ * What one part of the merged airframe is painted and moved by. `pivot` is the point a
+ * rotor turns around, `rate` its share of the rotor angle, `phase` its head start,
+ * `swell` how much it breathes, and `flat` lifts it out of the lighting so a blur ring
+ * reads the same way an unlit material used to. `beacon` hands the part to the blink.
+ */
+type Coat = {
+  colour: number;
+  alpha: number;
+  pivot?: [number, number, number];
+  rate?: number;
+  phase?: number;
+  swell?: number;
+  flat?: boolean;
+  beacon?: boolean;
+};
+
+/**
+ * Writes the colour and the motion of one part into its vertices. Everything the drone is
+ * made of carries the same attribute set, which is what lets the parts merge into a
+ * single mesh and still move apart on screen.
+ */
+function coat(geometry: THREE.BufferGeometry, look: Coat): THREE.BufferGeometry {
+  const count = geometry.getAttribute("position").count;
+  const tint = new THREE.Color(look.colour);
+  const colours = new Float32Array(count * 4);
+  const pivots = new Float32Array(count * 3);
+  const drives = new Float32Array(count * 4);
+  const beacons = new Float32Array(count);
+  const [px, py, pz] = look.pivot ?? [0, 0, 0];
+
+  for (let at = 0; at < count; at++) {
+    colours[at * 4] = tint.r;
+    colours[at * 4 + 1] = tint.g;
+    colours[at * 4 + 2] = tint.b;
+    colours[at * 4 + 3] = look.alpha;
+
+    pivots[at * 3] = px;
+    pivots[at * 3 + 1] = py;
+    pivots[at * 3 + 2] = pz;
+
+    drives[at * 4] = look.rate ?? 0;
+    drives[at * 4 + 1] = look.phase ?? 0;
+    drives[at * 4 + 2] = look.swell ?? 0;
+    drives[at * 4 + 3] = look.flat ? 1 : 0;
+
+    beacons[at] = look.beacon ? 1 : 0;
+  }
+
+  geometry.setAttribute("color", new THREE.BufferAttribute(colours, 4));
+  geometry.setAttribute("spinPivot", new THREE.BufferAttribute(pivots, 3));
+  geometry.setAttribute("spinDrive", new THREE.BufferAttribute(drives, 4));
+  geometry.setAttribute("beaconMark", new THREE.BufferAttribute(beacons, 1));
+  return geometry;
+}
+
+const HULL_COLOUR = 0x2a3244;
+const DISC_COLOUR = 0xc8d8f2;
+const RING_COLOUR = 0x9fc4ff;
+const BEACON_COLOUR = 0xff2e2e;
+const BEACON_AT: [number, number, number] = [0, 0.22, -0.42];
+
+/**
  * The second look's airframe. Still boxes and cylinders, but shaped like something built
  * to fly: a flat hull, a canopy over the middle, a camera ball under the nose, arms out
- * to lit pods, and skids to land on. All of it welded into one geometry.
+ * to lit pods, and skids to land on. The rotor discs, the blur rings and the beacon ride
+ * along in the same geometry, added last so they blend over the hull rather than punch
+ * through it.
  */
 function sharedAssetsV2(): SharedTwo {
   if (sharedTwo) return sharedTwo;
@@ -170,19 +244,58 @@ function sharedAssetsV2(): SharedTwo {
     parts.push(skid);
   }
 
+  for (const part of parts) coat(part, { colour: HULL_COLOUR, alpha: 1 });
+
+  ARM_POSITIONS.forEach(([x, z], index) => {
+    const disc = new THREE.CylinderGeometry(0.5, 0.5, 0.012, 14);
+    disc.translate(x, 0.15, z);
+    parts.push(
+      coat(disc, {
+        colour: DISC_COLOUR,
+        alpha: 0.16,
+        pivot: [x, 0.15, z],
+        rate: 1,
+        phase: index * 0.7,
+        flat: true,
+      }),
+    );
+  });
+
+  ARM_POSITIONS.forEach(([x, z], index) => {
+    const ring = new THREE.RingGeometry(0.3, 0.56, 18);
+    ring.rotateX(-Math.PI / 2);
+    ring.translate(x, 0.17, z);
+    parts.push(
+      coat(ring, {
+        colour: RING_COLOUR,
+        alpha: 0.14,
+        pivot: [x, 0.17, z],
+        rate: -0.21,
+        phase: index,
+        swell: 0.03,
+        flat: true,
+      }),
+    );
+  });
+
+  const beacon = new THREE.SphereGeometry(0.11, 8, 6);
+  beacon.translate(...BEACON_AT);
+  parts.push(
+    coat(beacon, {
+      colour: BEACON_COLOUR,
+      alpha: 1,
+      pivot: BEACON_AT,
+      flat: true,
+      beacon: true,
+    }),
+  );
+
   const body = mergeGeometries(parts, false);
   if (!body) throw new Error("the drone body would not merge");
   for (const part of parts) part.dispose();
 
-  const blur = new THREE.RingGeometry(0.3, 0.56, 18);
-  blur.rotateX(-Math.PI / 2);
   const pool = new THREE.CircleGeometry(1, 22);
   pool.rotateX(-Math.PI / 2);
-
-  const hull = new THREE.MeshLambertMaterial({ color: 0x2a3244 });
-  // The fresnel edge is what keeps a dark drone readable against a dark sky. It costs a
-  // shader variant, not a light.
-  addRim(hull, { colour: 0x8fb6ff, strength: 0.55 });
 
   sharedTwo = {
     beaconGlow: glowTexture(),
@@ -192,27 +305,85 @@ function sharedAssetsV2(): SharedTwo {
       { at: 1, colour: "rgba(150,200,255,0)" },
     ]),
     body,
-    rotor: new THREE.CylinderGeometry(0.5, 0.5, 0.012, 14),
-    blur,
-    beacon: new THREE.SphereGeometry(0.11, 8, 6),
     pool,
-    hull,
-    blade: new THREE.MeshBasicMaterial({
-      color: 0xc8d8f2,
-      transparent: true,
-      opacity: 0.16,
-      depthWrite: false,
-    }),
-    ring: new THREE.MeshBasicMaterial({
-      color: 0x9fc4ff,
-      transparent: true,
-      opacity: 0.14,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      toneMapped: false,
-    }),
   };
   return sharedTwo;
+}
+
+/**
+ * The hull material for the merged look. Each drone gets its own so the rotor uniforms
+ * are its own, but the shader text is identical for all of them, so the card still
+ * compiles one program. The fresnel edge is what keeps a dark drone readable against a
+ * dark sky: it costs a shader variant, not a light. The parts marked flat step around the
+ * lighting and the rim, which is how the discs and the rings keep the unlit look they had
+ * when they were separate meshes.
+ */
+function hullMaterial(drive: Drive): THREE.MeshLambertMaterial {
+  const material = new THREE.MeshLambertMaterial({
+    color: 0xffffff,
+    vertexColors: true,
+    transparent: true,
+  });
+  addRim(material, { colour: 0x8fb6ff, strength: 0.55 });
+
+  const rim = material.onBeforeCompile;
+  material.onBeforeCompile = (shader, renderer) => {
+    rim(shader, renderer);
+    shader.uniforms.rotorAngle = drive.angle;
+    shader.uniforms.rotorTime = drive.time;
+    shader.uniforms.rotorSwell = drive.swell;
+    shader.uniforms.beaconScale = drive.beaconScale;
+    shader.uniforms.beaconLit = drive.beaconLit;
+
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        "#include <common>",
+        `#include <common>
+attribute vec3 spinPivot;
+attribute vec4 spinDrive;
+attribute float beaconMark;
+uniform float rotorAngle;
+uniform float rotorTime;
+uniform float rotorSwell;
+uniform float beaconScale;
+varying float vSpinFlat;
+varying float vBeaconMark;`,
+      )
+      .replace(
+        "#include <project_vertex>",
+        `float spinTurn = spinDrive.x * rotorAngle + spinDrive.y;
+float spinBreath = 1.0 + sin(rotorTime * 9.0 + spinDrive.y) * spinDrive.z * rotorSwell;
+vec3 spinLocal = transformed - spinPivot;
+spinLocal.xz *= spinBreath;
+float spinCos = cos(spinTurn);
+float spinSin = sin(spinTurn);
+spinLocal.xz = vec2(
+  spinLocal.x * spinCos + spinLocal.z * spinSin,
+  spinLocal.z * spinCos - spinLocal.x * spinSin
+);
+spinLocal *= mix(1.0, beaconScale, beaconMark);
+transformed = spinPivot + spinLocal;
+vSpinFlat = spinDrive.w;
+vBeaconMark = beaconMark;
+#include <project_vertex>`,
+      );
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        `#include <common>
+uniform float beaconLit;
+varying float vSpinFlat;
+varying float vBeaconMark;`,
+      )
+      .replace(
+        "#include <opaque_fragment>",
+        `outgoingLight = mix(outgoingLight, diffuseColor.rgb, vSpinFlat);
+diffuseColor.a *= mix(1.0, beaconLit, vBeaconMark);
+#include <opaque_fragment>`,
+      );
+  };
+  return material;
 }
 
 function createDroneV2(): THREE.Group {
@@ -220,27 +391,20 @@ function createDroneV2(): THREE.Group {
   const drone = new THREE.Group();
   drone.name = "drone";
 
-  drone.add(new THREE.Mesh(assets.body, assets.hull));
-
-  const rotors = new THREE.InstancedMesh(assets.rotor, assets.blade, ARM_POSITIONS.length);
-  rotors.frustumCulled = false;
-  drone.add(rotors);
-
-  const blur = new THREE.InstancedMesh(assets.blur, assets.ring, ARM_POSITIONS.length);
-  blur.frustumCulled = false;
-  blur.renderOrder = 2;
-  drone.add(blur);
-
-  const beaconMaterial = new THREE.MeshBasicMaterial({
-    color: 0xff2e2e,
-    transparent: true,
-    opacity: 1,
-    toneMapped: false,
-    depthWrite: false,
-  });
-  const beacon = new THREE.Mesh(assets.beacon, beaconMaterial);
-  beacon.position.set(0, 0.22, -0.42);
-  drone.add(beacon);
+  const drive: Drive = {
+    angle: { value: 0 },
+    time: { value: 0 },
+    swell: { value: 1 },
+    beaconScale: { value: 1 },
+    beaconLit: { value: 1 },
+  };
+  const hull = hullMaterial(drive);
+  const frame = new THREE.Mesh(assets.body, hull);
+  // The airframe is see-through only on the rotor discs, so it draws before the lights it
+  // carries. That keeps the halo washing over the hull the way it did when the hull was a
+  // solid mesh drawn in the pass before the sprites.
+  frame.renderOrder = -1;
+  drone.add(frame);
 
   const haloMaterial = new THREE.SpriteMaterial({
     map: assets.beaconGlow,
@@ -252,7 +416,7 @@ function createDroneV2(): THREE.Group {
     toneMapped: false,
   });
   const halo = new THREE.Sprite(haloMaterial);
-  halo.position.copy(beacon.position);
+  halo.position.set(...BEACON_AT);
   halo.scale.setScalar(2.4);
   drone.add(halo);
 
@@ -286,12 +450,10 @@ function createDroneV2(): THREE.Group {
   drone.add(pool);
 
   const parts: DroneParts = {
-    rotors,
-    beacon,
-    beaconMaterial,
     halo,
     haloMaterial,
-    blur,
+    hull,
+    drive,
     under,
     underMaterial,
     pool,
@@ -352,37 +514,42 @@ export function animateDrone(drone: THREE.Group, elapsed: number, spin: boolean)
   if (!parts) return;
 
   const angle = spin ? elapsed * ROTOR_SPEED : 0;
-  const dummy = new THREE.Object3D();
-  ARM_POSITIONS.forEach(([x, z], index) => {
-    dummy.position.set(x, 0.15, z);
-    dummy.rotation.set(0, angle + index * 0.7, 0);
-    dummy.scale.set(1, 1, 1);
-    dummy.updateMatrix();
-    parts.rotors.setMatrixAt(index, dummy.matrix);
-  });
-  parts.rotors.instanceMatrix.needsUpdate = true;
+
+  const rotors = parts.rotors;
+  if (rotors) {
+    const dummy = new THREE.Object3D();
+    ARM_POSITIONS.forEach(([x, z], index) => {
+      dummy.position.set(x, 0.15, z);
+      dummy.rotation.set(0, angle + index * 0.7, 0);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      rotors.setMatrixAt(index, dummy.matrix);
+    });
+    rotors.instanceMatrix.needsUpdate = true;
+  }
 
   const phase = spin ? elapsed % BLINK_PERIOD : 0;
   const lit = phase < BLINK_ON;
-  parts.beaconMaterial.opacity = lit ? 1 : 0.16;
-  parts.beacon.scale.setScalar(lit ? 1.5 : 1);
+
+  if (parts.beacon && parts.beaconMaterial) {
+    parts.beaconMaterial.opacity = lit ? 1 : 0.16;
+    parts.beacon.scale.setScalar(lit ? 1.5 : 1);
+  }
+
+  // The merged look moves its own rotors and beacon: they are vertices of the one mesh,
+  // and these numbers are what the shader moves them by. The rings turn the other way and
+  // far slower than the discs. Two rates crossing is what the eye reads as a rotor it
+  // cannot quite resolve.
+  if (parts.drive) {
+    parts.drive.angle.value = angle;
+    parts.drive.time.value = elapsed;
+    parts.drive.swell.value = spin ? 1 : 0;
+    parts.drive.beaconScale.value = lit ? 1.5 : 1;
+    parts.drive.beaconLit.value = lit ? 1 : 0.16;
+  }
+
   parts.haloMaterial.opacity = lit ? 0.95 : 0.22;
   parts.halo.scale.setScalar(lit ? 3.6 : 2.2);
-
-  const blurRings = parts.blur;
-  if (blurRings) {
-    // The rings turn the other way and far slower than the discs. Two rates crossing is
-    // what the eye reads as a rotor it cannot quite resolve.
-    ARM_POSITIONS.forEach(([x, z], index) => {
-      dummy.position.set(x, 0.17, z);
-      dummy.rotation.set(0, -angle * 0.21 + index, 0);
-      const swell = spin ? 1 + Math.sin(elapsed * 9 + index) * 0.03 : 1;
-      dummy.scale.set(swell, 1, swell);
-      dummy.updateMatrix();
-      blurRings.setMatrixAt(index, dummy.matrix);
-    });
-    blurRings.instanceMatrix.needsUpdate = true;
-  }
 
   if (parts.pool && parts.poolMaterial) {
     const height = Math.max(drone.position.y, 0.6);
@@ -440,8 +607,9 @@ export function flyPatrol(
 /** Frees the materials a drone owns on its own: its lights dim per drone. */
 export function disposeDrone(drone: THREE.Group): void {
   const parts = drone.userData.parts as DroneParts | undefined;
-  parts?.beaconMaterial.dispose();
+  parts?.beaconMaterial?.dispose();
   parts?.haloMaterial.dispose();
+  parts?.hull?.dispose();
   parts?.underMaterial?.dispose();
   parts?.poolMaterial?.dispose();
 }
@@ -462,13 +630,7 @@ export function disposeDrones(): void {
     sharedTwo.beaconGlow.dispose();
     sharedTwo.whiteGlow.dispose();
     sharedTwo.body.dispose();
-    sharedTwo.rotor.dispose();
-    sharedTwo.blur.dispose();
-    sharedTwo.beacon.dispose();
     sharedTwo.pool.dispose();
-    sharedTwo.hull.dispose();
-    sharedTwo.blade.dispose();
-    sharedTwo.ring.dispose();
     sharedTwo = null;
   }
 }
