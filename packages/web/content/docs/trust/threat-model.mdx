@@ -1,0 +1,63 @@
+---
+title: What we did not fix
+description: The honest half of the threat model, quoted in full. Every one of these is a real hole.
+---
+
+A threat model that only lists wins is marketing. This page is the closing section of
+[the threat model](https://github.com/ramakrishnanhulk20/vettai/blob/main/docs/security/threat-model.md),
+quoted word for word. Nothing has been softened for the docs.
+
+## What we did not fix
+
+Every one of these is a real hole. They are written down because a threat model that only
+lists wins is marketing.
+
+- **The caps bound the loss from a scripted client, they do not prevent one.** `npm run bot`
+  is a scripted client we wrote ourselves: it signs in, joins the real socket, kills drones
+  with computed aim, dodges bolts and walks the courier route. It is better at the game than
+  a person. Nothing in the server can tell it apart from a phone, because it sends exactly
+  what a phone sends. What the caps do is make the win small and bounded: one wallet cannot
+  take more than `DAILY_CAP_NIM` a day whatever it does, and the whole game cannot pay more
+  than `POOL_TOTAL_NIM` ever.
+- **A scripted client can still farm inside the caps.** There is no seed to cherry-pick,
+  because the server runs the simulation and the client never reports an outcome, so the
+  attack where a player replays a favourable random seed does not apply here. What is left is
+  patience: a bot that plays every day takes the daily cap every day, and as far as the
+  server can tell it earned it.
+- **The per-IP cap is dodged by a VPN.** The cap counts distinct wallets per IP hash per day.
+  A farmer with a VPN, a phone on mobile data, or a handful of cloud machines gets a fresh
+  count for each address. Check 9 of the prove run does exactly this on purpose, from two
+  loopback addresses, to get past the IP cap and reach the pool cap. It is an honest speed
+  bump against a casual farmer and nothing more.
+- **A claim that fails after the nonce is spent costs the player a round trip.** The nonce is
+  consumed before the claim transaction runs, because that ordering is what stops a replay.
+  If the database then fails, the challenge is gone: the player has to ask for a new one and
+  sign again. The quest is untouched and no money is lost, but the failure lands on them
+  rather than on us.
+- **The advisory locks are proven by the statements they issue, not by a real race.** The
+  tests assert that both locks are taken, in the right order, inside the claim's own
+  transaction, and that a run of claims never overruns a cap. PGlite, which the tests run on,
+  executes one statement at a time, so nothing here proves the behaviour on a real Postgres
+  with many connections holding the locks against each other, which is the case the locks
+  exist for.
+- **Drone scarcity is per room, so a farmer with many wallets in one room competes with
+  itself.** A room holds at most six live drones and up to 24 players. That is an accident
+  that helps us rather than a defence: it slows a farmer down, and it would slow twenty real
+  players down the same way. It also means a farmer who spreads across rooms is not slowed at
+  all.
+- **The map is public, so routes can be optimised.** `GET /api/world/map` serves the whole
+  city to anybody, with no session, because the client has to draw it. Every landmark,
+  courier point and patrol loop is therefore known in advance and a bot can walk the shortest
+  route between them. We chose this over hiding the map, which would not have worked anyway.
+- **The treasury key is a single hot key on the host.** One process holds
+  `TREASURY_PRIVATE_KEY` in memory and signs with it. Whoever gets that host gets the wallet.
+  There is no hardware signer, no multisig, and no spending limit enforced anywhere but in
+  our own code, which is why the wallet is funded with what the game needs and no more.
+- **Nothing here is audited by anyone else.** This is a self-audit, written by the people who
+  wrote the code, with a command anybody can run to check the parts that can be checked.
+
+## Where the rest of it is
+
+The eight entry points and what stops each attack are summarised on
+[Security](/docs/trust/security), and every claim that can be executed is executed by the
+[prove-it run](/docs/trust/proof).

@@ -1,0 +1,63 @@
+---
+title: Security
+description: Who would attack a game that pays out, what stops each of them, and where the full threat model lives.
+---
+
+Vettai pays real NIM to people who play a game. That single sentence is the whole security
+problem: every attacker wants the payout without doing the play, and the server is the only
+thing standing between them and the treasury.
+
+The rule the whole design follows is that the client is never asked for a fact. It sends
+intents. The server decides what happened, writes it down, and signs the payment. A player
+never sends a score, a position, a kill, or even their own wallet address.
+
+## Who is attacking
+
+| Attacker | What they want | What it would cost |
+|---|---|---|
+| A scripted client | Play faster and longer than a person can, and take the daily quests every day | The pool drains into one wallet |
+| A multi-account farmer | Run fifty wallets from one machine and claim fifty daily quests | The pool drains into one person's fifty wallets |
+| A session thief | Use somebody else's session to claim their quests | One player's rewards, and their trust |
+| A replayer | Send the same signed message twice and get paid twice | Double payouts, unbounded |
+| A shop payer who cheats | Get the gear for less, or pay from a wallet that does not own the order | Free gear, and a player who paid getting nothing |
+| An operator mistake | Not an attacker: a crash, a restart, or a node that times out mid-send | The same payout sent twice, which is how the game this borrows from lost money |
+
+## The eight entry points, in one line each
+
+1. **Login.** The address comes off the public key, never off the request. Every challenge
+   carries a single-use nonce spent by a conditional update, so the database decides who got
+   there first. Session tokens are stored only as a hash.
+2. **The play socket.** A one-minute, one-shot ticket keeps the session token out of proxy
+   logs. The wallet is fixed before the upgrade. Per-connection budgets, counted server side,
+   bound moves, shots, interactions and pings. Three unreadable frames close the socket.
+3. **Claiming a payout.** The only door to money, with several locks in a row: ownership,
+   state, signature, nonce, one transaction for the claim and the quest, a unique index on
+   the quest id, and three caps measured under two advisory locks.
+4. **The shop.** Price, sender, amount and expiry are all decided from the chain and the
+   server's own rows. Every inspected payment is written down with its outcome.
+5. **The treasury outbox.** The hash is written before the broadcast, so every failure leaves
+   either "nothing was sent" or "go and look it up". A timeout is never answered with a
+   resend.
+6. **The weekly ladder.** The period row is inserted first, inside the transaction, so a
+   restart or a drifting clock is refused by the primary key.
+7. **The landlord quest.** Finished by reading the chain, filtered to the current UTC day, so
+   one stake read can only ever close one day.
+8. **Configuration.** Every key validated at boot. The treasury refuses to start without its
+   key or on the wrong network. The world refuses to start with the key.
+
+## Two things worth saying plainly
+
+**The caps bound the loss from a scripted client. They do not prevent one.** A bot that sends
+exactly what a phone sends cannot be told apart from a phone. What the caps do is make the
+win small and bounded.
+
+**Nobody outside has audited this.** It is a self-audit with a command anybody can run. See
+[Self-audit](/docs/trust/self-audit).
+
+## The full document
+
+The complete threat model, entry point by entry point, with the file and function that stops
+each attack, is
+[docs/security/threat-model.md in the repository](https://github.com/ramakrishnanhulk20/vettai/blob/main/docs/security/threat-model.md).
+Its honest half, the holes we did not close, is quoted in full on
+[What we did not fix](/docs/trust/threat-model).

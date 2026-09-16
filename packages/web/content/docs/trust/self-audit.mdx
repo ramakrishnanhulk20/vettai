@@ -1,0 +1,57 @@
+---
+title: Self-audit
+description: Nobody outside has audited Vettai. Here is exactly what the review was, what it found, and what was done about it.
+---
+
+Say it plainly: Vettai is self-audited. No outside firm, no bug bounty, no third party has
+looked at this code. The threat model says the same thing in its last line, and it is worth
+repeating here rather than burying it.
+
+What exists instead is a review we ran on ourselves before the backend gate closed, and one
+command anybody can run to check the parts that can be checked.
+
+## The review
+
+The whole backend diff went through a structured code review before any frontend work
+started.
+
+| | |
+|---|---|
+| Review angles | 8 |
+| Independent verifiers | 5 |
+| Findings confirmed and fixed | 13 |
+
+The angles covered the money path, the world and socket layer, the quest engine, race
+conditions, configuration and boot refusals, the proof command itself, and code hygiene. The
+verifiers each re-checked findings against the code rather than against the report.
+
+The fixes that came out of it are the parts of the design the docs now describe as normal:
+advisory locks on the three caps, held claims released on a minute timer instead of lost,
+giving up on a stuck `sending` row after three attempts, filtering the landlord stake read to
+one UTC day, judging shop order expiry against block time instead of wall clock, writing
+every inspected payment to `received_payments`, trusted-peer proxy configuration instead of a
+hop count, connection ids so a stale socket cannot evict a live one, an ordered chain for tick
+events, one transaction for the claim and the quest, the paid-order sweep, and clamping the
+streak reward at creation.
+
+## What is actually proven
+
+Thirteen fixes are a story. The
+[prove-it run](/docs/trust/proof) is the evidence: twelve checks against the live Nimiq
+testnet, with real payouts and real refusals, and the output saved in the repository.
+
+The test suite sits behind that, including property tests over the simulation that hold the
+rules under generated input rather than over chosen examples.
+
+## What is honestly not proven
+
+- Nothing here has been reviewed by anybody outside the project.
+- The advisory locks are proven by the statements they issue, not by a real race on a busy
+  Postgres.
+- A scripted client that sends exactly what a phone sends cannot be detected. The caps bound
+  what it can take, and that is all they do.
+- The treasury key is a single hot key on the host. There is no hardware signer and no
+  multisig, which is why the wallet is funded with what the game needs and no more.
+
+The full list is on [What we did not fix](/docs/trust/threat-model), quoted from the threat
+model without edits.

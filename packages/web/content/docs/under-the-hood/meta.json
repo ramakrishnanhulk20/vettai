@@ -1,0 +1,5 @@
+{
+  "title": "Under the hood",
+  "defaultOpen": true,
+  "pages": ["architecture", "world", "socket", "money", "api"]
+}

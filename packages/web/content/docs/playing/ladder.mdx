@@ -1,0 +1,48 @@
+---
+title: Weekly ladder
+description: Kills per wallet from Monday to Sunday, three prizes, paid once per week and never twice.
+---
+
+The ladder is the one reward you do not claim. It ranks wallets by kills over a week and the
+treasury pays the top three on its own.
+
+## The week
+
+The window is Monday 00:00 UTC to Sunday 23:59:59 UTC, and a period is named like
+`2026-W41`. Kills are counted per wallet from the same number the hunt quest writes, which
+keeps rising past the quest target of five precisely so the ladder has real play to read.
+
+`GET /api/ladder/week` is public, needs no session, and returns the current week, the three
+prizes in NIM, and the top ten entries. Addresses are shortened to the first eight characters
+and the last four: enough to recognise your own row, not enough to copy somebody else's.
+Reading the ladder can never trigger a payment.
+
+## The prizes
+
+| Place | Prize by default |
+|---|---|
+| First | 2 NIM |
+| Second | 1 NIM |
+| Third | 0.5 NIM |
+
+The three amounts are one environment setting, so an operator can change them without a
+deploy. The API reports the prizes it will actually pay.
+
+## Paying it
+
+At 00:05 UTC on Monday the treasury pays the previous week, once.
+
+The safety is in the order of writes. The period row is inserted first, inside the same
+database transaction as the three prizes, so a second caller, a restart or a drifting clock
+is refused by the primary key rather than by a check it could race past. A week with nobody
+in it still writes its row, so it is never looked at again.
+
+A ladder prize is a claim like any other, so it passes the same three caps. A prize that
+crosses a cap is written as `held` and released later by the same minute-by-minute job that
+releases a held quest claim. Being at the top of the ladder on a Monday when the pool is
+tight means being paid later, not being skipped.
+
+One more detail that only matters if you read the code: the pool lock is the very first
+statement of the ladder transaction, ahead of the wallet locks its three prizes take, which
+keeps the lock order identical to every single claim's. A week being paid and a player
+claiming a quest can never end up waiting on each other in a circle.

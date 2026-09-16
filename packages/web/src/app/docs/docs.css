@@ -1,0 +1,477 @@
+@import "tailwindcss" source(none);
+@import "fumadocs-ui/css/neutral.css";
+@import "fumadocs-ui/css/preset.css";
+
+@source "./";
+@source "../../components/docs";
+
+/* The game and the landing page use 8px on every corner, so the docs do too. */
+@theme {
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 8px;
+  --radius-xl: 8px;
+  --radius-2xl: 10px;
+  --radius-3xl: 12px;
+}
+
+/* The docs are night only, so both palettes carry the same tokens and there is never a
+   pale frame around the page before the dark class lands. The three font names are
+   spelled out here because Tailwind ships its own --font-mono and this sheet loads
+   after the app's globals. */
+:root,
+.dark {
+  --docs-display: var(--font-display-face), "Arial Narrow", sans-serif;
+  --docs-body: var(--font-body-face), system-ui, sans-serif;
+  --docs-mono: var(--font-mono-face), ui-monospace, monospace;
+
+  --color-fd-background: #0b0f1a;
+  --color-fd-foreground: #f3efe7;
+  --color-fd-muted: rgba(243, 239, 231, 0.06);
+  --color-fd-muted-foreground: rgba(243, 239, 231, 0.58);
+  --color-fd-popover: #0f1523;
+  --color-fd-popover-foreground: #f3efe7;
+  --color-fd-card: #0d121e;
+  --color-fd-card-foreground: #f3efe7;
+  --color-fd-border: rgba(243, 239, 231, 0.14);
+  --color-fd-primary: #ff6a2b;
+  --color-fd-primary-foreground: #0b0f1a;
+  --color-fd-secondary: rgba(243, 239, 231, 0.05);
+  --color-fd-secondary-foreground: #f3efe7;
+  --color-fd-accent: rgba(243, 239, 231, 0.07);
+  --color-fd-accent-foreground: #f3efe7;
+  --color-fd-ring: #ff6a2b;
+  --color-fd-overlay: rgba(6, 9, 15, 0.74);
+}
+
+.dark #nd-sidebar,
+#nd-sidebar,
+#nd-sidebar-mobile {
+  --color-fd-muted: rgba(243, 239, 231, 0.06);
+  --color-fd-secondary: rgba(243, 239, 231, 0.05);
+  --color-fd-muted-foreground: rgba(243, 239, 231, 0.6);
+}
+
+.docs-shell {
+  position: relative;
+  isolation: isolate;
+  font-family: var(--docs-body);
+}
+
+/* One light source over the sidebar, the same move the poster makes. */
+.docs-glow {
+  position: fixed;
+  top: -24rem;
+  left: -15rem;
+  width: 48rem;
+  height: 48rem;
+  border-radius: 9999px;
+  background: radial-gradient(circle, rgba(255, 106, 43, 0.15), rgba(255, 106, 43, 0) 62%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.docs-shell::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background-image: var(--grain);
+  /* The noise is coloured, so it is drained first. Blended straight it warms the whole
+     page and the ink stops being ink. */
+  filter: grayscale(1);
+  mix-blend-mode: overlay;
+  opacity: 0.05;
+  pointer-events: none;
+  z-index: 50;
+}
+
+/* sidebar */
+
+#nd-sidebar {
+  background-color: rgba(9, 13, 22, 0.86);
+  backdrop-filter: blur(6px);
+}
+
+/* The drawer sits on top of the page, so it stays solid or the text behind it reads
+   through the list. */
+#nd-sidebar-mobile {
+  background-color: #090d16;
+}
+
+/* The mark from the site nav: a square that turns on hover. */
+.docs-mark {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  background-color: #ff6a2b;
+  flex-shrink: 0;
+  transition: transform 300ms ease;
+}
+
+a:hover > .docs-mark {
+  transform: rotate(45deg);
+}
+
+.docs-wordmark {
+  font-family: var(--docs-display);
+  font-weight: 900;
+  font-variation-settings: "opsz" 48;
+  font-size: 1.375rem;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: -0.01em;
+  color: #f3efe7;
+}
+
+.docs-wordmark-tag {
+  font-family: var(--docs-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  font-size: 0.625rem;
+  color: #ff6a2b;
+  padding-top: 0.3rem;
+}
+
+.docs-sidebar-note {
+  font-family: var(--docs-mono);
+  font-size: 0.6875rem;
+  line-height: 1.6;
+  color: rgba(243, 239, 231, 0.34);
+}
+
+/* Group headings are poster labels, not buttons. */
+#nd-sidebar button[data-state],
+#nd-sidebar-mobile button[data-state] {
+  font-family: var(--docs-display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 0.9375rem;
+  color: rgba(243, 239, 231, 0.46);
+  margin-top: 1.35rem;
+  margin-bottom: 0.125rem;
+}
+
+#nd-sidebar button[data-state]:hover,
+#nd-sidebar-mobile button[data-state]:hover {
+  color: rgba(243, 239, 231, 0.78);
+}
+
+#nd-sidebar a,
+#nd-sidebar-mobile a {
+  transition:
+    color 200ms ease,
+    background-color 200ms ease,
+    transform 200ms ease;
+}
+
+#nd-sidebar a:hover,
+#nd-sidebar-mobile a:hover {
+  transform: translateX(2px);
+}
+
+#nd-sidebar a[data-active="true"],
+#nd-sidebar-mobile a[data-active="true"] {
+  color: #ff6a2b;
+  background-color: rgba(255, 106, 43, 0.08);
+}
+
+/* mobile header */
+
+#nd-subnav {
+  background-color: rgba(11, 15, 26, 0.9);
+}
+
+/* the page itself */
+
+.docs-title {
+  font-family: var(--docs-display);
+  font-weight: 900;
+  font-variation-settings: "opsz" 72;
+  font-size: clamp(2.75rem, 7vw, 4.5rem);
+  line-height: 0.92;
+  letter-spacing: -0.015em;
+  text-transform: uppercase;
+  text-wrap: balance;
+}
+
+.docs-lede {
+  font-size: 1.0625rem;
+  line-height: 1.6;
+  max-width: 62ch;
+  color: rgba(243, 239, 231, 0.6);
+  border-inline-start: 2px solid rgba(255, 106, 43, 0.55);
+  padding-inline-start: 0.9rem;
+}
+
+.prose h2 {
+  font-family: var(--docs-display);
+  font-weight: 700;
+  font-variation-settings: "opsz" 48;
+  text-transform: uppercase;
+  letter-spacing: 0.01em;
+  color: #f3efe7;
+  font-size: 1.95rem;
+  line-height: 1.1;
+  margin-top: 3rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--color-fd-border);
+}
+
+.prose h3,
+.prose h4 {
+  font-family: var(--docs-body);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: #f3efe7;
+}
+
+.prose h3 {
+  font-size: 1.1875rem;
+  line-height: 1.3;
+  margin-top: 2.25rem;
+}
+
+.prose p,
+.prose li {
+  font-size: 1.0625rem;
+  line-height: 1.72;
+  color: rgba(243, 239, 231, 0.82);
+}
+
+.prose strong {
+  color: #f3efe7;
+  font-weight: 600;
+}
+
+.prose a {
+  color: #f3efe7;
+  text-decoration-color: rgba(255, 106, 43, 0.75);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+  transition: color 200ms ease;
+}
+
+.prose a:hover {
+  color: #ff6a2b;
+}
+
+.prose code {
+  font-family: var(--docs-mono);
+  font-size: 0.875em;
+}
+
+.prose :not(pre) > code {
+  background-color: rgba(255, 106, 43, 0.09);
+  border: 1px solid rgba(255, 106, 43, 0.18);
+  color: #ffb08c;
+  padding: 0.1em 0.35em;
+  /* A route or a challenge string is longer than a 390px column, so it breaks instead
+     of pushing the whole paragraph sideways. */
+  overflow-wrap: anywhere;
+}
+
+.prose figure[data-rehype-pretty-code-figure],
+.prose pre {
+  border-radius: 8px;
+}
+
+.prose pre code {
+  font-family: var(--docs-mono);
+}
+
+.prose blockquote {
+  border-inline-start: 2px solid #ff6a2b;
+  color: rgba(243, 239, 231, 0.72);
+  font-style: normal;
+}
+
+.prose table {
+  font-size: 0.9375rem;
+}
+
+.prose th {
+  font-family: var(--docs-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.625rem;
+  color: rgba(243, 239, 231, 0.5);
+  font-weight: 500;
+}
+
+.prose td {
+  color: rgba(243, 239, 231, 0.8);
+  vertical-align: top;
+}
+
+/* on this page */
+
+#nd-toc #toc-title {
+  font-family: var(--docs-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  font-size: 0.625rem;
+  color: rgba(243, 239, 231, 0.42);
+}
+
+#nd-toc a {
+  transition: color 200ms ease;
+}
+
+#nd-toc a[data-active="true"] {
+  color: #ff6a2b;
+}
+
+/* breadcrumb */
+
+.docs-shell nav[aria-label="breadcrumb"] {
+  font-family: var(--docs-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 0.625rem;
+}
+
+/* diagrams */
+
+.docs-diagram {
+  margin: 2rem 0;
+  padding: 1.25rem;
+  border: 1px solid var(--color-fd-border);
+  border-radius: 8px;
+  max-width: 100%;
+  overflow-x: auto;
+  min-height: 9rem;
+  display: flex;
+  align-items: center;
+  /* Safe centring: a diagram wider than the frame starts at its left edge instead of
+     hiding the first third of itself off the scrollable area. */
+  justify-content: safe center;
+  /* The two soft edges are painted on the scroll container, so they fade out as you
+     reach each end and say "there is more of this diagram" without a label. */
+  background:
+    linear-gradient(to right, #0d121e, rgba(13, 18, 30, 0)) 0 0 / 34px 100% no-repeat local,
+    linear-gradient(to left, #0d121e, rgba(13, 18, 30, 0)) 100% 0 / 34px 100% no-repeat local,
+    linear-gradient(to right, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0)) 0 0 / 26px 100% no-repeat scroll,
+    linear-gradient(to left, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0)) 100% 0 / 26px 100% no-repeat scroll,
+    #0d121e;
+}
+
+.docs-diagram-svg {
+  flex: 0 0 auto;
+}
+
+.docs-diagram svg {
+  display: block;
+  height: auto;
+}
+
+.docs-diagram-fallback {
+  font-family: var(--docs-mono);
+  font-size: 0.75rem;
+  color: rgba(243, 239, 231, 0.5);
+  background: transparent;
+  border: 0;
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.docs-diagram[data-drawn="0"] .docs-diagram-fallback:empty::before {
+  content: "Drawing the diagram";
+  font-family: var(--docs-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  font-size: 0.625rem;
+  color: rgba(243, 239, 231, 0.32);
+}
+
+/* On a phone a full diagram is taller than the screen, so the frame becomes a window
+   you pan inside instead of a wall you scroll past. */
+@media (max-width: 767px) {
+  .docs-diagram {
+    padding: 0.9rem;
+    max-height: 72svh;
+    overflow: auto;
+  }
+}
+
+/* the overview page index */
+
+.docs-paths {
+  margin: 2.5rem 0 1rem;
+  border-top: 1px solid var(--color-fd-border);
+}
+
+.docs-path {
+  display: grid;
+  grid-template-columns: 2.5rem 1fr auto;
+  gap: 0.75rem;
+  align-items: baseline;
+  padding: 1.1rem 0.25rem;
+  border-bottom: 1px solid var(--color-fd-border);
+  text-decoration: none;
+  transition:
+    background-color 250ms ease,
+    padding-inline-start 250ms ease;
+}
+
+.docs-path:hover {
+  background-color: rgba(243, 239, 231, 0.03);
+  padding-inline-start: 0.75rem;
+}
+
+.docs-path small {
+  font-family: var(--docs-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  color: #ff6a2b;
+}
+
+.docs-path b {
+  display: block;
+  font-family: var(--docs-display);
+  font-weight: 700;
+  font-variation-settings: "opsz" 48;
+  text-transform: uppercase;
+  font-size: 1.35rem;
+  line-height: 1.05;
+  letter-spacing: 0.01em;
+  color: #f3efe7;
+}
+
+.docs-path em {
+  display: block;
+  margin-top: 0.3rem;
+  font-style: normal;
+  font-size: 0.9375rem;
+  color: rgba(243, 239, 231, 0.55);
+}
+
+.docs-path i {
+  font-style: normal;
+  color: rgba(243, 239, 231, 0.3);
+  transition:
+    transform 250ms ease,
+    color 250ms ease;
+}
+
+.docs-path:hover i {
+  transform: translateX(4px);
+  color: #ff6a2b;
+}
+
+/* search */
+
+#nd-docs-search input,
+.docs-shell input[type="search"] {
+  font-family: var(--docs-body);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #nd-sidebar a:hover,
+  #nd-sidebar-mobile a:hover,
+  .docs-path:hover,
+  .docs-path:hover i,
+  a:hover > .docs-mark {
+    transform: none;
+  }
+}

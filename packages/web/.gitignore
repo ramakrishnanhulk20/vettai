@@ -3,3 +3,6 @@ node_modules/
 lab-shots/
 next-env.d.ts
 *.tsbuildinfo
+
+# fumadocs mdx writes its index here on every build
+/.source

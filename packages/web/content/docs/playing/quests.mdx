@@ -1,0 +1,80 @@
+---
+title: Quests
+description: What each quest asks for, what it pays, and the exact moment the server calls it done.
+---
+
+Quests are per wallet, per UTC day. They are created once, the first time you ask for them
+after midnight UTC, and read back on every request after that. Two sockets opening in the
+same second cannot both create today's hunt, because the table itself carries a unique line
+on address, day and kind.
+
+Every number below is written by the server from events the server produced. Your phone
+never reports a kill, a delivery or a visit. It sends an intent, the simulation decides what
+happened, and the quest engine writes it down.
+
+## The four quests you get by default
+
+| Quest | Target | Done when | Reward by default |
+|---|---|---|---|
+| Hunt | 5 kills | the simulation credits you with the fifth drone kill today | 0.5 NIM |
+| Courier | 1 delivery | you pick up at the right point and drop at the right point within 120 seconds | 0.3 NIM |
+| Landmarks | 4 | you interact at each of the four landmarks | 0.2 NIM on your first day with this quest, 0.05 NIM after |
+| Streak | 1 | nothing: it is created already done | 0.2 NIM on day one, plus 0.5 per day, capped at 10 NIM |
+
+A fifth kind, landlord, is generated only when the operator turns it on. See
+[Landlord](/docs/playing/landlord).
+
+Rewards are read from the server's reward table and every one of them can be overridden from
+the environment, so treat the column above as the shipped defaults. The reward stored on
+your quest row is the number that will be paid.
+
+## Hunt
+
+Five drone kills. Kills come out of the simulation, from the hitscan shot and the damage it
+does, and the kill is credited to the player who did the most damage to that drone. There is
+no message a client can send that reports a kill.
+
+The counter keeps going past five. The quest is done at the target, but kills carry on being
+recorded up to 999 a day, because the [weekly ladder](/docs/playing/ladder) ranks wallets on
+that same number.
+
+## Courier
+
+One parcel, from a pickup point to a drop point, inside two minutes.
+
+The route is drawn from your address and the day, not from a clock, so the same wallet gets
+the same route all day and two wallets get different ones. Both ends are `interact` messages
+and both are measured against the server's own copy of your position: stand more than 2.5
+metres away and the interaction is refused.
+
+If the parcel goes cold on the way, the quest is not failed. The pickup is cleared and you
+start again from the pickup point.
+
+## Landmarks
+
+Four fixed places in the city. Touch each one once. Reaching the same landmark twice counts
+once, and the quest records which of the four you have reached so the HUD can show you the
+ones that are left.
+
+The reward drops after your first day with this quest. The server checks whether your wallet
+has ever had a landmarks quest on an earlier day and writes the lower reward if it has.
+
+## Streak
+
+The streak quest is born finished. Turning up is the task. What it pays depends on how many
+UTC days in a row you have actually claimed it: day one pays 0.2 NIM and every day after
+that adds 0.5 NIM, up to a ceiling of 10 NIM.
+
+A day where the quest was created but never claimed breaks the run. The streak pays for
+showing up and taking it, not for the row existing.
+
+One more thing happens at creation: the streak is clamped to whatever your daily cap still
+allows. If you have already taken most of your day, the streak is written down at what is
+left rather than at the full curve, so the number on the card is the number that would
+actually be paid. A wallet that has had its whole day gets a streak worth nothing, and a
+quest worth nothing has nothing to claim.
+
+## From done to paid
+
+A quest at `done` is not money yet. It becomes money only through the claim endpoint, which
+needs a second signature from your wallet. See [Claiming](/docs/playing/claiming).

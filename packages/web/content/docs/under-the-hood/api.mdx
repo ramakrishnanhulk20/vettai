@@ -1,0 +1,90 @@
+---
+title: API reference
+description: Every HTTP route the world server answers, with its auth, its body and what comes back.
+---
+
+The world server is a Fastify app. Every route below is on the world process. The treasury
+has no API at all.
+
+Auth is a bearer token from `POST /api/auth/verify`, sent as `Authorization: Bearer vt1....`.
+A route marked public needs nothing.
+
+On testnet today the world answers at `https://world-production-4620.up.railway.app`.
+
+## Health and diagnostics
+
+| Route | Method | Auth | Body | Answer |
+|---|---|---|---|---|
+| `/health` | GET | public | none | `{ ok, network, rooms, online }` |
+| `/api/echo-ip` | GET | public | none | `{ ip }`, the address the server decided the caller has |
+
+`/api/echo-ip` exists so the proxy setting can be checked against a real request after every
+deploy. A wrong setting shows up here as the edge's address, or as a header a caller chose.
+
+## Auth
+
+| Route | Method | Auth | Body | Answer |
+|---|---|---|---|---|
+| `/api/auth/challenge` | POST | public | empty object | `{ message, nonce, expiresAt }` |
+| `/api/auth/verify` | POST | public | `{ message, publicKey, signature }` | `{ token, address }` |
+| `/api/auth/logout` | POST | session | none | `{ ok: true }` |
+| `/api/me` | GET | session | none | `{ address, gear, landlordSince, createdAt }` |
+
+The two challenge and verify routes are limited to 10 calls a minute per source address,
+tighter than the 120 everything else gets, because a signature check is the expensive thing
+an attacker would hammer.
+
+The request never carries an address. The server derives it from the public key it verified.
+
+## World
+
+| Route | Method | Auth | Body | Answer |
+|---|---|---|---|---|
+| `/api/world/map` | GET | public | none | the whole city as JSON, with a `version`. Cached for an hour |
+| `/api/world/ticket` | GET | session | none | `{ ticket, expiresInMs }` |
+| `/ws?ticket=...` | GET | ticket | WebSocket upgrade | see [The socket](/docs/under-the-hood/socket) |
+
+## Quests and claims
+
+| Route | Method | Auth | Body | Answer |
+|---|---|---|---|---|
+| `/api/quests/today` | GET | session | none | `{ day, quests: [...] }` |
+| `/api/quests/:id/claim/challenge` | POST | session | none | `{ message, nonce, expiresAt }` |
+| `/api/quests/:id/claim` | POST | session | `{ message, publicKey, signature }` | `{ state, claimId, memo, amountLuna, amountNim }`, plus `reason` when the state is `held` |
+| `/api/claims` | GET | session | none | `{ claims: [...] }` |
+
+A quest in the list carries `id`, `kind`, `day`, `target`, `progress`, `state`, `rewardLuna`
+and `rewardNim`. A courier quest adds `route` and `carrying`. A landmarks quest adds
+`visited`, four booleans in order.
+
+A claim in the list carries `id`, `questId`, `kind`, `state`, `amountLuna`, `amountNim`,
+`memo`, `txHash`, `blockNumber`, `createdAt`, `paidAt` and `error`.
+
+Refusals on the claim path: 404 for a quest that is not yours or does not exist, 409 for one
+already claimed or not yet done, 401 for a signature from another wallet or a spent nonce,
+400 for a message that is not a claim challenge for that quest or a quest worth nothing.
+
+## Shop
+
+| Route | Method | Auth | Body | Answer |
+|---|---|---|---|---|
+| `/api/shop` | GET | public | none | `{ to, items: [{ id, name, priceLuna, priceNim, gear }] }` |
+| `/api/shop/orders` | POST | session | `{ item }` | `{ orderId, item, to, luna, nim, memo, expiresAt }` |
+| `/api/shop/orders/:id` | GET | session | none | `{ orderId, item, state, luna, nim, memo, to, txHash, expiresAt }` |
+
+Somebody else's order answers 404, so an id cannot be used to learn what another wallet is
+buying. An item that is not in the shop is 400.
+
+Handing the gear over does not happen on these routes. A paid order is announced by the
+world's own sweep, which reaches the player whether or not their phone happens to be asking.
+
+## Public reads
+
+| Route | Method | Auth | Body | Answer |
+|---|---|---|---|---|
+| `/api/ladder/week` | GET | public | none | `{ week, prizesNim, entries: [{ place, address, kills }] }`, top ten |
+| `/api/stats` | GET | public | none | `{ day, playersToday, playersAllTime, killsToday, paidLuna, paidNim, claimsPaid, history }` |
+
+`history` is the last seven UTC days: players, kills and luna paid for each. The landing page
+reads `/api/stats` and nothing else, so every number on it is one the server counted from its
+own rows.

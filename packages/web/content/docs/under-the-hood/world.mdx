@@ -1,0 +1,90 @@
+---
+title: The world
+description: The city, the 20 Hz tick, how a player moves, how a drone hunts, and what a shot actually resolves against.
+---
+
+The simulation is pure functions with no input or output. Every one of them takes state in
+and returns new state plus a list of events. That is what makes the rules testable and what
+makes them the same rules for everybody.
+
+Units are metres, seconds and radians. The tick is 50 milliseconds.
+
+## The city
+
+The map is generated from a seed with a seeded random number generator, so the server and
+the client build the same town from the same JSON. It is served at `GET /api/world/map` with
+a version, and it is public because the client has to draw it.
+
+- 12 by 12 lots of 16 metres with 8 metre streets: a 288 metre square, origin at the centre,
+  y pointing up.
+- Each lot is empty, a park, or a building with a type, a height and a box.
+- Fixed places: the office, which is the quest board and the spawn, the shop, four
+  landmarks, eight courier points, and patrol waypoint loops for the drones that run along
+  the streets at 6 metres up.
+
+Everything the client needs to draw the block and the server needs to collide against is in
+that JSON. Nothing else is hardcoded on either side.
+
+## Players
+
+A player is a position, a heading, a velocity, a shield from 0 to 3, a downed timer, the
+time of their last shot and their gear.
+
+Movement arrives as an intent: a direction, never a position. Whatever vector turns up is
+normalised, so asking to move 50 units becomes a single unit step. The server integrates at
+6 m/s, or 7 with the sprint gear, then slides the body along building boxes by resolving one
+axis at a time, then clamps to the map bounds. A player can never end a tick inside a
+building, and a long tick is capped so nobody crosses a wall in one jump.
+
+Shield runs the damage model. A bolt hit costs one bar. A bar comes back every 8 seconds
+without a hit. At zero you are downed for 3 seconds and respawn at the office with a full
+shield. Quest progress is kept.
+
+## Drones
+
+A drone has 3 hit points and three states: patrol, engage, dead.
+
+- Patrol: 3 m/s along its waypoint loop.
+- Engage: a player inside 25 metres pulls it in. It circles that player at 12 metres and
+  fires a bolt every 2 seconds.
+- A room holds at most 6 live drones, with one respawn every 20 seconds at a random point on
+  a loop.
+
+## Bolts
+
+A bolt is a position and a velocity with an owner and a birth time. It flies at 12 m/s in a
+straight line toward where its target was when it was fired, and it dies after 3 seconds or
+on impact. Impact is a sphere against a capsule of radius 0.5 and height 1.8, tested against
+each player. Bolts do not hit other players' bodies as damage: there is no player versus
+player.
+
+## Shooting
+
+A fire intent is a heading and a pitch, at most 4 a second on the MK1 blaster or 6 on the
+MK2. The shot is hitscan from the server's copy of your position at eye height, along the
+aim direction, out to 60 metres, with aim assist: the nearest live drone inside a 6 degree
+cone counts as hit. A hit costs one hit point, and the player with the most damage on a
+drone gets the kill.
+
+The socket's own budget of 8 fire messages a second sits above the simulation's 4 on
+purpose. The budget stops a client spending the server's time asking. The simulation decides
+what actually fired.
+
+## Interacting
+
+`interact` names a place, never a position: the office, the shop, a pickup, a delivery, or
+one of the four landmarks. The server measures from its own copy of where you are and
+refuses anything past 2.5 metres.
+
+## Events
+
+Each function returns events alongside the new state: `hit`, `kill`, `downed`, `respawn`,
+`pickup`, `deliver`, `landmark`, `spawn`. Those are what the quest engine reads, and they
+are produced by the server, never sent in.
+
+## What the tests hold to
+
+The simulation is covered by property tests, not just examples: no player is ever inside a
+building after any sequence of inputs, speed never goes above the cap, fire rate never goes
+above the cap, the drone count never goes above six, a dead drone never deals damage, and
+kill credit always goes to the top damage dealer.

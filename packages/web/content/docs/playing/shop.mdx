@@ -1,0 +1,64 @@
+---
+title: Shop
+description: Gear you buy with a real NIM payment, and what the chain watcher checks before it hands anything over.
+---
+
+The shop is the one place money flows the other way: from your wallet to the treasury. You
+pay with an ordinary Nimiq transaction carrying a memo, and the treasury's chain watcher
+decides whether that payment counts.
+
+## What is for sale
+
+| Item | Price | What it changes |
+|---|---|---|
+| Blaster MK2 | 1 NIM | six shots a second instead of four |
+| Sprint boots | 0.8 NIM | 7 m/s instead of 6 |
+| Neon skin | 0.5 NIM | how your player looks |
+| Carbon skin | 0.5 NIM | how your player looks |
+| Sand skin | 0.5 NIM | how your player looks |
+
+The price is the server's, not a number your phone sends. A client that asks to pay less is
+refused when the payment is inspected, not when the order is made.
+
+## How a purchase works
+
+1. `POST /api/shop/orders` with the item id opens a `pending` order. You get back the
+   treasury address, the price in luna and in NIM, a memo of the shape `vettai:shop:`
+   followed by the first eight characters of the order id, and an expiry.
+2. Your wallet sends a basic transaction with that memo attached. The payment goes straight
+   to the treasury address. Vettai is not in the middle of it.
+3. The treasury's watcher scans the treasury address for incoming transactions, matches the
+   memo against pending orders, and decides.
+4. Once the order is paid, the world sweeps paid orders every five seconds, applies the gear
+   to the live room, pushes a `gear` event to your socket and only then marks the order as
+   announced. If you are offline you get the gear at your next join, from your player row.
+
+An order has half an hour to be paid before it is closed.
+
+## What the watcher checks
+
+- **The memo.** Anything arriving at the treasury without the `vettai:shop:` prefix is
+  refused and written down. The cursor moves past it, because it will never become an order.
+- **The amount.** A payment below the order's price is refused and recorded as `short`.
+- **The sender.** The address that paid must be the address that opened the order, compared
+  in a normalised form so a space or a lowercase letter never decides it.
+- **The clock.** Expiry is judged against the block the payment was mined in, not the moment
+  the watcher got round to reading it. A payment that reached the chain inside the half hour
+  is honoured even if the treasury was restarting while it landed.
+- **Doing it twice.** The memo is unique, the transaction hash is unique, and the grant is a
+  conditional update inside the same transaction as the gear write. Reading the same block
+  twice is a no-op, not a second grant.
+
+## Nothing is thrown away
+
+Every incoming transaction the watcher inspects is written to a `received_payments` row with
+its outcome: `paid`, `short`, `expired`, `unknown_memo`, `sender_mismatch` or `already_paid`,
+together with the sender, the value, the block, the block time and the order it named. The
+transaction hash is the primary key and a repeat insert keeps the first decision.
+
+Money that arrived is money that arrived. A refusal is something a person can settle by hand,
+because the row is still there.
+
+The prove-it run pays a real 1 NIM shop order on testnet and, in the same pass, sends 0.01
+NIM from the wrong wallet against a different order and shows it left pending. See
+[check 10](/docs/trust/proof).

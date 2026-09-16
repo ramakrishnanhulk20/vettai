@@ -1,0 +1,82 @@
+---
+title: The money path
+description: The treasury, the outbox, the sender, and the order of writes that makes a crash safe.
+---
+
+One process holds the key. Everything about the money path is arranged so that a crash, a
+restart or a node that times out never turns into a second payment.
+
+## The outbox
+
+Every 2 seconds the treasury takes up to 5 `queued` claims, oldest first, and marks each one
+`sending` before any network call happens. That write is the lock: a second process or a
+restart cannot pick the same claim up again. It then sends them one at a time, 1.5 seconds
+apart, without waiting for inclusion in between.
+
+A `sending` row with no hash and older than ten minutes was picked up but never signed. It is
+retried once and then marked `failed` for a person to look at, never retried in a loop.
+
+## The sender
+
+For each claim the sender builds a basic Nimiq transaction with the memo, signs it with the
+treasury key, **writes the hash down while the row is still `sending`**, and only then
+broadcasts it.
+
+That ordering is the whole design. Every failure leaves one of two states: no hash, which
+means nothing was sent, or a hash, which means go and look it up.
+
+On later passes `settleInFlight` polls the node for each hash and marks the claim `paid`
+with its block number when it lands.
+
+## The three answers a lookup can give
+
+`lookup` keeps three cases apart, and the difference between the second and the third is
+what stops a double payment.
+
+| Answer | What it means | What the treasury does |
+|---|---|---|
+| in a block | the payment happened | mark it paid with the block number |
+| still pending | the node knows the hash, no block yet | wait |
+| unknown | the node has never heard of this hash | wait, then give up on it after 15 minutes |
+
+A lookup that throws is always "still pending", never "unknown". A node that is busy or
+offline knows nothing about whether the payment exists, and treating a timeout as "it never
+happened" is exactly the mistake that paid a player twice in the game this one borrows from.
+
+## Giving up on a dead hash
+
+A broadcast the node refused, after the hash was already written down, would otherwise sit in
+`sending` forever and the player would never be paid. So once a row has held its hash with no
+block for 15 minutes, the treasury asks one final time. Only an answer of unknown after that
+wait counts as never accepted: a Nimiq transaction is valid for a couple of minutes after the
+height it was built at, so a node that has still never heard of the hash by then never will.
+
+The claim goes back to `queued` with the dead hash cleared and `attempts` incremented, and is
+rebuilt as a new transaction with a fresh validity height. After three attempts it is
+`failed` and left for a person. The count is an integer column, never text parsed out of an
+error message.
+
+## The other treasury jobs
+
+- **The watcher** scans the treasury address for incoming transactions and settles shop
+  orders. See [Shop](/docs/playing/shop).
+- **Stakes** reads the chain once per UTC day for the landlord quest. See
+  [Landlord](/docs/playing/landlord).
+- **The ladder** pays the previous week at 00:05 UTC on Monday. See
+  [Weekly ladder](/docs/playing/ladder).
+- **Release** re-checks held claims every 60 seconds and frees the ones that now fit.
+
+## Refusing to start
+
+The treasury will not boot if the private key does not derive the configured treasury
+address, or if the node reports a different network from the configured one. A node on
+mainnet while the configuration says testnet turns a demo into real money leaving a real
+wallet, so it fails at boot rather than at the moment somebody is owed a payout.
+
+The world refuses the mirror image: it will not boot if it can see the treasury key at all.
+
+## Every payout is a public receipt
+
+The memo on a quest payout carries the quest id, and the memo on a shop payment carries the
+order id. Both are on the Nimiq chain, so anyone can read back what the game has paid and
+what it has taken without asking Vettai for anything.

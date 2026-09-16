@@ -1,0 +1,65 @@
+---
+title: The socket
+description: Rooms, tickets, and every frame that travels in each direction, with the per-connection budgets that bound them.
+---
+
+Play runs over one WebSocket. Every message in both directions is JSON and carries `v: 1`.
+
+## Getting in
+
+A signed-in caller asks for a ticket with `GET /api/world/ticket`. It lasts one minute and
+is single use. The socket is then `GET /ws?ticket=...`.
+
+A browser cannot put a header on a WebSocket handshake, so without the ticket the session
+token would travel in the query string and into every proxy log on the way. The ticket is
+deleted before the upgrade is answered, so two connections racing on one ticket cannot both
+be let in, and the wallet is read off the ticket before the upgrade and fixed for the life of
+the connection.
+
+`permessage-deflate` is off, because iOS WebViews drop compressed sockets.
+
+## Rooms
+
+A room holds up to 24 players. A joining player goes to the least full open room. A room
+with nobody in it stops ticking after 30 seconds.
+
+Every connection carries an id. A late `close` from a socket that has already been replaced,
+which is what a flaky phone network produces, only removes the connection with its own id,
+never the one that replaced it.
+
+## Client to server
+
+| Frame | Shape | Budget per second |
+|---|---|---|
+| move | `{ t: 'move', seq, dx, dz, yaw }` | 20, extra ones dropped |
+| fire | `{ t: 'fire', seq, yaw, pitch }` | 8 at the socket, 4 or 6 at the simulation |
+| interact | `{ t: 'interact', target: 'office' \| 'shop' \| 'pickup' \| 'deliver' \| 'landmark:<n>' }` | 5, and you must be within 2.5 m of the place |
+| ping | `{ t: 'ping', ts }` | 2 |
+
+Every frame is parsed by a strict union. Three unreadable frames close the connection with
+code 1008, and the socket has an 8 KB payload ceiling. The budgets are counted on the server
+and never read from the client.
+
+## Server to client
+
+| Frame | When | Carries |
+|---|---|---|
+| welcome | on join | `you`, `room`, `tick`, `mapVersion`, `players`, `drones`, `quests` |
+| state | every tick | `tick`, `players` (only the ones that moved, with a full list every 40 ticks), `drones` (all live), `bolts` (all), and this tick's simulation events as `events: [{ kind, ... }]` |
+| event | when it happens | `quest` and `gear` go to that player alone, `join` and `leave` go to the room |
+| pong | after a ping | `ts`, `serverTs` |
+| error | on a refusal | `code` |
+
+The simulation event kinds that ride on the state frame are `hit`, `kill`, `downed`,
+`respawn`, `spawn`, `pickup`, `deliver` and `landmark`. They travel on the state frame rather
+than as separate frames, and the frame is serialised once per room per tick.
+
+## Writing the tick down
+
+Ticks are 50 milliseconds apart and a database write is not. So every tick's events go
+through one promise chain: the second batch waits for the first. Without it the fifth kill of
+a hunt could be written before the fourth and the quest would finish on the wrong event.
+
+A database that falls far behind is a lost cause rather than a queue worth growing. Once 20
+batches are waiting, the next tick of events is dropped with a line in the log. Losing
+progress is the cheaper failure, and it never pays anybody twice.

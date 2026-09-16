@@ -1,0 +1,135 @@
+---
+title: Architecture
+description: Two processes, one database, one chain. Which piece runs where, and which one can move money.
+---
+
+Vettai is two always-on processes built from one Docker image, sharing one Postgres
+database, plus a Next.js app on the edge and the Nimiq chain underneath.
+
+## The system, drawn
+
+```mermaid
+flowchart LR
+  subgraph phone["Player's phone"]
+    pay["Nimiq Pay"]
+    app["Vettai mini app"]
+  end
+
+  subgraph vercel["Vercel"]
+    web["Next.js app, three.js city"]
+  end
+
+  subgraph host["One Docker image, two processes"]
+    world["world: HTTP, WebSocket, rooms, 20 Hz tick, quests, claims"]
+    treasury["treasury: outbox, watcher, stakes, ladder. Holds the key"]
+  end
+
+  db[("Postgres: players, quests, claims, shop orders, cursor")]
+  chain[("Nimiq Albatross chain")]
+
+  pay -->|opens, signs messages and payments| app
+  app --> web
+  web -->|REST and WebSocket| world
+  world --> db
+  treasury --> db
+  treasury -->|pushTransaction, signed payouts| chain
+  treasury -->|getTransactionsByAddress, watches for shop payments| chain
+  app -->|sendBasicTransactionWithData, pays for gear| chain
+  world -.->|never holds a key, cannot reach the chain to spend| chain
+```
+
+## The two processes
+
+**world.** The HTTP API and the WebSocket. It runs the rooms, the 20 Hz tick, the quest
+engine, the ladder endpoint and the claim API. It never holds a private key, and it refuses
+to boot if it finds `TREASURY_PRIVATE_KEY` in its environment at all.
+
+**treasury.** Delivers queued claims as NIM payments, watches the treasury address for shop
+payments, reads stakes for the landlord quest, and pays the weekly ladder. It is the only
+process with the key.
+
+One image runs both. The host picks by setting `VETTAI_PROCESS=src/treasury/index.ts`;
+unset, the image runs the world. Locally the treasury reads its key from a separate
+`.env.treasury` file layered on top of `.env`.
+
+## The database
+
+Money amounts are integers in luna, never floats. One NIM is 100,000 luna.
+
+| Table | What it holds |
+|---|---|
+| players | address (primary), public key, created and last seen, last IP hash, gear as JSON, landlord since |
+| sessions | token hash (primary), address, created, expires after 30 days |
+| challenges | nonce (primary), kind (login, claim or shop), subject, expiry, used at. Single use, ten minutes |
+| quests | id, address, UTC day, kind, target, progress, state, reward in luna, detail JSON, created and done. Unique on address, day and kind |
+| claims | id, address, quest id, kind, amount in luna, state, memo, transaction hash (unique), block number, IP hash, attempts, held until, timestamps, error. At most one claim per quest |
+| shop_orders | id, address, item, price in luna, memo (unique), state, transaction hash (unique), block number, created, paid, announced |
+| received_payments | every incoming transaction the watcher inspected: hash (primary), sender, recipient, value, memo, block, block time, order id, outcome, seen at |
+| ladder_periods | period (primary, for example 2026-W41), paid at, the claim ids |
+| stats_daily | day (primary), players, kills, luna paid |
+| watch_cursor | address (primary), last block number, updated at |
+
+## The module graph
+
+The arrows only ever point downward. The play simulation knows nothing about the database,
+the domain knows nothing about HTTP, and the treasury is the only thing that reaches the
+signer.
+
+```mermaid
+flowchart TD
+  cli["cli/: prove, bot, seed"]
+  index["index.ts: the world process"]
+  tindex["treasury/index.ts: the treasury process"]
+  app["app.ts: Fastify, CORS, rate limits, one error shape"]
+  routes["routes/: auth, quests, shop, world, ws, ladder, stats, context"]
+  rooms["world/rooms.ts: rooms, sockets, per connection budgets"]
+  sim["world/sim.ts: the rules of play"]
+  pure["world/: geometry, map, prng, tickets, types. No input or output"]
+  domain["domain/: auth, challenges, claims, quests, shop, ladder, stats, rewards"]
+  treasury["treasury/: outbox, sender, watcher, stakes, refuse"]
+  rpc["nimiq/rpc.ts: JSON-RPC to the node"]
+  verify["nimiq/verify.ts: the Nimiq signed message"]
+  db["db/: client, schema, migrate"]
+  lib["lib/: luna, address, tokens"]
+  cfg["config.ts: zod over .env"]
+
+  cli --> app
+  cli --> rooms
+  cli --> treasury
+  index --> app
+  index --> rooms
+  tindex --> treasury
+  tindex --> domain
+  app --> routes
+  routes --> domain
+  routes --> rooms
+  routes --> verify
+  routes --> lib
+  rooms --> sim
+  rooms --> domain
+  sim --> pure
+  domain --> db
+  domain --> verify
+  domain --> lib
+  domain --> cfg
+  treasury --> domain
+  treasury --> rpc
+  treasury --> db
+  rpc --> cfg
+  rpc --> lib
+  db --> cfg
+  cfg --> lib
+```
+
+## Identity
+
+Login never carries an address. The server hands out `vettai-login:<nonce>:<expiry>`, the
+client signs it with the wallet provider, and the server rebuilds the Nimiq signed-message
+hash, verifies Ed25519 against the public key, derives the address from that key, spends the
+nonce and returns a session token of the shape `vt1.<random>`, stored only as a hash.
+
+## Configuration
+
+Every environment key is validated with zod at boot, in one file, and a missing or bad key
+fails loudly. Nothing reads an environment variable anywhere else. The full list is in
+[Running locally](/docs/builders/running-locally) and [Deploying](/docs/builders/deploying).

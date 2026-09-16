@@ -1,0 +1,75 @@
+---
+title: Getting started
+description: Open Vettai inside Nimiq Pay, sign once, finish a quest, and claim the NIM.
+---
+
+Vettai is a mini app. It runs inside Nimiq Pay, on the wallet you already have, and it is
+the only place the game is playable.
+
+## 1. Open it inside Nimiq Pay
+
+Vettai is opened from a deep link of this shape:
+
+```
+https://nimpay.app/miniapps/open/<host>/play
+```
+
+`<host>` is the hostname Vettai is served from, and the landing page builds that link for
+you from wherever it is running. Nimiq Pay opens the mini app in its own view with the
+wallet provider already injected, which is how the game can ask you to sign without ever
+seeing a key.
+
+Outside Nimiq Pay the landing page is all there is. The game needs the wallet provider to
+sign the login challenge, so a normal browser tab has nothing to sign with.
+
+## 2. Sign in once
+
+The first screen asks for one signature. Under it: the server hands you a challenge that
+reads `vettai-login:<nonce>:<expiry>`, your wallet signs the message, and the server derives
+your address from the public key. Your private key never leaves the wallet, and Vettai never
+sees it.
+
+What you get back is a session token that lasts 30 days. Signing in again is one tap.
+
+## 3. Play the day's quests
+
+Every wallet gets its own set of quests for each UTC day. They are created the first time
+you ask for them and read back after that.
+
+| Quest | What to do | Reward by default |
+|---|---|---|
+| Hunt | Take down five drones | 0.5 NIM |
+| Courier | Pick a parcel up and deliver it within two minutes | 0.3 NIM |
+| Landmarks | Reach all four landmarks | 0.2 NIM the first day, 0.05 NIM after |
+| Streak | Turn up. It starts done | 0.2 NIM on day one, rising by 0.5 a day, capped at 10 |
+
+A fifth quest, landlord, exists in the code but is off by default. See
+[Landlord](/docs/playing/landlord).
+
+Every reward can be moved from the environment without a code change, so the numbers above
+are the defaults rather than a promise. The reward on the quest card is the number the
+server will actually pay.
+
+## 4. Claim it
+
+A finished quest shows a claim button. Claiming is two steps: the server gives you a
+challenge naming that exact quest, and you sign it in the wallet. The server checks the
+signature came from the wallet holding the session, spends the nonce so nobody can replay
+it, and writes the claim.
+
+From there the claim moves on its own: `queued`, then `sending`, then `sent` with a
+transaction hash, then `paid` with a block number. `GET /api/claims` is what the HUD reads
+to show you where a payout has got to.
+
+A claim can also come back as `held`. That is a delay, never a loss. It means a cap was
+reached: your own daily total, the number of wallets claiming from your network address
+today, or the whole pool. The treasury re-checks held claims every minute and releases them
+as soon as they fit. [Claiming](/docs/playing/claiming) explains all three caps in plain
+words.
+
+## What the game runs on today
+
+Vettai is on the Nimiq testnet for now. The world API answers at
+`https://world-production-4620.up.railway.app`, and the source is at
+[github.com/ramakrishnanhulk20/vettai](https://github.com/ramakrishnanhulk20/vettai). The
+mainnet treasury, its funding and the final pool size are still to be confirmed.

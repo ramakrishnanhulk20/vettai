@@ -1,3 +1,4 @@
+import { createMDX } from "fumadocs-mdx/next";
 import type { NextConfig } from "next";
 
 const apiOrigin = process.env.API_ORIGIN ?? "http://localhost:8788";
@@ -22,4 +23,7 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+// The docs route reads its pages from content/docs at build time.
+const withMDX = createMDX();
+
+export default withMDX(nextConfig);

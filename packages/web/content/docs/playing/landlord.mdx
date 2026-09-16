@@ -1,0 +1,40 @@
+---
+title: Landlord
+description: A fifth quest that is finished by staking NIM rather than by playing. It is off by default.
+---
+
+Landlord is the only quest in Vettai that is not finished by anything you do in the city. It
+is finished by the chain.
+
+## What it would do
+
+If the operator turns it on, every player gets a fifth quest that day. It is done when the
+treasury reads the player's wallet and finds an active stake of at least the configured
+minimum, which is 10 NIM by default. The reward is 0.2 NIM by default.
+
+## It is off until somebody turns it on
+
+`LANDLORD_ENABLED` is `false` in the shipped configuration and in the deploy guide, so no
+landlord quest is generated at all. That is a product decision rather than a technical one:
+paying people for holding a stake is a different promise from paying people for playing, and
+it is not one the game makes today.
+
+## How it would be checked
+
+Not by anything a client says. Once per UTC day, and once at boot, the treasury asks the
+node for the active stake of every player with an open landlord quest for that day and marks
+the ones at or above the minimum as done. From there it is an ordinary quest: you still sign
+a claim, and it still passes the three caps.
+
+Two details keep it honest:
+
+- Both the read and the update are filtered to the current UTC day. Without that filter one
+  stake read would close every open landlord quest a wallet had left behind and pay several
+  days of reward for one day of staking.
+- The job is gated on the UTC day rather than on a 24 hour timer, so a restart cannot make a
+  day run twice or skip it.
+
+## What is still to be confirmed
+
+Whether the landlord quest ships at all, and at what minimum stake, is the operator's call
+and has not been made.

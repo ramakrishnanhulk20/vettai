@@ -1,0 +1,86 @@
+---
+title: Claiming
+description: Challenge, signature, queued, paid. What the three caps do, and why a hold is a delay rather than a loss.
+---
+
+Claiming is the only door to money in Vettai, so it has several locks in a row.
+
+## The four steps
+
+**1. Ask for a challenge.** `POST /api/quests/:id/claim/challenge` with your session. The
+quest has to be yours and has to be `done`. Somebody else's quest answers 404 rather than
+"not yours", because the second would confirm which quest ids are real. You get back a
+message of the shape `vettai-claim:<questId>:<nonce>:<expiry>`.
+
+**2. Sign it in the wallet.** The message names one quest and nothing else.
+
+**3. Send the signature.** `POST /api/quests/:id/claim` with the message, the public key and
+the signature. The server verifies the signature, derives the address from the public key,
+and refuses if that address is not the one holding the session. Then it spends the nonce,
+which is what stops the same signed body being sent twice.
+
+**4. The claim and the quest are written together.** Inside one database transaction the
+quest moves to `claimed` and the claim row is inserted as `queued`, with the memo
+`vettai:` followed by the first eight characters of the quest id. Either you have a payout
+and a spent quest, or you have neither. A partial unique index on the claim's quest id is
+the real lock: two requests can both read "this quest is done", and only one row can ever
+exist.
+
+After that the claim moves on its own. `GET /api/claims` reports every claim you own with
+its state, its transaction hash and its block number.
+
+## The states a claim passes through
+
+| State | What it means |
+|---|---|
+| queued | written down, waiting for the treasury to pick it up |
+| sending | the treasury has it. The hash is saved before the broadcast, so a crash never means a double payment |
+| sent | broadcast, with a transaction hash, waiting for a block |
+| paid | in a block. The block number is on the row |
+| held | a cap was reached. The claim is kept, with the reason, and re-checked every minute |
+| failed | something went wrong three times and a person has to look at it |
+
+## The three caps, in plain words
+
+Before a claim is queued the server measures three things, under two database locks so two
+claims arriving at the same moment cannot both read the old totals.
+
+**Your day.** Everything your wallet has already committed today, plus this claim, against
+the daily cap. One wallet cannot take more than that cap in a UTC day whatever it does.
+
+**Your network address.** How many different wallets have claimed from your address today,
+against the per-address limit, which is two wallets a day by default. The address itself is
+never stored: it is hashed with a secret salt, because the IPv4 space is small enough to
+walk through in seconds without one.
+
+**The pool.** Everything the game has ever queued, sent or paid, plus this claim, against the
+total pool. This is the hard stop on the whole game.
+
+## What a hold actually means
+
+A claim that crosses a cap is still written down, as `held`, with the reason on the row. The
+money is visible rather than quietly lost.
+
+A hold is a delay, never a forfeiture. For the daily cap and the per-address cap the claim is
+stamped with the next UTC midnight, so it comes back on its own the next day. For the pool
+there is no time anybody can name, because pool room comes back the moment a committed claim
+fails, so the claim waits without a date.
+
+The treasury re-runs the same check on held claims every 60 seconds and once at boot. The
+ones that now fit are flipped to `queued` and paid. A released claim is re-dated to the
+moment it was released, because the daily cap counts a wallet by the day its claims entered
+the queue.
+
+One detail that matters if you share a house: a wallet that was itself held has taken
+nothing, so it stops counting against the per-address limit for its neighbours.
+
+## What claiming cannot do
+
+- It cannot pay a quest that is not finished, or one that is already claimed.
+- It cannot be replayed. The nonce is single use and lives ten minutes.
+- It cannot be signed by another wallet. The address comes off the key, not off the request.
+- It cannot pay a quest worth zero. That is refused before the nonce is spent, so your
+  challenge stays usable.
+
+Every one of those is exercised against the live testnet by the
+[prove-it run](/docs/trust/proof).

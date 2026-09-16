@@ -1,0 +1,95 @@
+---
+title: FAQ
+description: Ten questions people actually ask, answered short.
+---
+
+## Why a game?
+
+Because a wallet is not a habit. People open a payment app when they need to pay somebody,
+which is a few times a week at best. They open a game because they want to. Vettai gives a
+wallet a reason to be opened that has nothing to do with needing to send money, and it pays
+in the wallet's own currency, so the reward lands where the habit is.
+
+## Why not just build a payment tool?
+
+There are plenty, and they all compete on the same ground: fees, speed, the look of a
+checkout. A game competes on whether it is fun, and it exercises the same wallet features a
+payment tool does: signing a message to prove who you are, and sending a transaction with a
+memo. The point was to use the wallet for something it was not obviously for.
+
+## What happens if I lose connection mid-game?
+
+Your quest progress is already written down, because it is written on the server as the
+simulation produces it, not held on your phone. A dropped socket costs you the run you were
+in, not the day. Reconnecting puts you back in a room with the same quests at the same
+progress, and any gear you bought while offline is applied at your next join.
+
+A late close from a socket that has already been replaced cannot knock the live one out, so
+a flaky network does not push you out of your own game.
+
+## Is this gambling?
+
+No. There is no wager, nothing at stake, and no random draw deciding money. You do not pay to
+play and you cannot lose anything you had. The quests are skill tasks with fixed targets:
+five kills, one delivery inside two minutes, four landmarks. The reward is a fixed number
+attached to the quest before you start it, and randomness never decides who gets paid or how
+much.
+
+The only random thing in the game is where the courier route runs, and that is drawn from
+your address and the date so it is the same all day.
+
+## Can I play outside Nimiq Pay?
+
+No. Signing in needs the wallet provider that Nimiq Pay injects, so a normal browser tab has
+nothing to sign the login challenge with. That is a deliberate limit, not a missing feature:
+the whole identity model is "the address comes off the key that signed", and without a wallet
+there is no key.
+
+The landing page and these docs work anywhere. The game itself is opened with
+`https://nimpay.app/miniapps/open/<host>/play`.
+
+## Who funds the prize pool?
+
+The treasury wallet, and nobody else. It is a single wallet with a balance, and `POOL_TOTAL_NIM`
+is a hard stop the server enforces: everything ever queued, sent or paid, added up, can never
+go past it. Players do not fund each other and there is no token to buy.
+
+Today the treasury is on testnet. The mainnet funding is still to be confirmed.
+
+## What happens when I hit the cap?
+
+Your claim is written down as `held`, with the reason on the row, and you see "held until
+tomorrow" or "pool exhausted". It is a delay, not a forfeiture. The treasury re-checks held
+claims every 60 seconds and releases the ones that now fit, and for the daily and per-address
+caps the claim carries the next UTC midnight as the time to look again.
+
+Nothing is quietly dropped. A held claim is visible in `GET /api/claims` the whole time.
+
+## Does Vettai ever see my private key?
+
+Never. Signing happens inside Nimiq Pay. Vettai sends a message, the wallet returns a public
+key and a signature, and the server verifies them and derives your address from the key. The
+key itself never leaves the wallet, and there is nowhere in the system it could be stored.
+
+The only private key anywhere in Vettai is the treasury's own, which pays people. It lives on
+one process that has no API and that the game server cannot reach.
+
+## What is a memo?
+
+A short piece of text attached to a Nimiq transaction. Vettai uses it as the receipt.
+
+A payout carries `vettai:` and the first eight characters of the quest id, so anyone can read
+the chain and match a payment to the quest that earned it. A shop payment carries
+`vettai:shop:` and the first eight characters of the order id, which is the only thing tying
+your transaction to your order. That memo is why the watcher can settle a purchase without
+you or Vettai reporting anything.
+
+## How are the numbers on the landing page worked out?
+
+From the server's own rows, and nothing else. `GET /api/stats` counts players today, players
+all time, kills today, NIM paid all time and the number of claims paid, plus the last seven
+UTC days of the same, and the landing page reads that one endpoint. Nothing on it is typed in
+by hand.
+
+The weekly ladder is the same: kills per wallet counted from the simulation's own kill
+events, with addresses shortened to the first eight characters and the last four.

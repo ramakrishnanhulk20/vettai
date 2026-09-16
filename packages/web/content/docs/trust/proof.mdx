@@ -1,0 +1,101 @@
+---
+title: The prove-it run
+description: One command, twelve checks, run against the live Nimiq testnet. Real payouts, real refusals, saved output.
+---
+
+Claims in a threat model are only worth what they are worth when somebody runs them. So
+every claim Vettai makes about its money path is exercised by one command, against the live
+Nimiq testnet, and the output of each run is saved in the repository.
+
+## The command
+
+```sh
+cd packages/server
+npm run prove
+```
+
+It starts the real world in the same process, plays it with a scripted wallet through the
+real socket, then attacks it: forged signatures, replays, somebody else's quest, all three
+caps, a short shop payment from the wrong wallet, a flood on the socket, and a payout the
+treasury has already sent once. Every refusal is printed with the reason the server gave.
+
+Testnet only. It moves real test NIM out of a real wallet.
+
+There is a second mode that points at a deployment:
+
+```sh
+npm run prove -- --url https://world-production-4620.up.railway.app
+```
+
+Nothing runs locally in that mode and no key is needed. The run signs in over the network,
+plays the deployed world through its own socket, claims, waits for the deployed treasury to
+pay, and reads that payment back off the chain the deployment says it is on. The checks that
+need the host's own database or its configured caps are skipped rather than faked, and the
+summary counts them as skipped.
+
+## What each of the twelve checks proves
+
+| Check | What it proves |
+|---|---|
+| 1 | The node and the treasury are the ones we say they are: the network matches, and the private key derives the configured address |
+| 2 | A wallet signs in and the server reads its address off the key, not off the request |
+| 3 | A forged signature and a replayed challenge are both refused |
+| 4 | A scripted wallet plays the real world through the real socket until the hunt quest is genuinely done |
+| 5 | The hunt claim is signed once. A replay is refused, and so is another wallet trying to claim it |
+| 6 | The treasury pays it on chain, and the payment carries the quest id in its memo |
+| 7 | The daily cap holds the claim that would cross it |
+| 8 | The third wallet claiming from one network address is held |
+| 9 | The pool stops the claim that would spend past it |
+| 10 | A real shop payment grants the gear, and a short one from another wallet does not |
+| 11 | The socket refuses a flood, a long move vector and nonsense frames |
+| 12 | A payout that already has a hash is looked up, never sent again |
+
+Checks 7, 8 and 9 run with the caps turned down, so a single run can actually reach all
+three.
+
+## The last saved run
+
+This is the file as it was written, not a summary of it.
+
+```
+vettai prove-it, 2026-09-15T17:38:26.321Z
+world http://127.0.0.1:57728, database pglite in memory, node https://rpc.testnet.nimiqwatch.com
+caps for this run: daily 0.6 NIM, pool 1.2 NIM, 2 wallets per IP per day
+
+ 1/12  PASS  the node and the treasury are the ones we say they are: TestAlbatross at block 11529205, key derives NQ92YGUBVUV9LX6H36G033C1081VTMDD9152, balance 24.44 NIM
+ 2/12  PASS  a wallet signs in and the server reads its address off the key: NQ18K52A22YAG4RKM5DHYTG2QY6BVTFL8DXM signed in, /api/me agrees, nothing named an address but the key
+ 3/12  PASS  a forged signature and a replayed challenge are both refused: forged signature 401 "signature does not match message", replayed challenge 401 "nonce used"
+ 4/12  PASS  a scripted wallet plays the real world until the hunt quest is done: 5 kills in 59s through the socket, reward 0.5 NIM
+ 5/12  PASS  the hunt claim is signed once, and a replay or another wallet is refused: queued with memo vettai:47b3e391, replay 409 "already claimed", another wallet 404
+     sent claim=a30a8872-bd79-44a5-9e29-ac29dc767852 to=NQ18K52A22YAG4RKM5DHYTG2QY6BVTFL8DXM hash=30785646bc2adc59a299622193175f9b9f47295259977a0b635ca0e86965a2ec
+     paid claim=a30a8872-bd79-44a5-9e29-ac29dc767852 hash=30785646bc2adc59a299622193175f9b9f47295259977a0b635ca0e86965a2ec block=11529267
+ 6/12  PASS  the treasury pays it on chain and the payment carries the quest id: 0.5 NIM to NQ18K52A22YAG4RKM5DHYTG2QY6BVTFL8DXM, memo "vettai:47b3e391", hash 30785646bc2adc59a299622193175f9b9f47295259977a0b635ca0e86965a2ec, block 11529267
+ 7/12  PASS  the daily cap holds the claim that would cross it: 0.5 NIM already committed today, 0.2 NIM more crosses the 0.6 NIM cap, landmarks and streak both held for "daily cap"
+ 8/12  PASS  the third wallet claiming from one address is held: wallets 1 and 2 from 127.0.0.1 were queued, 2 distinct wallets had claimed, wallets 3 and 4 held for "ip cap"
+ 9/12  PASS  the pool stops the claim that would spend past it: 0.7 NIM + 0.2 NIM -> queued, 0.9 NIM + 0.2 NIM -> queued, 1.1 NIM + 0.2 NIM -> held; 1.3 NIM is past the 1.2 NIM pool
+     skipped hash=94022bece1e565ccb4d697ff4ee2742efd987b4f960804e0e57aee751e1a27da block=11529412: sender mismatch
+     shop order 9424bc45-baa6-4343-a89f-ad05b6e18d77 paid with blaster-mk2 hash=f3ad731ec242f59b18d6f163fb97d1f408b0b1fe227597c4b912d62ae70f6020 block=11529412
+10/12  PASS  a real shop payment grants the gear and a short one from another wallet does not: paid 1 NIM with memo vettai:shop:9424bc45, hash f3ad731ec242f59b18d6f163fb97d1f408b0b1fe227597c4b912d62ae70f6020, gear now mk2; 0.01 NIM from the wrong wallet on vettai:shop:8bafc3fe left the order pending
+11/12  PASS  the socket refuses a flood, a long move vector and nonsense frames: 30 moves in a second: 10 dropped and 5.95 m covered, under the 6 m/s cap; dx 50 stored as a unit vector; 20 fire frames gave 4 accepted shots on an mk1; three bad frames closed the socket with 1008
+     still pending claim=64c96af3-9fb0-4e77-9021-8c1480ea369b hash=42ae52d7893a97cd4f9e78678ee644822224856c301dbc53b3f2c64b8e0d6c1a
+     sent claim=0d797310-5da0-49c7-acb6-a5d76686dbf0 to=NQ49SY5GYSHSSDG1SGS38P41V0CJ9VS176HA hash=3ee56ffa38b38643565a48849502dc20063141d1179ea4ffc05ab4e832859126
+     sent claim=fe764978-2870-42a8-8077-98a1e0be3c74 to=NQ818XFTH2J89T9QNBAUCSEUFTGHUY5X1T7K hash=eeb3e24dbc0cf5ac501c753f8d7919b5a6e0e57533ac3a6c7aff7ec9aea1cedf
+     paid claim=0d797310-5da0-49c7-acb6-a5d76686dbf0 hash=3ee56ffa38b38643565a48849502dc20063141d1179ea4ffc05ab4e832859126 block=11529418
+     paid claim=fe764978-2870-42a8-8077-98a1e0be3c74 hash=eeb3e24dbc0cf5ac501c753f8d7919b5a6e0e57533ac3a6c7aff7ec9aea1cedf block=11529420
+12/12  PASS  a payout that already has a hash is looked up, never sent again: 2 payout(s) left in this pass; the claim holding a made up hash stayed "sending" and was not signed again; the treasury fell by 0.4 NIM, exactly the confirmed payouts of this pass
+
+12/12 passed
+treasury NQ92YGUBVUV9LX6H36G033C1081VTMDD9152 now holds 23.05 NIM
+finished in 234s
+```
+
+Every run is saved under `docs/proofs/` in the repository, so the numbers above can be
+checked against the chain long after the run finished. The transaction hashes and block
+numbers in it are real testnet payments.
+
+## What this run does not cover
+
+It proves the money path and the refusals. It does not prove the advisory locks under real
+contention: the test database runs one statement at a time, so nothing here exercises many
+Postgres connections holding those locks against each other. That limitation is written
+down in [What we did not fix](/docs/trust/threat-model).

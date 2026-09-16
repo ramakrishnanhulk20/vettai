@@ -1,0 +1,41 @@
+---
+title: Overview
+description: What Vettai is, why the server decides what happened, and where to go next.
+---
+
+Vettai is a third-person city you play inside Nimiq Pay. You run the streets, hunt bounty
+drones, carry a parcel across town, and every quest you finish pays you real NIM into the
+same wallet you are playing from. There is no token to buy, no deposit, no sign-up form.
+You open the wallet, sign one message, and you are in the game.
+
+**A third-person city where you hunt bounty drones and every quest you finish pays you real
+NIM.**
+
+## Why build it this way
+
+A game that pays out is only worth playing if the payout cannot be faked. So the game does
+not run on your phone. It runs on a server that simulates every player, every drone and
+every shot at 20 ticks a second. Your phone sends intents: where you want to walk, where you
+want to shoot. The server decides what actually happened and writes it down.
+
+That one decision is the whole product. Your phone never reports a kill, a position, a
+score, or even your wallet address. A player who rewrites the game in their browser gets
+exactly the same answers as a player who does not, because nothing the client says is
+believed.
+
+When a quest is done, you sign a message with your own wallet. The server turns that
+signature into a queued payment, and a second process with the only private key in the
+system sends the NIM and records the block it landed in. The memo on the payment carries the
+quest id, so the chain is a public receipt for every payout the game has ever made.
+
+<StartHere />
+
+## What is in these docs
+
+- **Start**: the loop end to end, and how to get into the game.
+- **Playing**: the four quests, what claiming actually does, the shop, the weekly ladder.
+- **Under the hood**: the diagrams, the world simulation, the socket frames, the money path,
+  and every API route.
+- **Trust**: the threat model including what we did not fix, the twelve-check proof run
+  against the live testnet, and an honest note that nobody outside has audited this.
+- **Builders**: running it on your own machine, deploying it, and ten real questions.

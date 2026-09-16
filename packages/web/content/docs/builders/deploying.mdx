@@ -1,0 +1,108 @@
+---
+title: Deploying
+description: Two services from one image on Railway, which variables go where, and the one request that tells you the proxy setting is right.
+---
+
+Two always-on processes share one Docker image and one Postgres database. Only the treasury
+holds a private key. Railway is the click-only path, and Fly.io works the same way.
+
+## Railway
+
+1. A new project with a Postgres database, then two services from the GitHub repository,
+   both carrying `RAILWAY_DOCKERFILE_PATH=packages/server/Dockerfile` so the build uses that
+   file with the repository root as its context.
+2. Service `world`: do not add a `VETTAI_PROCESS` variable at all, so the image runs the
+   world. Expose port 8788 and generate a public domain. That domain is what the web app and
+   Nimiq Pay talk to. The world refuses to start if `VETTAI_PROCESS` points at the treasury,
+   so an extra variable here is a failed deploy rather than a silent mistake.
+3. Service `treasury`: `VETTAI_PROCESS=src/treasury/index.ts`, and no public domain. Deploy
+   it after the world is healthy so the two do not race the first migration.
+4. Migrations run at boot of either process, so the first world deploy creates the schema.
+5. Check it with `curl https://<world domain>/health`, which answers ok.
+
+## The variables
+
+Both services read the same database and the same money limits, so the shared rows go on
+both. The service column says where each one belongs.
+
+| Key | Service | Value |
+|---|---|---|
+| RAILWAY_DOCKERFILE_PATH | both | `packages/server/Dockerfile` |
+| VETTAI_PROCESS | treasury | `src/treasury/index.ts`. Leave it off the world service |
+| PORT | world | `8788`, and generate the public domain on this port |
+| DATABASE_URL | both | The reference to the Railway Postgres service |
+| NIMIQ_RPC_URL | both | `https://rpc.testnet.nimiqwatch.com` for testnet, `https://rpc.nimiqwatch.com` for mainnet |
+| NIMIQ_NETWORK | both | `TestAlbatross` or `MainAlbatross`, matching the URL above |
+| TREASURY_ADDRESS | both | The address that pays players and receives shop payments |
+| TREASURY_PRIVATE_KEY | treasury | 64 hex characters. Never set this on the world service |
+| POOL_TOTAL_NIM | both | The whole prize pool. Queued plus sent plus paid never goes past it |
+| DAILY_CAP_NIM | both | What one wallet can take in a UTC day |
+| IP_WALLETS_PER_DAY | world | `2` |
+| ALLOWED_ORIGINS | world | Blank. The web app reaches the world through its own server-side rewrite, so no browser origin calls it directly |
+| MAP_SEED | world | `vettai-1`. Changing it builds a different city |
+| LANDLORD_MIN_NIM | both | `10` |
+| LANDLORD_ENABLED | both | `false` until somebody turns the landlord quest on |
+| IP_SALT | world | A long random string, fresh per deployment. It only ever hashes addresses |
+| TRUST_PROXY | world | See below. Never `true` |
+
+## TRUST_PROXY and the echo-ip check
+
+The per-address cap is only as good as the address the server believes, so this one setting
+is worth doing properly.
+
+`TRUST_PROXY` is a list of trusted proxy peers, not a hop count: addresses, subnets, or the
+named ranges `loopback`, `linklocal` and `uniquelocal`. Fastify 5 ignores a plain hop count
+on purpose, and `true` would let anybody who reaches the container directly put any address
+in an `X-Forwarded-For` header and mint a fresh per-address count for every wallet.
+
+The safe order is: deploy with it blank, then ask the deployment which address it thinks you
+have.
+
+```sh
+curl https://<world domain>/api/echo-ip
+```
+
+Blank behind a proxy is the safe failure and still a real one: every player looks like the
+edge, so one address holds them all and from the third wallet of the day onwards everyone is
+held for "ip cap". Set the value to the proxy peer that request showed, as a preset or a
+CIDR, then run the same command again. It should now answer with your own address, not the
+edge's.
+
+## Fly.io
+
+`fly launch` from the repository root with `--dockerfile packages/server/Dockerfile`, then a
+second process group:
+
+```toml
+[processes]
+  world = "npx tsx src/index.ts"
+  treasury = "npx tsx src/treasury/index.ts"
+```
+
+The same variables go in through `fly secrets set`. Only `world` needs a public service on
+8788, and `TREASURY_PRIVATE_KEY` goes on the `treasury` process only.
+
+## Running the image by hand
+
+From the repository root, with the root as the build context:
+
+```sh
+docker build -f packages/server/Dockerfile -t vettai-server .
+docker run --rm -p 8788:8788 \
+  -e POOL_TOTAL_NIM=100 -e DAILY_CAP_NIM=5 \
+  -e NIMIQ_RPC_URL=https://rpc.testnet.nimiqwatch.com -e NIMIQ_NETWORK=TestAlbatross \
+  -e TREASURY_ADDRESS=NQ.. vettai-server
+```
+
+With no `DATABASE_URL` the world falls back to the embedded database inside the container,
+which is fine for a smoke test and disappears when the container stops. It logs
+`vettai world ready`.
+
+## One deployment, one network
+
+`NIMIQ_RPC_URL` and `NIMIQ_NETWORK` must agree, and the treasury address must hold real
+balance on that network. Point a testnet key at a mainnet node and the sender refuses by
+construction, which is the behaviour we want.
+
+Vettai is on testnet today, at `https://world-production-4620.up.railway.app`. The mainnet
+treasury key, its funding and the final pool numbers are still to be confirmed.
