@@ -1,0 +1,25 @@
+import type { NextConfig } from "next";
+
+const apiOrigin = process.env.API_ORIGIN ?? "http://localhost:8788";
+
+const nextConfig: NextConfig = {
+  // Verification builds write to a second folder so they never touch the .next
+  // folder the dev server is holding open.
+  distDir: process.env.NEXT_DIST_DIR ?? ".next",
+
+  // Next writes its own AGENTS.md and CLAUDE.md on every dev start. This repo
+  // keeps those names for its own private files, so the generator stays off.
+  agentRules: false,
+
+  // Inside the Nimiq Pay WebView the game and the world server have to look like
+  // one origin, or the socket and the API would both need CORS and a second
+  // hostname for the wallet to trust.
+  async rewrites() {
+    return [
+      { source: "/api/:path*", destination: `${apiOrigin}/api/:path*` },
+      { source: "/ws", destination: `${apiOrigin}/ws` },
+    ];
+  },
+};
+
+export default nextConfig;

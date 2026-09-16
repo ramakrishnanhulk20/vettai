@@ -1,0 +1,29 @@
+vettai prove-it, 2026-09-15T16:00:07.062Z
+world http://127.0.0.1:60222, database pglite in memory, node https://rpc.testnet.nimiqwatch.com
+caps for this run: daily 0.6 NIM, pool 1.2 NIM, 2 wallets per IP per day
+
+ 1/12  PASS  the node and the treasury are the ones we say they are: TestAlbatross at block 11523218, key derives NQ92YGUBVUV9LX6H36G033C1081VTMDD9152, balance 30 NIM
+ 2/12  PASS  a wallet signs in and the server reads its address off the key: NQ03TF7GY0FD2RPG625TM16QYALG1DN3DQFT signed in, /api/me agrees, nothing named an address but the key
+ 3/12  PASS  a forged signature and a replayed challenge are both refused: forged signature 401 "signature does not match message", replayed challenge 401 "nonce used"
+ 4/12  PASS  a scripted wallet plays the real world until the hunt quest is done: 5 kills in 60s through the socket, reward 0.5 NIM
+ 5/12  PASS  the hunt claim is signed once, and a replay or another wallet is refused: queued with memo vettai:e1138432, replay 409 "already claimed", another wallet 404
+     sent claim=c382b15a-1464-495c-a389-3fb1bb5ed681 to=NQ03TF7GY0FD2RPG625TM16QYALG1DN3DQFT hash=e619219c9cfe2b6abb62a757bb024dc80819f89a12a29c4ebb4d85b4a3c16700
+     paid claim=c382b15a-1464-495c-a389-3fb1bb5ed681 hash=e619219c9cfe2b6abb62a757bb024dc80819f89a12a29c4ebb4d85b4a3c16700 block=11523281
+ 6/12  PASS  the treasury pays it on chain and the payment carries the quest id: 0.5 NIM to NQ03TF7GY0FD2RPG625TM16QYALG1DN3DQFT, memo "vettai:e1138432", hash e619219c9cfe2b6abb62a757bb024dc80819f89a12a29c4ebb4d85b4a3c16700, block 11523281
+ 7/12  PASS  the daily cap holds the claim that would cross it: 0.5 NIM already committed today, 0.2 NIM more crosses the 0.6 NIM cap, landmarks and streak both held for "daily cap"
+ 8/12  PASS  the third wallet claiming from one address is held: wallets 1 and 2 from 127.0.0.1 were queued, 2 distinct wallets had claimed, wallets 3 and 4 held for "ip cap"
+ 9/12  PASS  the pool stops the claim that would spend past it: 0.7 NIM + 0.2 NIM -> queued, 0.9 NIM + 0.2 NIM -> queued, 1.1 NIM + 0.2 NIM -> held; 1.3 NIM is past the 1.2 NIM pool
+     skipped hash=1c17d77a777f85cb33e0c11a8e9cc2e3275d5002c9a5c605b3c8f8696c9c4359 block=11523426: sender mismatch
+     shop order fc7f9bf8-f969-4d0a-a389-48e0f44e1cfe paid with blaster-mk2 hash=2be11b64a881f5d61e31449908c42a6a1ac49cc0af08543e2545f32beded796a block=11523426
+10/12  PASS  a real shop payment grants the gear and a short one from another wallet does not: paid 1 NIM with memo vettai:shop:fc7f9bf8, hash 2be11b64a881f5d61e31449908c42a6a1ac49cc0af08543e2545f32beded796a, gear now mk2; 0.01 NIM from the wrong wallet on vettai:shop:b6eed1db left the order pending
+11/12  PASS  the socket refuses a flood, a long move vector and nonsense frames: 30 moves in a second: 10 dropped and 6.05 m covered, under the 6 m/s cap; dx 50 stored as a unit vector; 20 fire frames gave 4 accepted shots on an mk1; three bad frames closed the socket with 1008
+     still pending claim=f6fbae64-95f3-473f-9710-f5937ba7a27e hash=cc92f88f3c09127d5b6f6b3a4c03fdd54771fcd53724c3302572cbdd83ba119d
+     sent claim=a1beb7d3-e153-4ea2-a5f8-3130821befa0 to=NQ73A7YRF5L0JJ3KSBCVHUHCD4E3JB3TL2NQ hash=2ab517c06ec623d8cf53faf24f3d9a8bdcc86cfe82b5ef7121e3d55cb07d8463
+     paid claim=a1beb7d3-e153-4ea2-a5f8-3130821befa0 hash=2ab517c06ec623d8cf53faf24f3d9a8bdcc86cfe82b5ef7121e3d55cb07d8463 block=11523434
+     sent claim=58c916de-881b-4ed8-a2d4-d565ad5a504e to=NQ9187U9477PJLBGNKUNCTT3VG3KD3UP9N47 hash=bb7fc039d67ff294f022c17f3332ea939c6c1c38f65002cdfebf78ef4c903503
+     paid claim=58c916de-881b-4ed8-a2d4-d565ad5a504e hash=bb7fc039d67ff294f022c17f3332ea939c6c1c38f65002cdfebf78ef4c903503 block=11523439
+12/12  PASS  a payout that already has a hash is looked up, never sent again: 2 payout(s) left in this pass; the claim holding a made up hash stayed "sending" and was not signed again; the treasury fell by 0.4 NIM, exactly the confirmed payouts of this pass
+
+12/12 passed
+treasury NQ92YGUBVUV9LX6H36G033C1081VTMDD9152 now holds 28.61 NIM
+finished in 223s

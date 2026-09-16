@@ -1,0 +1,5 @@
+.next*/
+node_modules/
+lab-shots/
+next-env.d.ts
+*.tsbuildinfo

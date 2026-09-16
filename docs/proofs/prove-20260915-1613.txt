@@ -1,0 +1,29 @@
+vettai prove-it, 2026-09-15T16:13:49.904Z
+world http://127.0.0.1:57593, database pglite in memory, node https://rpc.testnet.nimiqwatch.com
+caps for this run: daily 0.6 NIM, pool 1.2 NIM, 2 wallets per IP per day
+
+ 1/12  PASS  the node and the treasury are the ones we say they are: TestAlbatross at block 11524053, key derives NQ92YGUBVUV9LX6H36G033C1081VTMDD9152, balance 28.61 NIM
+ 2/12  PASS  a wallet signs in and the server reads its address off the key: NQ3873TT03EFPXGGQRR72815NCLT5LHXPDH8 signed in, /api/me agrees, nothing named an address but the key
+ 3/12  PASS  a forged signature and a replayed challenge are both refused: forged signature 401 "signature does not match message", replayed challenge 401 "nonce used"
+ 4/12  PASS  a scripted wallet plays the real world until the hunt quest is done: 5 kills in 59s through the socket, reward 0.5 NIM
+ 5/12  PASS  the hunt claim is signed once, and a replay or another wallet is refused: queued with memo vettai:2e194922, replay 409 "already claimed", another wallet 404
+     sent claim=869b750a-6cb3-4b98-96cc-20480bb6d6e7 to=NQ3873TT03EFPXGGQRR72815NCLT5LHXPDH8 hash=368959fef24ca5c6d2e1171fc292cbfc3617797e38c29cf8c5d14683829974ea
+     paid claim=869b750a-6cb3-4b98-96cc-20480bb6d6e7 hash=368959fef24ca5c6d2e1171fc292cbfc3617797e38c29cf8c5d14683829974ea block=11524115
+ 6/12  PASS  the treasury pays it on chain and the payment carries the quest id: 0.5 NIM to NQ3873TT03EFPXGGQRR72815NCLT5LHXPDH8, memo "vettai:2e194922", hash 368959fef24ca5c6d2e1171fc292cbfc3617797e38c29cf8c5d14683829974ea, block 11524115
+ 7/12  PASS  the daily cap holds the claim that would cross it: 0.5 NIM already committed today, 0.2 NIM more crosses the 0.6 NIM cap, landmarks and streak both held for "daily cap"
+ 8/12  PASS  the third wallet claiming from one address is held: wallets 1 and 2 from 127.0.0.1 were queued, 2 distinct wallets had claimed, wallets 3 and 4 held for "ip cap"
+ 9/12  PASS  the pool stops the claim that would spend past it: 0.7 NIM + 0.2 NIM -> queued, 0.9 NIM + 0.2 NIM -> queued, 1.1 NIM + 0.2 NIM -> held; 1.3 NIM is past the 1.2 NIM pool
+     skipped hash=ca9aaf0f5a1ada57763a051e1da10cc152d01f8adc916eb99af67c4b3cd0dad1 block=11524260: sender mismatch
+     shop order f8c0b6b9-c93b-4d91-af07-6b713c0a21a7 paid with blaster-mk2 hash=5c0a485beb5da3d1857ae42be1908951b34826cdbc7ed77ca771152804555476 block=11524260
+10/12  PASS  a real shop payment grants the gear and a short one from another wallet does not: paid 1 NIM with memo vettai:shop:f8c0b6b9, hash 5c0a485beb5da3d1857ae42be1908951b34826cdbc7ed77ca771152804555476, gear now mk2; 0.01 NIM from the wrong wallet on vettai:shop:a134e891 left the order pending
+11/12  PASS  the socket refuses a flood, a long move vector and nonsense frames: 30 moves in a second: 10 dropped and 6.31 m covered, under the 6 m/s cap; dx 50 stored as a unit vector; 20 fire frames gave 4 accepted shots on an mk1; three bad frames closed the socket with 1008
+     still pending claim=45f8f16e-7a3e-4198-a7d4-3eab576e21e8 hash=c5440482df4a31acce7c459e6cac8667f616db8eaa94f4b19f78d53d715be9f8
+     sent claim=c61c4157-c7a2-4dc8-a34d-e288c67e7177 to=NQ80SY2Q8R3LG9950VAXNCB306RKYYDMCQN4 hash=84ed691d87dcbfe2fbad3e5eb578c100dfc6d858c4bcc94a0f0ecba61f09be72
+     paid claim=c61c4157-c7a2-4dc8-a34d-e288c67e7177 hash=84ed691d87dcbfe2fbad3e5eb578c100dfc6d858c4bcc94a0f0ecba61f09be72 block=11524268
+     sent claim=29c7f568-d296-4a43-b801-592069108088 to=NQ82RR3MDRCDMVXDP8X1KA20YS9BTMR74CGY hash=a68de685bf1eda37e01319fde6489bb96eff7318d8e9cac6aa2d0860ad16310d
+     paid claim=29c7f568-d296-4a43-b801-592069108088 hash=a68de685bf1eda37e01319fde6489bb96eff7318d8e9cac6aa2d0860ad16310d block=11524273
+12/12  PASS  a payout that already has a hash is looked up, never sent again: 2 payout(s) left in this pass; the claim holding a made up hash stayed "sending" and was not signed again; the treasury fell by 0.4 NIM, exactly the confirmed payouts of this pass
+
+12/12 passed
+treasury NQ92YGUBVUV9LX6H36G033C1081VTMDD9152 now holds 27.22 NIM
+finished in 222s

@@ -1,0 +1,35 @@
+# Private planning files (never public)
+CLAUDE.md
+INTAKE.md
+PLAN.md
+STATE.md
+DECISIONS.md
+DRAFTS.md
+AGENT-RETROS.md
+SPEC.md
+docs/RD-BRIEF.md
+.claude/
+scratchpad/
+reference/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Dependencies and builds
+node_modules/
+.next*/
+
+dist/
+build/
+.turbo/
+coverage/
+
+# OS and editor
+.DS_Store
+Thumbs.db
+*.log
+
+# Local databases and phone-test artefacts
+.data/

@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+:root {
+  --night: #0b0f1a;
+  --paper: #f3efe7;
+  --hunt: #ff6a2b;
+  --line: rgba(243, 239, 231, 0.14);
+  --ok: #3ddc97;
+  --bad: #ff4d6d;
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23g)'/%3E%3C/svg%3E");
+}
+
+@theme inline {
+  --color-night: var(--night);
+  --color-paper: var(--paper);
+  --color-hunt: var(--hunt);
+  --color-line: var(--line);
+  --color-ok: var(--ok);
+  --color-bad: var(--bad);
+  --font-display: var(--font-display-face), "Arial Narrow", sans-serif;
+  --font-body: var(--font-body-face), system-ui, sans-serif;
+  --font-mono: var(--font-mono-face), ui-monospace, monospace;
+  --radius-btn: 8px;
+}
+
+html {
+  background-color: var(--night);
+}
+
+body {
+  background-color: var(--night);
+  color: var(--paper);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+::selection {
+  background-color: var(--hunt);
+  color: var(--night);
+}
+
+.display-type {
+  font-family: var(--font-display);
+  font-weight: 900;
+  /* The high optical size is the poster cut of Big Shoulders, not the text cut. */
+  font-variation-settings: "opsz" 72;
+}
+
+.label-type {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  font-size: 0.6875rem;
+}
+
+.grain-layer {
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background-image: var(--grain);
+  opacity: 0.06;
+  pointer-events: none;
+  mix-blend-mode: overlay;
+}
+
+@keyframes grain-drift {
+  0% { transform: translate3d(0, 0, 0); }
+  20% { transform: translate3d(-4%, 3%, 0); }
+  40% { transform: translate3d(3%, -4%, 0); }
+  60% { transform: translate3d(-3%, -2%, 0); }
+  80% { transform: translate3d(4%, 2%, 0); }
+  100% { transform: translate3d(0, 0, 0); }
+}
+
+@keyframes live-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.35); }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .grain-layer {
+    animation: grain-drift 1.6s steps(5) infinite;
+  }
+  .live-dot {
+    animation: live-pulse 1.6s ease-in-out infinite;
+  }
+}
+
+/* GSAP publishes the hero's scroll progress to --hero-scroll, so the title and the
+   city drift apart without React rendering a single frame. */
+.parallax-title {
+  transform: translate3d(0, calc(var(--hero-scroll, 0) * -9vh), 0);
+  will-change: transform;
+}
+
+.parallax-city {
+  transform: translate3d(0, calc(var(--hero-scroll, 0) * 5vh), 0) scale(1.04);
+  will-change: transform;
+}

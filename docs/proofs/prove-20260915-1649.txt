@@ -1,0 +1,41 @@
+vettai prove-it, 2026-09-15T16:49:12.630Z
+world http://127.0.0.1:49984, database pglite in memory, node https://rpc.testnet.nimiqwatch.com
+caps for this run: daily 0.6 NIM, pool 1.2 NIM, 2 wallets per IP per day
+
+ 1/12  PASS  the node and the treasury are the ones we say they are: TestAlbatross at block 11526207, key derives NQ92YGUBVUV9LX6H36G033C1081VTMDD9152, balance 27.22 NIM
+ 2/12  PASS  a wallet signs in and the server reads its address off the key: NQ79NYJQCLNQNCSGSV5H9B962CCMTEE4CBQ6 signed in, /api/me agrees, nothing named an address but the key
+ 3/12  PASS  a forged signature and a replayed challenge are both refused: forged signature 401 "signature does not match message", replayed challenge 401 "nonce used"
+ 4/12  PASS  a scripted wallet plays the real world until the hunt quest is done: 5 kills in 60s through the socket, reward 0.5 NIM
+ 5/12  PASS  the hunt claim is signed once, and a replay or another wallet is refused: queued with memo vettai:92041f4b, replay 409 "already claimed", another wallet 404
+     sent claim=71028dde-502c-4604-9ca3-9366c00f3693 to=NQ79NYJQCLNQNCSGSV5H9B962CCMTEE4CBQ6 hash=47dd8387b268b6ce1310ebc481c664c9dd5c98a73cab840add799427e8632690
+     still pending claim=71028dde-502c-4604-9ca3-9366c00f3693 hash=47dd8387b268b6ce1310ebc481c664c9dd5c98a73cab840add799427e8632690
+     paid claim=71028dde-502c-4604-9ca3-9366c00f3693 hash=47dd8387b268b6ce1310ebc481c664c9dd5c98a73cab840add799427e8632690 block=11526271
+ 6/12  PASS  the treasury pays it on chain and the payment carries the quest id: 0.5 NIM to NQ79NYJQCLNQNCSGSV5H9B962CCMTEE4CBQ6, memo "vettai:92041f4b", hash 47dd8387b268b6ce1310ebc481c664c9dd5c98a73cab840add799427e8632690, block 11526271
+ 7/12  PASS  the daily cap holds the claim that would cross it: 0.5 NIM already committed today, 0.2 NIM more crosses the 0.6 NIM cap, landmarks and streak both held for "daily cap"
+ 8/12  PASS  the third wallet claiming from one address is held: wallets 1 and 2 from 127.0.0.1 were queued, 2 distinct wallets had claimed, wallets 3 and 4 held for "ip cap"
+ 9/12  PASS  the pool stops the claim that would spend past it: 0.7 NIM + 0.2 NIM -> queued, 0.9 NIM + 0.2 NIM -> queued, 1.1 NIM + 0.2 NIM -> held; 1.3 NIM is past the 1.2 NIM pool
+     skipped hash=1dcd5ade90ba8049e08a6a476e4f2723eca67951ecaa8491068f1439317df4fc block=11526416: sender mismatch
+     shop order 5af11560-0680-4728-81ec-78ce3a64e142 paid with blaster-mk2 hash=bfafac2bfca424270c62babae0c1d0a47ff2e038b6d547c67ab538a9ca617533 block=11526416
+10/12  PASS  a real shop payment grants the gear and a short one from another wallet does not: paid 1 NIM with memo vettai:shop:5af11560, hash bfafac2bfca424270c62babae0c1d0a47ff2e038b6d547c67ab538a9ca617533, gear now mk2; 0.01 NIM from the wrong wallet on vettai:shop:6d7191fe left the order pending
+11/12  PASS  the socket refuses a flood, a long move vector and nonsense frames: 30 moves in a second: 10 dropped and 6.04 m covered, under the 6 m/s cap; dx 50 stored as a unit vector; 20 fire frames gave 4 accepted shots on an mk1; three bad frames closed the socket with 1008
+     still pending claim=01d00412-4573-4847-8b0e-b306d8bcd51f hash=fa033c8e5578cfb5e13d1cf91a06f54bef32c0c885579c21737b5c26e3895067
+     sent claim=dbd024ee-8891-418c-b471-c5f836fcc5f4 to=NQ7184D4786GVFR6HYRLLYU0D60DS3YRPC58 hash=70e2cc905ec33a8a438ecb43ef57e5ab31149f51f5197eabbc9648022f622437
+     sent claim=6568c15d-ddf6-4a32-b5d6-6be215de226c to=NQ48HJMNPEK8LJXYGK3QJ2SXKEMJE2BS5KH7 hash=dc487837f2e00a2fd5e79abf871b37806771dee74835abd5a407fd964ca78556
+     still pending claim=01d00412-4573-4847-8b0e-b306d8bcd51f hash=fa033c8e5578cfb5e13d1cf91a06f54bef32c0c885579c21737b5c26e3895067
+     paid claim=dbd024ee-8891-418c-b471-c5f836fcc5f4 hash=70e2cc905ec33a8a438ecb43ef57e5ab31149f51f5197eabbc9648022f622437 block=11526425
+     still pending claim=6568c15d-ddf6-4a32-b5d6-6be215de226c hash=dc487837f2e00a2fd5e79abf871b37806771dee74835abd5a407fd964ca78556
+     still pending claim=01d00412-4573-4847-8b0e-b306d8bcd51f hash=fa033c8e5578cfb5e13d1cf91a06f54bef32c0c885579c21737b5c26e3895067
+     paid claim=6568c15d-ddf6-4a32-b5d6-6be215de226c hash=dc487837f2e00a2fd5e79abf871b37806771dee74835abd5a407fd964ca78556 block=11526427
+     still pending claim=01d00412-4573-4847-8b0e-b306d8bcd51f hash=fa033c8e5578cfb5e13d1cf91a06f54bef32c0c885579c21737b5c26e3895067
+     still pending claim=01d00412-4573-4847-8b0e-b306d8bcd51f hash=fa033c8e5578cfb5e13d1cf91a06f54bef32c0c885579c21737b5c26e3895067
+     still pending claim=01d00412-4573-4847-8b0e-b306d8bcd51f hash=fa033c8e5578cfb5e13d1cf91a06f54bef32c0c885579c21737b5c26e3895067
+     still pending claim=01d00412-4573-4847-8b0e-b306d8bcd51f hash=fa033c8e5578cfb5e13d1cf91a06f54bef32c0c885579c21737b5c26e3895067
+     still pending claim=01d00412-4573-4847-8b0e-b306d8bcd51f hash=fa033c8e5578cfb5e13d1cf91a06f54bef32c0c885579c21737b5c26e3895067
+     still pending claim=01d00412-4573-4847-8b0e-b306d8bcd51f hash=fa033c8e5578cfb5e13d1cf91a06f54bef32c0c885579c21737b5c26e3895067
+     still pending claim=01d00412-4573-4847-8b0e-b306d8bcd51f hash=fa033c8e5578cfb5e13d1cf91a06f54bef32c0c885579c21737b5c26e3895067
+     still pending claim=01d00412-4573-4847-8b0e-b306d8bcd51f hash=fa033c8e5578cfb5e13d1cf91a06f54bef32c0c885579c21737b5c26e3895067
+12/12  PASS  a payout that already has a hash is looked up, never sent again: 2 payout(s) left in this pass; the claim holding a made up hash stayed "sending" and was not signed again; the treasury fell by 0.4 NIM, exactly the confirmed payouts of this pass
+
+12/12 passed
+treasury NQ92YGUBVUV9LX6H36G033C1081VTMDD9152 now holds 25.83 NIM
+finished in 240s

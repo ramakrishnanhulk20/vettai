@@ -1,0 +1,639 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Vettai 3D spike</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --ink: #0b0f1a;
+    --panel: rgba(7, 10, 18, 0.74);
+    --line: rgba(120, 136, 180, 0.28);
+    --text: #e9edf8;
+    --dim: #7e88a8;
+    --accent: #5be5c2;
+    --bad: #ff5f56;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    overflow: hidden;
+    background: var(--ink);
+    color: var(--text);
+    font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #scene {
+    position: fixed;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+  }
+  #hud {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    padding: calc(env(safe-area-inset-top) + 8px) 10px 8px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+  }
+  #stats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 2px 14px;
+    font-variant-numeric: tabular-nums;
+  }
+  #stats div { display: flex; gap: 6px; min-width: 0; }
+  #stats b { color: var(--accent); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #stats i { color: var(--dim); font-style: normal; letter-spacing: 0.04em; }
+  #stats .wide { grid-column: 1 / -1; }
+  #stats .wide b { color: var(--text); white-space: normal; word-break: break-all; }
+  #stats .err b { color: var(--bad); }
+  #hud-buttons { display: flex; gap: 6px; margin-top: 8px; }
+  #hud-buttons button {
+    flex: 1;
+    padding: 8px 4px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: rgba(91, 229, 194, 0.08);
+    color: var(--accent);
+    font: inherit;
+    letter-spacing: 0.02em;
+  }
+  #hud-buttons button:disabled { color: var(--dim); background: transparent; }
+  #hud-buttons button:active:not(:disabled) { background: rgba(91, 229, 194, 0.24); }
+  #log {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    max-height: 30%;
+    overflow-y: auto;
+    padding: 6px 10px calc(env(safe-area-inset-bottom) + 6px);
+    background: var(--panel);
+    border-top: 1px solid var(--line);
+    color: var(--dim);
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    touch-action: pan-y;
+  }
+  #log .hot { color: var(--bad); }
+  body.log-hidden #log { display: none; }
+  body.log-hidden #fire { bottom: calc(env(safe-area-inset-bottom) + 18px); }
+  #stick {
+    position: fixed;
+    width: 120px;
+    height: 120px;
+    margin: -60px 0 0 -60px;
+    border: 1px solid rgba(233, 237, 248, 0.22);
+    border-radius: 50%;
+    background: rgba(233, 237, 248, 0.05);
+    pointer-events: none;
+    display: none;
+  }
+  #stick.live { display: block; }
+  #knob {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 54px;
+    height: 54px;
+    margin: -27px 0 0 -27px;
+    border-radius: 50%;
+    background: rgba(91, 229, 194, 0.35);
+    border: 1px solid var(--accent);
+  }
+  #fire {
+    position: fixed;
+    right: 18px;
+    bottom: calc(30% + 18px);
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    border: 1px solid var(--accent);
+    background: rgba(91, 229, 194, 0.12);
+    color: var(--accent);
+    font: inherit;
+    letter-spacing: 0.12em;
+  }
+  #fire:active { background: rgba(91, 229, 194, 0.32); }
+</style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <div id="hud">
+    <div id="stats"></div>
+    <div id="hud-buttons">
+      <button id="btn-sign" type="button" disabled>Sign in</button>
+      <button id="btn-full" type="button">Fullscreen</button>
+      <button id="btn-lock" type="button">Lock landscape</button>
+      <button id="btn-log" type="button">Log</button>
+    </div>
+  </div>
+
+  <div id="stick"><div id="knob"></div></div>
+  <button id="fire" type="button">FIRE</button>
+  <div id="log"></div>
+
+  <script src="/three.min.js"></script>
+  <script>
+    window.onerror = function (message, source, line, column, error) {
+      lastError = message + ' @' + String(source).split('/').pop() + ':' + line + ':' + column
+      log(lastError, true)
+      if (error && error.stack) log(String(error.stack).split('\n').slice(0, 4).join('\n'), true)
+      return false
+    }
+    window.addEventListener('error', function (event) {
+      if (event.target && event.target !== window && event.target.src) {
+        lastError = 'failed to load ' + event.target.src
+        log(lastError, true)
+      }
+    }, true)
+    window.addEventListener('unhandledrejection', function (event) {
+      var reason = event.reason
+      lastError = 'unhandled rejection: ' + ((reason && reason.message) || String(reason))
+      log(lastError, true)
+      if (reason && reason.stack) log(String(reason.stack).split('\n').slice(0, 4).join('\n'), true)
+    })
+
+    var lastError = ''
+    var logBox = document.getElementById('log')
+
+    function log(text, hot) {
+      var box = logBox || document.getElementById('log')
+      if (!box) return
+      var line = document.createElement('div')
+      if (hot) { line.className = "hot"; document.body.classList.remove("log-hidden") }
+      line.textContent = new Date().toISOString().slice(11, 19) + '  ' + text
+      box.appendChild(line)
+      while (box.childNodes.length > 200) box.removeChild(box.firstChild)
+      box.scrollTop = box.scrollHeight
+    }
+
+    function describe(error) {
+      var name = (error && error.name) || (error && error.error && error.error.type) || 'Error'
+      var message = (error && error.message) || (error && error.error && error.error.message) || String(error)
+      if (/PermissionDenied/i.test(name) || /PermissionDenied/i.test(message)) return 'rejected in Nimiq Pay'
+      return name + ': ' + message
+    }
+
+    function unwrap(result) {
+      if (result && typeof result === 'object' && result.error) throw result
+      return result
+    }
+
+    if (typeof THREE === 'undefined') {
+      log('THREE is undefined, /three.min.js did not run', true)
+      throw new Error('three.js missing')
+    }
+    log('three.js r' + THREE.REVISION + ' loaded')
+
+    var canvas = document.getElementById('scene')
+    var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: false, powerPreference: 'high-performance' })
+    // Phones report ratios up to 4. Drawing every one of those pixels is the fastest way to
+    // turn a playable scene into a slideshow, so the ratio is capped at 2.
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
+    renderer.setSize(window.innerWidth, window.innerHeight, false)
+    renderer.setClearColor(0x0b0f1a, 1)
+
+    var scene = new THREE.Scene()
+    scene.fog = new THREE.Fog(0x0b0f1a, 45, 170)
+
+    var camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 400)
+    camera.position.set(0, 6, 12)
+
+    scene.add(new THREE.HemisphereLight(0x8fb4ff, 0x0d1220, 0.85))
+    var sun = new THREE.DirectionalLight(0xfff0d4, 0.9)
+    sun.position.set(40, 60, 20)
+    sun.castShadow = false
+    scene.add(sun)
+
+    var ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(200, 200),
+      new THREE.MeshLambertMaterial({ color: 0x141a2b })
+    )
+    ground.rotation.x = -Math.PI / 2
+    scene.add(ground)
+
+    var streetGrid = new THREE.GridHelper(200, 32, 0x2a3550, 0x1b2337)
+    streetGrid.position.y = 0.02
+    scene.add(streetGrid)
+
+    var BUILDING_COUNT = 150
+    var CELL = 13
+    var boxGeometry = new THREE.BoxGeometry(1, 1, 1)
+    var buildings = []
+    var cells = []
+    for (var gx = -6; gx <= 6; gx += 1) {
+      for (var gz = -6; gz <= 6; gz += 1) {
+        if (gx === 0 && gz === 0) continue
+        cells.push([gx, gz])
+      }
+    }
+    for (var s = cells.length - 1; s > 0; s -= 1) {
+      var swap = Math.floor(Math.random() * (s + 1))
+      var keep = cells[s]
+      cells[s] = cells[swap]
+      cells[swap] = keep
+    }
+    for (var b = 0; b < BUILDING_COUNT && b < cells.length; b += 1) {
+      var width = 5 + Math.random() * 4
+      var depth = 5 + Math.random() * 4
+      var height = 4 + Math.random() * 26
+      var shade = 0.22 + Math.random() * 0.28
+      var mesh = new THREE.Mesh(boxGeometry, new THREE.MeshLambertMaterial({
+        color: new THREE.Color(shade * 0.75, shade * 0.85, Math.min(shade * 1.3, 1))
+      }))
+      mesh.scale.set(width, height, depth)
+      mesh.position.set(
+        cells[b][0] * CELL + (Math.random() - 0.5) * 1.5,
+        height / 2,
+        cells[b][1] * CELL + (Math.random() - 0.5) * 1.5
+      )
+      scene.add(mesh)
+      buildings.push({
+        mesh: mesh,
+        x: mesh.position.x,
+        z: mesh.position.z,
+        half: Math.max(width, depth) / 2,
+        height: height,
+        hit: false
+      })
+    }
+
+    var player = new THREE.Group()
+    var body = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.6, 1.2, 4, 10),
+      new THREE.MeshLambertMaterial({ color: 0x5be5c2 })
+    )
+    body.position.y = 1.2
+    player.add(body)
+    var nose = new THREE.Mesh(
+      new THREE.BoxGeometry(0.3, 0.3, 1.4),
+      new THREE.MeshLambertMaterial({ color: 0xe9edf8 })
+    )
+    nose.position.set(0, 2.05, -0.6)
+    player.add(nose)
+    scene.add(player)
+
+    var PLAYER_SPEED = 12
+    var SHOT_SPEED = 40
+    var SHOT_RADIUS = 0.25
+    var MAX_SHOTS = 20
+    var shotGeometry = new THREE.SphereGeometry(SHOT_RADIUS, 8, 6)
+    var shotMaterial = new THREE.MeshLambertMaterial({ color: 0xffe08a, emissive: 0x6b5200 })
+    var shots = []
+    var hits = 0
+
+    var cameraYaw = 0
+    var playerYaw = 0
+    var forward = new THREE.Vector3()
+    var right = new THREE.Vector3()
+    var move = new THREE.Vector3()
+    var camTarget = new THREE.Vector3()
+    var lookTarget = new THREE.Vector3()
+
+    function shortestAngle(from, to) {
+      var delta = (to - from) % (Math.PI * 2)
+      if (delta > Math.PI) delta -= Math.PI * 2
+      if (delta < -Math.PI) delta += Math.PI * 2
+      return delta
+    }
+
+    var stickEl = document.getElementById('stick')
+    var knobEl = document.getElementById('knob')
+    var STICK_RADIUS = 50
+    var stickId = null
+    var stickOriginX = 0
+    var stickOriginY = 0
+    var stickX = 0
+    var stickY = 0
+
+    canvas.addEventListener('pointerdown', function (event) {
+      if (stickId !== null || event.clientX > window.innerWidth / 2) return
+      stickId = event.pointerId
+      canvas.setPointerCapture(stickId)
+      stickOriginX = event.clientX
+      stickOriginY = event.clientY
+      stickX = 0
+      stickY = 0
+      stickEl.style.left = stickOriginX + 'px'
+      stickEl.style.top = stickOriginY + 'px'
+      stickEl.classList.add('live')
+      knobEl.style.transform = 'translate(0px, 0px)'
+    })
+
+    canvas.addEventListener('pointermove', function (event) {
+      if (event.pointerId !== stickId) return
+      var dx = event.clientX - stickOriginX
+      var dy = event.clientY - stickOriginY
+      var distance = Math.sqrt(dx * dx + dy * dy)
+      if (distance > STICK_RADIUS) {
+        dx = dx / distance * STICK_RADIUS
+        dy = dy / distance * STICK_RADIUS
+      }
+      stickX = dx
+      stickY = dy
+      knobEl.style.transform = 'translate(' + dx.toFixed(1) + 'px, ' + dy.toFixed(1) + 'px)'
+    })
+
+    function releaseStick(event) {
+      if (event.pointerId !== stickId) return
+      if (canvas.hasPointerCapture(stickId)) canvas.releasePointerCapture(stickId)
+      stickId = null
+      stickX = 0
+      stickY = 0
+      stickEl.classList.remove('live')
+    }
+    canvas.addEventListener('pointerup', releaseStick)
+    canvas.addEventListener('pointercancel', releaseStick)
+
+    function fire() {
+      var shot = new THREE.Mesh(shotGeometry, shotMaterial)
+      var heading = new THREE.Vector3(-Math.sin(playerYaw), 0, -Math.cos(playerYaw))
+      shot.position.copy(player.position)
+      shot.position.y = 1.3
+      shot.position.addScaledVector(heading, 1.2)
+      shot.userData.velocity = heading.clone().multiplyScalar(SHOT_SPEED)
+      shot.userData.born = performance.now()
+      scene.add(shot)
+      shots.push(shot)
+      while (shots.length > MAX_SHOTS) scene.remove(shots.shift())
+    }
+
+    document.getElementById('fire').addEventListener('pointerdown', function (event) {
+      event.preventDefault()
+      fire()
+    })
+    window.addEventListener('keydown', function (event) {
+      if (event.key === 'f' || event.key === 'F') fire()
+    })
+
+    function dropShot(index) {
+      scene.remove(shots[index])
+      shots.splice(index, 1)
+    }
+
+    function stepShots(dt) {
+      for (var i = shots.length - 1; i >= 0; i -= 1) {
+        var shot = shots[i]
+        shot.position.addScaledVector(shot.userData.velocity, dt)
+        if (performance.now() - shot.userData.born > 3000 || Math.abs(shot.position.x) > 110 || Math.abs(shot.position.z) > 110) {
+          dropShot(i)
+          continue
+        }
+        for (var j = 0; j < buildings.length; j += 1) {
+          var target = buildings[j]
+          var dx = shot.position.x - target.x
+          var dz = shot.position.z - target.z
+          if (Math.sqrt(dx * dx + dz * dz) > target.half + SHOT_RADIUS) continue
+          if (shot.position.y > target.height) continue
+          if (!target.hit) {
+            target.hit = true
+            target.mesh.material.color.set(0xff5f56)
+            hits += 1
+          }
+          dropShot(i)
+          break
+        }
+      }
+    }
+
+    var frameTimes = []
+    var frameCount = 0
+    var lastFrameStamp = 0
+    var firstFrameMs = 0
+    var running = true
+    var lastTime = performance.now()
+
+    function frame(now) {
+      if (!running) return
+      requestAnimationFrame(frame)
+      var dt = Math.min((now - lastTime) / 1000, 0.05)
+      lastTime = now
+      if (lastFrameStamp) {
+        frameTimes[frameCount % 60] = now - lastFrameStamp
+        frameCount += 1
+      }
+      lastFrameStamp = now
+
+      var throttle = Math.min(Math.sqrt(stickX * stickX + stickY * stickY) / STICK_RADIUS, 1)
+      if (throttle > 0.08) {
+        forward.set(-Math.sin(cameraYaw), 0, -Math.cos(cameraYaw))
+        right.set(Math.cos(cameraYaw), 0, -Math.sin(cameraYaw))
+        move.set(0, 0, 0)
+        move.addScaledVector(forward, -stickY)
+        move.addScaledVector(right, stickX)
+        if (move.lengthSq() > 0) {
+          move.normalize()
+          player.position.addScaledVector(move, PLAYER_SPEED * throttle * dt)
+          player.position.x = Math.max(-95, Math.min(95, player.position.x))
+          player.position.z = Math.max(-95, Math.min(95, player.position.z))
+          playerYaw = Math.atan2(-move.x, -move.z)
+        }
+      }
+
+      player.rotation.y += shortestAngle(player.rotation.y, playerYaw) * Math.min(1, dt * 12)
+      cameraYaw += shortestAngle(cameraYaw, playerYaw) * Math.min(1, dt * 3)
+
+      camTarget.set(
+        player.position.x + Math.sin(cameraYaw) * 12,
+        player.position.y + 6,
+        player.position.z + Math.cos(cameraYaw) * 12
+      )
+      camera.position.lerp(camTarget, Math.min(1, dt * 5))
+      lookTarget.set(player.position.x, player.position.y + 1.5, player.position.z)
+      camera.lookAt(lookTarget)
+
+      stepShots(dt)
+      renderer.render(scene, camera)
+
+      if (!firstFrameMs) {
+        firstFrameMs = Math.round(performance.now())
+        log('first frame at ' + firstFrameMs + 'ms, ' + buildings.length + ' buildings on screen')
+      }
+    }
+
+    var gl = renderer.getContext()
+    var debugInfo = gl.getExtension('WEBGL_debug_renderer_info')
+    var gpuName = debugInfo ? String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL)) : 'hidden by the browser'
+    var statsEl = document.getElementById('stats')
+
+    function row(label, value, extra) {
+      return '<div class="' + (extra || '') + '"><i>' + label + '</i><b>' + value + '</b></div>'
+    }
+
+    function readTiming() {
+      var total = 0
+      var count = 0
+      for (var i = 0; i < frameTimes.length; i += 1) {
+        if (typeof frameTimes[i] === 'number' && frameTimes[i] > 0) {
+          total += frameTimes[i]
+          count += 1
+        }
+      }
+      if (!count) return { fps: 0, ms: 0 }
+      return { fps: 1000 / (total / count), ms: total / count }
+    }
+
+    function escapeText(value) {
+      return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    }
+
+    function paintStats() {
+      var timing = readTiming()
+      var info = renderer.info.render
+      var memory = window.performance && window.performance.memory
+      var html = ''
+      html += row('fps', timing.fps.toFixed(1))
+      html += row('frame ms', timing.ms.toFixed(2))
+      html += row('draws', info.calls)
+      html += row('tris', info.triangles.toLocaleString('en-US'))
+      html += row('canvas px', renderer.domElement.width + ' x ' + renderer.domElement.height)
+      html += row('dpr', String(window.devicePixelRatio || 1))
+      html += row('webgl', renderer.capabilities.isWebGL2 ? '2' : '1')
+      html += row('heap MB', memory ? (memory.usedJSHeapSize / 1048576).toFixed(1) : 'not exposed')
+      html += row('first frame', firstFrameMs ? firstFrameMs + ' ms' : 'waiting')
+      html += row('hit', hits + ' / ' + buildings.length)
+      html += row('window.nimiq', window.nimiq ? 'yes' : 'no')
+      html += row('window.nimiqPay', window.nimiqPay ? 'yes' : 'no')
+      html += row('gpu', escapeText(gpuName), 'wide')
+      html += row('ua', escapeText(navigator.userAgent.slice(0, 80)), 'wide')
+      if (lastError) html += row('last error', escapeText(lastError.slice(0, 160)), 'wide err')
+      statsEl.innerHTML = html
+    }
+
+    setInterval(paintStats, 500)
+    paintStats()
+
+    function resize() {
+      var width = window.innerWidth
+      var height = window.innerHeight
+      camera.aspect = width / height
+      camera.updateProjectionMatrix()
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
+      renderer.setSize(width, height, false)
+    }
+    window.addEventListener('resize', resize)
+    // Phones keep reporting the old innerHeight for a moment after the rotation event fires,
+    // so the size is taken again twice on a delay.
+    window.addEventListener('orientationchange', function () {
+      setTimeout(resize, 350)
+      setTimeout(resize, 900)
+    })
+
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) {
+        running = false
+        log('paused, page hidden')
+        return
+      }
+      if (!running) {
+        running = true
+        lastTime = performance.now()
+        lastFrameStamp = 0
+        log('resumed')
+        requestAnimationFrame(frame)
+      }
+    })
+
+    var signBtn = document.getElementById('btn-sign')
+    var fullBtn = document.getElementById('btn-full')
+    var lockBtn = document.getElementById("btn-lock")
+    document.getElementById("btn-log").addEventListener("click", function () {
+      document.body.classList.toggle("log-hidden")
+    })
+
+    ;(function waitForProvider() {
+      var started = Date.now()
+      var tick = function () {
+        if (window.nimiq) {
+          signBtn.disabled = false
+          log('window.nimiq appeared after ' + (Date.now() - started) + ' ms')
+          return
+        }
+        if (Date.now() - started > 15000) {
+          log('no window.nimiq after 15 s, this page is not running inside Nimiq Pay')
+          return
+        }
+        setTimeout(tick, 200)
+      }
+      tick()
+    })()
+
+    signBtn.addEventListener('click', function () {
+      signBtn.disabled = true
+      var message = 'spike-3d:' + Date.now()
+      log('listAccounts...')
+      Promise.resolve()
+        .then(function () { return window.nimiq.listAccounts() })
+        .then(function (accounts) {
+          var list = unwrap(accounts)
+          log('address: ' + (list && list.length ? list.join(', ') : 'none returned'))
+          log('sign "' + message + '", waiting for the wallet dialog')
+          return window.nimiq.sign(message)
+        })
+        .then(function (signed) {
+          var result = unwrap(signed)
+          log('signature: ' + String(result.signature).slice(0, 24) + '...')
+          log('publicKey: ' + String(result.publicKey).slice(0, 24) + '...')
+        })
+        .catch(function (error) { log('sign: ' + describe(error), true) })
+        .then(function () { signBtn.disabled = false })
+    })
+
+    fullBtn.addEventListener('click', function () {
+      try {
+        if (!document.documentElement.requestFullscreen) {
+          log('fullscreen: requestFullscreen is missing here', true)
+          return
+        }
+        var result = document.documentElement.requestFullscreen()
+        if (result && result.then) {
+          result
+            .then(function () { log('fullscreen: on, ' + window.innerWidth + ' x ' + window.innerHeight) })
+            .catch(function (error) { log('fullscreen: ' + describe(error), true) })
+          return
+        }
+        log('fullscreen: called, no promise came back')
+      } catch (error) {
+        log('fullscreen: ' + describe(error), true)
+      }
+    })
+
+    lockBtn.addEventListener('click', function () {
+      try {
+        if (!window.screen || !screen.orientation || !screen.orientation.lock) {
+          log('orientation: screen.orientation.lock is missing here', true)
+          return
+        }
+        var result = screen.orientation.lock('landscape')
+        if (result && result.then) {
+          result
+            .then(function () { log('orientation: locked, now ' + screen.orientation.type) })
+            .catch(function (error) { log('orientation: ' + describe(error), true) })
+          return
+        }
+        log('orientation: called, no promise came back')
+      } catch (error) {
+        log('orientation: ' + describe(error), true)
+      }
+    })
+
+    log('drag the left half to move, tap FIRE or press F to shoot')
+    requestAnimationFrame(frame)
+  </script>
+</body>
+</html>

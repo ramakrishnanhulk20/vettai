@@ -1,0 +1,415 @@
+// Covers the rules of play one at a time: walking, shooting, drones, bolts, shields and
+// respawns. It does NOT cover the socket, the quest engine or any database work, and it
+// does NOT prove the rules hold for every input; sim.property.test.ts does that.
+
+import { describe, expect, it } from 'vitest'
+import { generateMap } from '../src/world/map.js'
+import { addPlayer, applyFire, applyMove, createRoom, removePlayer, step } from '../src/world/sim.js'
+import type {
+  Building,
+  BoltState,
+  DroneState,
+  PlayerState,
+  RoomState,
+  SimEvent,
+  WorldMap,
+} from '../src/world/types.js'
+
+const map = generateMap('vettai-test')
+const START = 1_700_000_000_000
+const DT = 0.05
+const OPEN_GROUND = { x: map.spawn.x, z: map.spawn.z + 30 }
+
+/** A room with no drones, so a test about walking is only about walking. */
+function quietRoom(): RoomState {
+  return { ...createRoom(map, 'room-1'), drones: new Map() }
+}
+
+function mustPlayer(room: RoomState, id: string): PlayerState {
+  const player = room.players.get(id)
+  if (!player) throw new Error(`no player ${id}`)
+  return player
+}
+
+function mustDrone(room: RoomState, id: string): DroneState {
+  const drone = room.drones.get(id)
+  if (!drone) throw new Error(`no drone ${id}`)
+  return drone
+}
+
+function run(
+  room: RoomState,
+  seconds: number,
+  from: number,
+  world: WorldMap = map,
+): { room: RoomState; events: SimEvent[]; now: number } {
+  const ticks = Math.round(seconds / DT)
+  let current = room
+  let now = from
+  const events: SimEvent[] = []
+  for (let tick = 0; tick < ticks; tick++) {
+    now += DT * 1000
+    const result = step(current, world, DT, now)
+    current = result.room
+    events.push(...result.events)
+  }
+  return { room: current, events, now }
+}
+
+/** A bolt three metres west of a player, flying east at chest height. */
+function boltAt(player: PlayerState, id: string, now: number): BoltState {
+  return {
+    id,
+    x: player.x - 3,
+    y: 1,
+    z: player.z,
+    vx: 12,
+    vy: 0,
+    vz: 0,
+    ownerDrone: 'd1',
+    bornAt: now,
+  }
+}
+
+/** Drones sit down the same street as the player, so only the rules are in the way. */
+function droneNear(player: PlayerState, distance: number): DroneState {
+  return {
+    id: 'd1',
+    x: player.x,
+    y: 6,
+    z: player.z - distance,
+    yaw: 0,
+    hp: 3,
+    state: 'patrol',
+    loop: 0,
+    waypoint: 0,
+    target: null,
+    nextFireAt: START,
+    deadUntil: 0,
+    damage: new Map(),
+  }
+}
+
+/** The same city with a chosen set of buildings, so a test can place a wall exactly. */
+function mapWith(buildings: Building[]): WorldMap {
+  return { ...map, buildings }
+}
+
+function tower(aabb: Building['aabb'], height: number): Building {
+  return { lot: [0, 0], type: 0, height, aabb }
+}
+
+function withDrone(room: RoomState, drone: DroneState): RoomState {
+  return { ...room, drones: new Map([[drone.id, drone]]) }
+}
+
+/** The aim from a player's eye to a drone standing `distance` metres straight ahead. */
+function aimAt(distance: number, height: number): { yaw: number; pitch: number } {
+  return { yaw: 0, pitch: Math.atan2(height - 1.6, distance) }
+}
+
+describe('walking', () => {
+  it('stops flush against a wall instead of walking through it', () => {
+    const building = map.buildings[0]
+    if (!building) throw new Error('the map has no buildings')
+    const start = {
+      x: building.aabb.minX - 3,
+      z: (building.aabb.minZ + building.aabb.maxZ) / 2,
+    }
+
+    let room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, start)
+    room = applyMove(room, 'p1', { dx: 1, dz: 0, yaw: 0 }, START)
+    const after = run(room, 2, START).room
+
+    const player = mustPlayer(after, 'p1')
+    expect(player.x).toBeCloseTo(building.aabb.minX - 0.5, 3)
+    expect(player.x).toBeLessThan(building.aabb.minX - 0.5)
+    expect(player.z).toBeCloseTo(start.z, 6)
+  })
+
+  it('walks 6 m in a second, and 7 m with the sprint gear', () => {
+    let room = addPlayer(quietRoom(), 'walk', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    room = addPlayer(room, 'sprint', { blaster: 'mk1', skin: 'default', sprint: true }, OPEN_GROUND)
+    room = applyMove(room, 'walk', { dx: 0, dz: 1, yaw: 0 }, START)
+    room = applyMove(room, 'sprint', { dx: 0, dz: 1, yaw: 0 }, START)
+
+    const after = run(room, 1, START).room
+    expect(mustPlayer(after, 'walk').z - OPEN_GROUND.z).toBeCloseTo(6, 6)
+    expect(mustPlayer(after, 'sprint').z - OPEN_GROUND.z).toBeCloseTo(7, 6)
+  })
+
+  it('normalises a move intent so a long vector buys no speed', () => {
+    let room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    room = applyMove(room, 'p1', { dx: 0, dz: 50, yaw: 1.2 }, START)
+
+    const intent = mustPlayer(room, 'p1').intent
+    expect(Math.hypot(intent.dx, intent.dz)).toBeCloseTo(1, 9)
+    expect(mustPlayer(run(room, 1, START).room, 'p1').z - OPEN_GROUND.z).toBeCloseTo(6, 6)
+  })
+
+  it('leaves the room it was handed untouched', () => {
+    let room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    room = applyMove(room, 'p1', { dx: 0, dz: 1, yaw: 0 }, START)
+    const before = JSON.stringify([...room.players.values()])
+
+    step(room, map, DT, START + 50)
+    expect(JSON.stringify([...room.players.values()])).toBe(before)
+    expect(room.tick).toBe(0)
+  })
+})
+
+describe('taking fire', () => {
+  it('costs one shield bar when a bolt lands on a standing player', () => {
+    const room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    const withBolt = { ...room, bolts: [boltAt(mustPlayer(room, 'p1'), 'b1', START)] }
+
+    const after = run(withBolt, 0.5, START)
+    const hits = after.events.filter((event) => event.kind === 'droneHit')
+    expect(hits).toHaveLength(1)
+    expect(mustPlayer(after.room, 'p1').shield).toBe(2)
+    expect(after.room.bolts).toHaveLength(0)
+  })
+
+  it('misses a player who is moving out of the way', () => {
+    let room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    room = applyMove(room, 'p1', { dx: 0, dz: 1, yaw: 0 }, START)
+    const bolt = boltAt(mustPlayer(room, 'p1'), 'b1', START)
+    const withBolt = { ...room, bolts: [{ ...bolt, x: bolt.x - 3 }] }
+
+    const after = run(withBolt, 1, START)
+    expect(after.events.filter((event) => event.kind === 'droneHit')).toHaveLength(0)
+    expect(mustPlayer(after.room, 'p1').shield).toBe(3)
+  })
+
+  it('goes down at zero shield and comes back at the spawn three seconds later', () => {
+    let room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    let now = START
+    const events: SimEvent[] = []
+    for (const id of ['b1', 'b2', 'b3']) {
+      const shot = { ...room, bolts: [boltAt(mustPlayer(room, 'p1'), id, now)] }
+      const result = run(shot, 0.5, now)
+      room = result.room
+      now = result.now
+      events.push(...result.events)
+    }
+
+    const downed = events.filter((event) => event.kind === 'downed')
+    expect(downed).toHaveLength(1)
+    expect(mustPlayer(room, 'p1').shield).toBe(0)
+    expect(mustPlayer(room, 'p1').downedUntil).toBeGreaterThan(now)
+
+    const back = run(room, 3.1, now)
+    const respawns = back.events.filter((event) => event.kind === 'respawn')
+    expect(respawns).toHaveLength(1)
+    const player = mustPlayer(back.room, 'p1')
+    expect(player.x).toBe(map.spawn.x)
+    expect(player.z).toBe(map.spawn.z)
+    expect(player.shield).toBe(3)
+    expect(player.downedUntil).toBe(0)
+  })
+
+  it('hands back one shield bar after eight quiet seconds', () => {
+    const room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    const hit = run({ ...room, bolts: [boltAt(mustPlayer(room, 'p1'), 'b1', START)] }, 0.5, START)
+    expect(mustPlayer(hit.room, 'p1').shield).toBe(2)
+
+    const nearly = run(hit.room, 7.5, hit.now)
+    expect(mustPlayer(nearly.room, 'p1').shield).toBe(2)
+
+    const regrown = run(nearly.room, 1, nearly.now)
+    expect(mustPlayer(regrown.room, 'p1').shield).toBe(3)
+  })
+})
+
+describe('drones', () => {
+  it('engages a player at 20 m and fires every two seconds', () => {
+    const room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    const ready = withDrone(room, droneNear(mustPlayer(room, 'p1'), 20))
+
+    const after = run(ready, 3, START)
+    expect(mustDrone(after.room, 'd1').state).toBe('engage')
+    expect(after.room.ids.bolt).toBe(2)
+  })
+
+  it('ignores a player who is further than 25 m away', () => {
+    const room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    const ready = withDrone(room, droneNear(mustPlayer(room, 'p1'), 26))
+
+    const after = step(ready, map, DT, START)
+    expect(mustDrone(after.room, 'd1').state).toBe('patrol')
+    expect(after.room.ids.bolt).toBe(0)
+  })
+
+  it('closes to a twelve metre circle around its target', () => {
+    const room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    const ready = withDrone(room, droneNear(mustPlayer(room, 'p1'), 16))
+
+    const after = run(ready, 3, START)
+    const drone = mustDrone(after.room, 'd1')
+    const player = mustPlayer(after.room, 'p1')
+    expect(Math.hypot(drone.x - player.x, drone.z - player.z)).toBeCloseTo(12, 1)
+  })
+
+  it('keeps six alive and replaces a lost one no more than once every twenty seconds', () => {
+    const full = createRoom(map, 'room-1')
+    expect(full.drones.size).toBe(6)
+
+    const short = new Map(full.drones)
+    const firstId = [...short.keys()][0]
+    if (!firstId) throw new Error('the room has no drones')
+    short.delete(firstId)
+
+    const replaced = step({ ...full, drones: short }, map, DT, START)
+    expect(replaced.events.filter((event) => event.kind === 'spawn')).toHaveLength(1)
+    expect(replaced.room.drones.size).toBe(6)
+
+    const shortAgain = new Map(replaced.room.drones)
+    const nextId = [...shortAgain.keys()][0]
+    if (!nextId) throw new Error('the room has no drones')
+    shortAgain.delete(nextId)
+
+    const tooSoon = step({ ...replaced.room, drones: shortAgain }, map, DT, START + 1000)
+    expect(tooSoon.events.filter((event) => event.kind === 'spawn')).toHaveLength(0)
+    expect(tooSoon.room.drones.size).toBe(5)
+  })
+})
+
+describe('shooting', () => {
+  it('lands a hit on the drone the player is aiming at', () => {
+    const room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    const drone = droneNear(mustPlayer(room, 'p1'), 0)
+    const ahead = { ...drone, x: OPEN_GROUND.x, z: OPEN_GROUND.z + 10 }
+    const shot = applyFire(withDrone(room, ahead), 'p1', aimAt(10, 6), START, map)
+
+    expect(shot.events.map((event) => event.kind)).toEqual(['hit'])
+    expect(mustDrone(shot.room, 'd1').hp).toBe(2)
+  })
+
+  it('misses when the aim is outside the assist cone', () => {
+    const room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    const drone = droneNear(mustPlayer(room, 'p1'), 0)
+    const ahead = { ...drone, x: OPEN_GROUND.x, z: OPEN_GROUND.z + 10 }
+    const shot = applyFire(withDrone(room, ahead), 'p1', { yaw: 1, pitch: 0 }, START, map)
+
+    expect(shot.events).toHaveLength(0)
+    expect(mustDrone(shot.room, 'd1').hp).toBe(3)
+  })
+
+  it('gives the kill to the player who did the most damage', () => {
+    let room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    room = addPlayer(room, 'p2', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    const drone = droneNear(mustPlayer(room, 'p1'), 0)
+    room = withDrone(room, { ...drone, x: OPEN_GROUND.x, z: OPEN_GROUND.z + 10 })
+
+    const aim = aimAt(10, 6)
+    room = applyFire(room, 'p1', aim, START, map).room
+    room = applyFire(room, 'p1', aim, START + 300, map).room
+    const last = applyFire(room, 'p2', aim, START + 600, map)
+
+    const kill = last.events.find((event) => event.kind === 'kill')
+    expect(kill?.player).toBe('p1')
+    expect(mustDrone(last.room, 'd1').state).toBe('dead')
+  })
+
+  it('holds the mk1 to four shots a second and the mk2 to six', () => {
+    let room = addPlayer(quietRoom(), 'mk1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    room = addPlayer(room, 'mk2', { blaster: 'mk2', skin: 'default' }, OPEN_GROUND)
+
+    for (let shot = 0; shot < 8; shot++) {
+      const at = START + shot * 100
+      room = applyFire(room, 'mk1', { yaw: 0, pitch: 0 }, at, map).room
+      room = applyFire(room, 'mk2', { yaw: 0, pitch: 0 }, at, map).room
+    }
+
+    expect(mustPlayer(room, 'mk1').recentFires).toHaveLength(4)
+    expect(mustPlayer(room, 'mk2').recentFires).toHaveLength(6)
+  })
+
+  it('refuses to fire while the player is down', () => {
+    const room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    const players = new Map(room.players)
+    players.set('p1', { ...mustPlayer(room, 'p1'), shield: 0, downedUntil: START + 3000 })
+    const drone = droneNear(mustPlayer(room, 'p1'), 0)
+    const down = withDrone({ ...room, players }, { ...drone, x: OPEN_GROUND.x, z: OPEN_GROUND.z + 10 })
+
+    const shot = applyFire(down, 'p1', aimAt(10, 6), START, map)
+    expect(shot.events).toHaveLength(0)
+    expect(mustDrone(shot.room, 'd1').hp).toBe(3)
+  })
+
+  it('forgets the damage of a player who left, so no kill is credited to a ghost', () => {
+    let room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    room = addPlayer(room, 'p2', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    const drone = droneNear(mustPlayer(room, 'p1'), 0)
+    room = withDrone(room, { ...drone, x: OPEN_GROUND.x, z: OPEN_GROUND.z + 10 })
+
+    const aim = aimAt(10, 6)
+    room = applyFire(room, 'p1', aim, START, map).room
+    room = applyFire(room, 'p1', aim, START + 300, map).room
+    room = removePlayer(room, 'p1')
+    const last = applyFire(room, 'p2', aim, START + 600, map)
+
+    const kill = last.events.find((event) => event.kind === 'kill')
+    expect(kill?.player).toBe('p2')
+    expect(last.room.players.has('p1')).toBe(false)
+  })
+})
+
+describe('walls', () => {
+  const PILLAR = tower({ minX: -0.4, maxX: 0.4, minZ: 4, maxZ: 4.4 }, 30)
+  const GROUND = { x: 0, z: 0 }
+  // Aimed between the two drones below, so both sit inside the six degree assist cone.
+  const BETWEEN = { yaw: Math.atan2(1.5, 20), pitch: Math.atan2(4.4, Math.hypot(1.5, 20)) }
+
+  it('does not let a player shoot a drone hidden behind a tower', () => {
+    let room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, GROUND)
+    const hidden = { ...droneNear(mustPlayer(room, 'p1'), 0), id: 'd1', x: 0, z: 20 }
+    room = withDrone(room, hidden)
+
+    const blocked = applyFire(room, 'p1', BETWEEN, START, mapWith([PILLAR]))
+    expect(blocked.events).toHaveLength(0)
+    expect(mustDrone(blocked.room, 'd1').hp).toBe(3)
+
+    const clear = applyFire(room, 'p1', BETWEEN, START, mapWith([]))
+    expect(clear.events.map((event) => event.kind)).toEqual(['hit'])
+    expect(mustDrone(clear.room, 'd1').hp).toBe(2)
+  })
+
+  it('takes the next drone in the cone when the nearest one is behind the tower', () => {
+    let room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, GROUND)
+    const hidden = { ...droneNear(mustPlayer(room, 'p1'), 0), id: 'd1', x: 0, z: 20 }
+    const open = { ...droneNear(mustPlayer(room, 'p1'), 0), id: 'd2', x: 3, z: 20 }
+    room = { ...room, drones: new Map([[hidden.id, hidden], [open.id, open]]) }
+
+    const shot = applyFire(room, 'p1', BETWEEN, START, mapWith([PILLAR]))
+    const hit = shot.events.find((event) => event.kind === 'hit')
+    expect(hit?.drone).toBe('d2')
+    expect(mustDrone(shot.room, 'd1').hp).toBe(3)
+    expect(mustDrone(shot.room, 'd2').hp).toBe(2)
+  })
+
+  it('kills a bolt that flies into a building instead of through it', () => {
+    const room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, GROUND)
+    const wall = tower({ minX: 2, maxX: 8, minZ: -3, maxZ: 3 }, 20)
+    const incoming: BoltState = {
+      id: 'b1',
+      x: 12,
+      y: 1,
+      z: 0,
+      vx: -12,
+      vy: 0,
+      vz: 0,
+      ownerDrone: 'd1',
+      bornAt: START,
+    }
+
+    const stopped = run({ ...room, bolts: [incoming] }, 1.5, START, mapWith([wall]))
+    expect(stopped.events.filter((event) => event.kind === 'droneHit')).toHaveLength(0)
+    expect(stopped.room.bolts).toHaveLength(0)
+    expect(mustPlayer(stopped.room, 'p1').shield).toBe(3)
+
+    const through = run({ ...room, bolts: [incoming] }, 1.5, START, mapWith([]))
+    expect(through.events.filter((event) => event.kind === 'droneHit')).toHaveLength(1)
+    expect(mustPlayer(through.room, 'p1').shield).toBe(2)
+  })
+})
