@@ -388,7 +388,7 @@ the smallest NIM unit (1 NIM = 100,000 luna).
 
 ```
  Test Files  36 passed (36)
-      Tests  342 passed (342)
+      Tests  350 passed (350)
 ```
 
 Run with `npm test` inside `packages/server`. Alongside the unit and route tests there are
