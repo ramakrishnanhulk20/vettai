@@ -10,9 +10,9 @@ import {
   type Gear,
   type QuestView,
 } from "@/lib/api";
-import { isUserRejection, waitForProvider } from "@/lib/nimiq";
+import { isInsidePay, isUserRejection, waitForProvider } from "@/lib/nimiq";
 import { login, me, readSession } from "@/lib/session";
-import { connectWorld, type WorldConnection } from "@/lib/ws";
+import { connectWorld, youOf, type WelcomeFrame, type WorldConnection } from "@/lib/ws";
 import { createControls, type Controls } from "@/game/controls";
 import type { WorldMap } from "@/game/map";
 import {
@@ -50,9 +50,21 @@ type Phase =
   | { name: "playing" }
   | { name: "reconnecting" }
   | { name: "resigning" }
+  /** The phone took the graphics away. The city is being built again on a fresh canvas. */
+  | { name: "lost" }
   | { name: "error"; title: string; body: string };
 
 const PROVIDER_WAIT_MS = 15_000;
+
+/**
+ * How long a socket gets to hand over a room. The world sends the welcome on the tick
+ * after the upgrade, so anything past this is a connection that upgraded and then went
+ * quiet, which no amount of waiting fixes.
+ */
+const WELCOME_WAIT_MS = 8000;
+
+/** How often the page looks again for a wallet that turned up after we gave up waiting. */
+const PROVIDER_POLL_MS = 500;
 const SHOP_KEY = "vettai.seen.shop";
 const FIRST_MINUTE_KEY = "vettai.firstminute";
 const TOAST_MS = 2600;
@@ -143,12 +155,35 @@ export default function PlayScreen() {
   /** The last ten round trips, for the jitter line in the readout. */
   const pongsRef = useRef<number[]>([]);
   const celebrateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** The HUD's fire button, so a rebuilt set of controls can take it over. */
+  const fireButtonRef = useRef<HTMLElement | null>(null);
+  /** The room as the server last described it, which is what a rebuilt picture starts from. */
+  const lastWelcome = useRef<WelcomeFrame | null>(null);
+  /** What the room calls this player, taken from the welcome rather than guessed. */
+  const youId = useRef("");
+  /** Where the body was standing when the graphics went away. */
+  const placeRef = useRef<{ x: number; z: number } | null>(null);
+  /** The block this game loaded, as the map endpoint stamped it. */
+  const mapVersion = useRef("");
+  /** The version we have already gone back for, so a disagreeing world cannot loop us. */
+  const rebootedFor = useRef("");
+  /** Turns the render loop on and off from the React side, which knows what phase we are in. */
+  const setLoop = useRef<(on: boolean) => void>(() => {});
+  /** The one signature that puts an expired session back, owned by the boot below. */
+  const signBackInRef = useRef<(() => Promise<void>) | null>(null);
+  const contextLost = useRef<() => void>(() => {});
+  const contextBack = useRef<() => void>(() => {});
+  const rebuild = useRef<() => void>(() => {});
 
   const reduced = useReducedMotion();
   const [phase, setPhase] = useState<Phase>({ name: "provider" });
   const [attempt, setAttempt] = useState(0);
+  /** Bumped to mount a brand new canvas, which is the only clean way back from a lost context. */
+  const [picture, setPicture] = useState(0);
   const [host, setHost] = useState("");
   const [copied, setCopied] = useState(false);
+  /** True when this page is running inside Nimiq Pay, which changes what a missing wallet means. */
+  const [insidePay, setInsidePay] = useState(false);
 
   const [shield, setShield] = useState(3);
   const [quests, setQuests] = useState<QuestView[]>([]);
@@ -183,6 +218,7 @@ export default function PlayScreen() {
     setHost(window.location.host);
     if (window.localStorage.getItem(FIRST_MINUTE_KEY) === null) setLesson(0);
     setSeenShop(window.localStorage.getItem(SHOP_KEY) !== null);
+    setInsidePay(isInsidePay());
     setAddress(readSession()?.address ?? "");
   }, []);
 
@@ -283,7 +319,13 @@ export default function PlayScreen() {
     [toast],
   );
 
-  const claims = useClaims(playing, onPaid);
+  // The claims feed hits the same session the socket does, so when it finds the sign in
+  // gone it goes down the same road rather than quietly stopping.
+  const signedOut = useCallback(() => {
+    void signBackInRef.current?.();
+  }, []);
+
+  const claims = useClaims(playing, onPaid, signedOut);
 
   // A paid claim is the one place a link is worth having, so that is the only thing that
   // makes the page ask which chain it is on.
@@ -324,11 +366,44 @@ export default function PlayScreen() {
     let alive = true;
     let assets: CityAssets | null = null;
     let raf = 0;
+    let running = false;
+    let onScreen = true;
+    let wantLoop = false;
+    let frames = 0;
 
-    const drop = () => {
-      cancelAnimationFrame(raf);
-      connectionRef.current?.close();
-      connectionRef.current = null;
+    const tick = (now: number) => {
+      raf = requestAnimationFrame(tick);
+      frames += 1;
+      worldRef.current?.frame(now);
+    };
+
+    /**
+     * One switch for the render loop. A hidden page, a picture that is being rebuilt and a
+     * world that is not there yet all stop it, and it only starts again when none of them
+     * do. A signature dialog pauses the WebView, and stopping here is what keeps the first
+     * frame back from stepping a whole second.
+     */
+    const syncLoop = () => {
+      const should = wantLoop && onScreen && worldRef.current !== null;
+      if (should === running) return;
+      running = should;
+      if (!should) return cancelAnimationFrame(raf);
+      worldRef.current?.resume(performance.now());
+      raf = requestAnimationFrame(tick);
+    };
+
+    const onResize = () => worldRef.current?.resize();
+    const onVisibility = () => {
+      onScreen = !document.hidden;
+      syncLoop();
+    };
+    window.addEventListener("resize", onResize);
+    window.addEventListener("orientationchange", onResize);
+    document.addEventListener("visibilitychange", onVisibility);
+
+    const dropPicture = () => {
+      wantLoop = false;
+      syncLoop();
       controlsRef.current?.dispose();
       controlsRef.current = null;
       worldRef.current?.dispose();
@@ -337,87 +412,36 @@ export default function PlayScreen() {
       assets = null;
     };
 
+    const drop = () => {
+      connectionRef.current?.close();
+      connectionRef.current = null;
+      dropPicture();
+    };
+
     const fail = (title: string, body: string) => {
       if (alive) setPhase({ name: "error", title, body });
     };
 
-    const boot = async () => {
-      setPhase({ name: "provider" });
-      try {
-        await waitForProvider(PROVIDER_WAIT_MS);
-      } catch {
-        if (alive) setPhase({ name: "outside" });
-        return;
-      }
-      if (!alive) return;
-
-      let who = readSession() ? await me() : null;
-      if (!alive) return;
-
-      if (!who) {
-        setPhase({ name: "signing" });
-        try {
-          await login();
-        } catch (error) {
-          if (!alive) return;
-          if (isUserRejection(error)) return setPhase({ name: "cancelled" });
-          return fail(
-            "That sign in did not go through",
-            error instanceof Error ? error.message : "The wallet did not answer. Try again.",
-          );
-        }
-        who = await me();
-        if (!alive) return;
-        if (!who) {
-          return fail(
-            "That sign in did not go through",
-            "The server did not accept the signature. Tap below to sign again.",
-          );
-        }
-      }
-      gearRef.current = who.gear;
-      setGear(who.gear);
-      setAddress(who.address);
-
-      setPhase({ name: "loading", percent: 0 });
-      const total = CITY_STEPS + CHARACTER_STEPS + 1;
-      let done = 1;
-      const step = () => {
-        done += 1;
-        if (alive) setPhase({ name: "loading", percent: Math.round((done / total) * 100) });
-      };
-
-      const mapResult = await getWorldMap();
-      if (!alive) return;
-      if (!mapResult.ok) {
-        return fail("The city did not load", `${mapResult.error} Tap below to try again.`);
-      }
-      mapRef.current = mapResult.data;
-      setWorldMap(mapResult.data);
-
-      try {
-        // The city look Ram approved. The facades carry it, so it is chosen at load.
-        assets = await loadCityAssets(step, "v2");
-        await loadCharacters(step);
-      } catch {
-        if (!alive) return;
-        return fail(
-          "The city did not load",
-          "Some of the block did not arrive. Check the connection and tap below to try again.",
-        );
-      }
-      if (!alive || !assets) return;
-
+    /**
+     * The picture: the block's textures, the scene that draws them and the thumbs that
+     * drive it. Built at boot, and built again from nothing when the phone takes the
+     * graphics away. It throws when the block will not load, and the caller says so.
+     */
+    const buildPicture = async (step: () => void): Promise<boolean> => {
       const canvas = canvasRef.current;
       const surface = surfaceRef.current;
-      if (!canvas || !surface) return;
-
+      const map = mapRef.current;
       const session = readSession();
-      if (!session) return fail("That sign in did not go through", "Tap below to sign again.");
+      if (!canvas || !surface || !map || !session) return false;
+
+      // The city look Ram approved. The facades carry it, so it is chosen at load.
+      assets = await loadCityAssets(step, "v2");
+      await loadCharacters(step);
+      if (!alive || !assets) return false;
 
       const world = createWorld({
         canvas,
-        map: mapResult.data,
+        map,
         assets,
         you: session.address,
         reduced: Boolean(reduced),
@@ -474,44 +498,182 @@ export default function PlayScreen() {
         onFirstStick: () => lessonDone(0),
       });
       controlsRef.current = controls;
+      // The HUD is already on screen when the picture is rebuilt, so the fire button hands
+      // itself to the new controls here rather than on a mount that is not happening.
+      if (fireButtonRef.current) controls.attachFire(fireButtonRef.current);
 
-      const onResize = () => world.resize();
-      window.addEventListener("resize", onResize);
-      window.addEventListener("orientationchange", onResize);
+      world.resize();
+      // Whether the loop actually runs is the phase's call, not this one's: there is
+      // nothing worth drawing until the world server has handed over a room.
+      syncLoop();
+      return true;
+    };
 
-      let hidden = false;
-      const tick = (now: number) => {
-        raf = requestAnimationFrame(tick);
-        world.frame(now);
+    setLoop.current = (on: boolean) => {
+      wantLoop = on;
+      syncLoop();
+    };
+
+    contextLost.current = () => {
+      wantLoop = false;
+      syncLoop();
+      if (alive) setPhase({ name: "lost" });
+    };
+
+    contextBack.current = () => {
+      if (!alive) return;
+      // The canvas that lost its context goes in the bin with the world that drew on it.
+      // A fresh one is mounted in its place, and the rebuild runs against that one.
+      placeRef.current = worldRef.current?.place() ?? null;
+      dropPicture();
+      setPicture((count) => count + 1);
+    };
+
+    rebuild.current = () => {
+      void (async () => {
+        let built = false;
+        try {
+          built = await buildPicture(() => {});
+        } catch {
+          if (!alive) return;
+          return fail(
+            "The picture did not come back",
+            "The block did not load again. Tap below to start over.",
+          );
+        }
+        if (!alive || !built) return;
+
+        // The room is still ours, so the last welcome puts the city back as it was, with
+        // the body where it was standing rather than back at the spawn.
+        const back = lastWelcome.current;
+        if (back) {
+          const at = placeRef.current;
+          worldRef.current?.welcome(
+            at === null
+              ? back
+              : {
+                  ...back,
+                  players: back.players.map((wire) =>
+                    wire.id === youId.current ? { ...wire, x: at.x, z: at.z } : wire,
+                  ),
+                },
+          );
+        }
+        setPhase(back ? { name: "playing" } : { name: "connecting" });
+      })();
+    };
+
+    const boot = async () => {
+      setPhase({ name: "provider" });
+      try {
+        await waitForProvider(PROVIDER_WAIT_MS);
+      } catch {
+        if (alive) setPhase({ name: "outside" });
+        return;
+      }
+      if (!alive) return;
+
+      let who = readSession() ? await me() : null;
+      if (!alive) return;
+
+      if (!who) {
+        setPhase({ name: "signing" });
+        try {
+          await login();
+        } catch (error) {
+          if (!alive) return;
+          if (isUserRejection(error)) return setPhase({ name: "cancelled" });
+          return fail(
+            "That sign in did not go through",
+            error instanceof Error ? error.message : "The wallet did not answer. Try again.",
+          );
+        }
+        who = await me();
+        if (!alive) return;
+        if (!who) {
+          return fail(
+            "That sign in did not go through",
+            "The server did not accept the signature. Tap below to sign again.",
+          );
+        }
+      }
+      gearRef.current = who.gear;
+      setGear(who.gear);
+      setAddress(who.address);
+
+      setPhase({ name: "loading", percent: 0 });
+      const total = CITY_STEPS + CHARACTER_STEPS + 1;
+      let done = 1;
+      const step = () => {
+        done += 1;
+        if (alive) setPhase({ name: "loading", percent: Math.round((done / total) * 100) });
       };
-      const onVisibility = () => {
-        // A signature dialog pauses the WebView. Stopping the loop while the page is out
-        // of sight is what keeps the first frame back from stepping a whole second.
-        if (document.hidden) {
-          hidden = true;
-          cancelAnimationFrame(raf);
+
+      const mapResult = await getWorldMap();
+      if (!alive) return;
+      if (!mapResult.ok) {
+        return fail("The city did not load", `${mapResult.error} Tap below to try again.`);
+      }
+      mapRef.current = mapResult.data;
+      mapVersion.current = mapResult.data.version;
+      setWorldMap(mapResult.data);
+
+      let built = false;
+      try {
+        built = await buildPicture(step);
+      } catch {
+        if (!alive) return;
+        return fail(
+          "The city did not load",
+          "Some of the block did not arrive. Check the connection and tap below to try again.",
+        );
+      }
+      if (!alive || !built) return;
+
+      /**
+       * A room says hello. This is also where a block that has changed under us is caught:
+       * the city on screen was built from the map endpoint, so a room running a different
+       * one has to be met with a fresh load rather than a player walking through walls
+       * that are no longer there.
+       */
+      const onWelcome = (frame: WelcomeFrame) => {
+        if (!alive) return;
+        const version = frame.mapVersion;
+        if (version && version !== mapVersion.current && rebootedFor.current !== version) {
+          rebootedFor.current = version;
+          setAttempt((count) => count + 1);
           return;
         }
-        if (!hidden) return;
-        hidden = false;
-        world.resume(performance.now());
-        raf = requestAnimationFrame(tick);
+
+        lastWelcome.current = frame;
+        youId.current = youOf(frame);
+        worldRef.current?.welcome(frame);
+        // A room counts move intents from zero. The thumb has to count from the same
+        // place, or the first frames back replay every intent the old room never
+        // acknowledged. The world clears what it was holding in welcome().
+        const mine = frame.players.find((wire) => wire.id === youId.current);
+        controlsRef.current?.resetSequence(mine?.seq ?? 0);
+        questsRef.current = frame.quests;
+        setQuests(frame.quests);
+        setPhase({ name: "playing" });
       };
-      document.addEventListener("visibilitychange", onVisibility);
-      world.resize();
-      raf = requestAnimationFrame(tick);
 
       if (process.env.NODE_ENV !== "production") {
         const debug = window as unknown as { vettaiDebug?: unknown };
         debug.vettaiDebug = {
-          stats: () => world.stats(),
-          readout: () => world.readout(),
-          markers: () => world.markers(),
-          killFlashAt: () => world.killFlashAt(),
-          place: () => world.place(),
+          stats: () => worldRef.current?.stats() ?? null,
+          readout: () => worldRef.current?.readout() ?? null,
+          markers: () => worldRef.current?.markers() ?? null,
+          killFlashAt: () => worldRef.current?.killFlashAt() ?? 0,
+          place: () => worldRef.current?.place() ?? null,
           look: () => controlsRef.current?.look() ?? { yaw: 0, pitch: 0 },
           move: () => controlsRef.current?.move() ?? { dx: 0, dz: 0 },
-          cameraAt: () => world.cameraAt(),
+          cameraAt: () => worldRef.current?.cameraAt() ?? null,
+          /** What the render loop is doing, so a check can prove it stopped and started. */
+          loop: () => ({ running, frames }),
+          /** The block this game loaded, and the way a check can hand the page a welcome. */
+          mapVersion: () => mapVersion.current,
+          welcome: (frame: WelcomeFrame) => onWelcome(frame),
           heap: () =>
             (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory
               ?.usedJSHeapSize ?? null,
@@ -522,9 +684,6 @@ export default function PlayScreen() {
       const ticket = await getTicket();
       if (!alive) return;
       if (!ticket.ok) {
-        window.removeEventListener("resize", onResize);
-        window.removeEventListener("orientationchange", onResize);
-        document.removeEventListener("visibilitychange", onVisibility);
         return fail("The world server would not let us in", `${ticket.error} Tap below to try again.`);
       }
 
@@ -567,6 +726,8 @@ export default function PlayScreen() {
         attach(back);
       }
 
+      signBackInRef.current = signBackIn;
+
       function attach(connection: WorldConnection): void {
         connection.on("pong", (frame) => {
           const round = Date.now() - frame.ts;
@@ -575,28 +736,18 @@ export default function PlayScreen() {
           if (seen.length > 10) seen.shift();
         });
 
-        connection.on("welcome", (frame) => {
-          world.welcome(frame);
-          // A room counts move intents from zero. The thumb has to count from the same
-          // place, or the first frames back replay every intent the old room never
-          // acknowledged. The world clears what it was holding in welcome().
-          const mine = frame.players.find((wire) => wire.id === frame.you);
-          controlsRef.current?.resetSequence(mine?.seq ?? 0);
-          questsRef.current = frame.quests;
-          setQuests(frame.quests);
-          setPhase({ name: "playing" });
-        });
+        connection.on("welcome", onWelcome);
 
         let spoke = 0;
         connection.on("state", (frame) => {
-          world.state(frame);
+          worldRef.current?.state(frame);
           if (process.env.NODE_ENV === "production") return;
           // One line a second while developing: enough to see the room ticking, not enough
           // to drown the console at twenty frames a second.
           const now = Date.now();
           if (now - spoke < 1000) return;
           spoke = now;
-          const at = world.place();
+          const at = worldRef.current?.place() ?? { x: 0, z: 0 };
           console.info(
             `[vettai] state tick=${frame.tick} players=${frame.players.length} drones=${frame.drones.length} at=${at.x.toFixed(1)},${at.z.toFixed(1)}`,
           );
@@ -617,7 +768,7 @@ export default function PlayScreen() {
           if (frame.kind === "gear") {
             gearRef.current = frame.gear;
             setGear(frame.gear);
-            world.setGear(frame.gear);
+            worldRef.current?.setGear(frame.gear);
             toast(`Gear equipped: ${frame.item}`);
             return;
           }
@@ -629,7 +780,7 @@ export default function PlayScreen() {
             return;
           }
           if (frame.kind === "leave") {
-            world.leave(frame.player);
+            worldRef.current?.leave(frame.player);
             return;
           }
           if (frame.kind === "error") {
@@ -639,7 +790,16 @@ export default function PlayScreen() {
         });
 
         connection.on("close", (frame) => {
-          if (!alive || !frame.willRetry) return;
+          if (!alive) return;
+          if (frame.fatal) {
+            // The socket has given up for a reason retrying cannot fix, so the player is
+            // told rather than left watching a banner that will never clear.
+            return fail(
+              "The city closed the connection",
+              `${frame.reason}. Tap below to try again.`,
+            );
+          }
+          if (!frame.willRetry) return;
           if (readSession() === null) return void signBackIn();
           setPhase({ name: "reconnecting" });
         });
@@ -653,9 +813,6 @@ export default function PlayScreen() {
 
       return () => {
         clearInterval(pinged);
-        window.removeEventListener("resize", onResize);
-        window.removeEventListener("orientationchange", onResize);
-        document.removeEventListener("visibilitychange", onVisibility);
       };
     };
 
@@ -668,9 +825,50 @@ export default function PlayScreen() {
     return () => {
       alive = false;
       later?.();
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("orientationchange", onResize);
+      document.removeEventListener("visibilitychange", onVisibility);
       drop();
     };
   }, [announce, attempt, lessonDone, openSheet, reduced, toast]);
+
+  // Nothing is drawn while a panel owns the screen. A phone that is waiting to connect or
+  // has lost its picture should not be spending its battery on frames nobody sees.
+  useEffect(() => {
+    setLoop.current(playing);
+  }, [playing]);
+
+  /**
+   * Pay can be slow to hand a cold start its wallet, and on a phone that has been asleep it
+   * can be very slow. Rather than leaving the player on a dead end, the page keeps looking
+   * and boots itself the moment the wallet shows up.
+   */
+  useEffect(() => {
+    if (phase.name !== "outside") return;
+    const timer = setInterval(() => {
+      if (typeof window !== "undefined" && window.nimiq) return retry();
+      setInsidePay(isInsidePay());
+    }, PROVIDER_POLL_MS);
+    return () => clearInterval(timer);
+  }, [phase.name, retry]);
+
+  /**
+   * The socket can upgrade and then say nothing, which used to sit on the connecting panel
+   * for ever. This gives a room eight seconds to arrive and then says so out loud. The
+   * socket keeps trying underneath, so a welcome that turns up late still drops the player
+   * straight into the city.
+   */
+  useEffect(() => {
+    if (phase.name !== "connecting" && phase.name !== "reconnecting") return;
+    const timer = setTimeout(() => {
+      setPhase({
+        name: "error",
+        title: "The city did not answer",
+        body: "The world server took the connection but never handed over a room. Tap below to try again.",
+      });
+    }, WELCOME_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [phase.name]);
 
   const interact = useCallback(() => {
     const target = promptRef.current;
@@ -695,9 +893,37 @@ export default function PlayScreen() {
   }, []);
 
   const attachFire = useCallback((button: HTMLElement | null) => {
+    fireButtonRef.current = button;
     if (!button) return;
     controlsRef.current?.attachFire(button);
   }, []);
+
+  /**
+   * The canvas listens for its own context going away. Calling preventDefault is what asks
+   * the browser to hand one back; without it the restore event never comes.
+   */
+  const attachCanvas = useCallback((node: HTMLCanvasElement | null) => {
+    canvasRef.current = node;
+    if (!node) return;
+    const lost = (event: Event) => {
+      event.preventDefault();
+      contextLost.current();
+    };
+    const back = () => contextBack.current();
+    node.addEventListener("webglcontextlost", lost);
+    node.addEventListener("webglcontextrestored", back);
+    return () => {
+      node.removeEventListener("webglcontextlost", lost);
+      node.removeEventListener("webglcontextrestored", back);
+    };
+  }, []);
+
+  // A fresh canvas has just been mounted in place of the one that lost its context, so the
+  // city is built again on it. The first canvas is built by the boot above.
+  useEffect(() => {
+    if (picture === 0) return;
+    rebuild.current();
+  }, [picture]);
 
   /** What the readout panel reads while it is open. Nothing here runs on a frame. */
   const readout = useCallback((): Panel | null => {
@@ -720,7 +946,13 @@ export default function PlayScreen() {
 
   return (
     <div className={`${styles.stage} overflow-hidden bg-night`}>
-      <canvas ref={canvasRef} className="absolute inset-0 block h-full w-full" />
+      {/* A fresh canvas for every world. Tearing one down hands its context back to the
+          phone, so a rebuilt city cannot draw on the canvas the last one used. */}
+      <canvas
+        key={`${attempt}-${picture}`}
+        ref={attachCanvas}
+        className="absolute inset-0 block h-full w-full"
+      />
 
       {playing && <div aria-hidden className={styles.vignette} />}
 
@@ -898,6 +1130,7 @@ export default function PlayScreen() {
               reduced={Boolean(reduced)}
               deepLink={deepLink}
               copied={copied}
+              insidePay={insidePay}
               onCopy={copyLink}
               onRetry={retry}
             />
@@ -1059,8 +1292,16 @@ type PanelProps = {
   reduced: boolean;
   deepLink: string;
   copied: boolean;
+  insidePay: boolean;
   onCopy: () => void;
   onRetry: () => void;
+};
+
+/** Inside Pay a missing wallet is the app still waking up, not the wrong browser. */
+const STARTING_UP = {
+  label: "Nimiq Pay",
+  title: "Nimiq Pay is still starting up",
+  body: "The app has not handed this page a wallet yet. It takes a second or two after a cold start. This screen boots the city the moment it arrives.",
 };
 
 const COPY: Record<string, { label: string; title: string; body: string }> = {
@@ -1089,6 +1330,11 @@ const COPY: Record<string, { label: string; title: string; body: string }> = {
     title: "Loading the block",
     body: "Streets, towers, drones and people, straight from the world server.",
   },
+  lost: {
+    label: "The picture",
+    title: "Restarting the picture",
+    body: "The phone took the graphics back for a moment. The block is being drawn again. Your place in the city is held.",
+  },
   connecting: {
     label: "The city",
     title: "Taking a seat in the city",
@@ -1096,11 +1342,13 @@ const COPY: Record<string, { label: string; title: string; body: string }> = {
   },
 };
 
-function Panel({ phase, reduced, deepLink, copied, onCopy, onRetry }: PanelProps) {
+function Panel({ phase, reduced, deepLink, copied, insidePay, onCopy, onRetry }: PanelProps) {
   const words =
     phase.name === "error"
       ? { label: "Stopped", title: phase.title, body: phase.body }
-      : COPY[phase.name];
+      : phase.name === "outside" && insidePay
+        ? STARTING_UP
+        : COPY[phase.name];
   if (!words) return null;
 
   const status = statusOf(phase);
@@ -1142,7 +1390,7 @@ function Panel({ phase, reduced, deepLink, copied, onCopy, onRetry }: PanelProps
 
         {status && <Status text={status} />}
 
-        {phase.name === "outside" && (
+        {phase.name === "outside" && !insidePay && (
           <div className="flex flex-col gap-3">
             <a
               href={deepLink}
@@ -1160,11 +1408,16 @@ function Panel({ phase, reduced, deepLink, copied, onCopy, onRetry }: PanelProps
           </div>
         )}
 
-        {(phase.name === "cancelled" || phase.name === "error") && (
+        {(phase.name === "cancelled" || phase.name === "error" || phase.name === "outside") && (
           <button
             type="button"
             onClick={onRetry}
-            className="rounded-btn bg-hunt px-5 py-3 font-medium text-night transition-transform duration-300 hover:scale-[1.02] active:scale-[0.99]"
+            data-testid="try-again"
+            className={`rounded-btn px-5 py-3 font-medium transition-transform duration-300 hover:scale-[1.02] active:scale-[0.99] ${
+              phase.name === "outside" && !insidePay
+                ? "mt-3 border border-line text-paper/60"
+                : "bg-hunt text-night"
+            }`}
           >
             Try again
           </button>
@@ -1189,6 +1442,7 @@ function statusOf(phase: Phase): string | null {
   if (phase.name === "signing") return "waiting for your signature";
   if (phase.name === "loading") return "loading the block";
   if (phase.name === "connecting") return "joining the street";
+  if (phase.name === "lost") return "drawing the block again";
   return null;
 }
 

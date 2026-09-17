@@ -49,9 +49,22 @@ export type TickEvent =
   | { kind: "deliver"; player: string; point: number }
   | { kind: "landmark"; player: string; index: number };
 
+/**
+ * Who the room says you are. A world that names players by their wallet sends the address
+ * as a plain string; one that hands out opaque handles sends both. Either way the id here
+ * is the one the players list uses, and it is the only place the client learns it.
+ */
+export type WelcomeYou = string | { address: string; handle?: string };
+
+export function youOf(frame: { you: WelcomeYou }): string {
+  const you = frame.you;
+  if (typeof you === "string") return you;
+  return you.handle ?? you.address;
+}
+
 export type WelcomeFrame = {
   t: "welcome";
-  you: string;
+  you: WelcomeYou;
   room: string;
   tick: number;
   mapVersion: string;
@@ -83,7 +96,14 @@ export type EventFrame =
 
 export type PongFrame = { t: "pong"; ts: number; serverTs: number };
 
-export type CloseFrame = { willRetry: boolean; reason: string };
+export type CloseFrame = {
+  willRetry: boolean;
+  reason: string;
+  /** The WebSocket close code, when the browser gave us one. */
+  code?: number;
+  /** True when this socket is never coming back on its own and a person has to act. */
+  fatal?: boolean;
+};
 
 export type ClientFrame =
   | { t: "move"; seq?: number; dx: number; dz: number; yaw: number }
@@ -112,6 +132,26 @@ const PING_EVERY_MS = 5000;
 /** 1, 2, 4, 8 seconds, then every 15. A phone that walked into a lift comes back on its own. */
 const BACKOFF_MS = [1000, 2000, 4000, 8000];
 const BACKOFF_CAP_MS = 15000;
+
+/** After this many goes without ever getting a welcome, retrying is not the answer. */
+const MAX_ATTEMPTS = 8;
+
+/** Three server faults in a row is the world saying it cannot have us, not a bad line. */
+const MAX_SERVER_FAULTS = 3;
+
+/**
+ * Close codes the world only sends when it has decided about this client: 1008 is a
+ * refusal (a spent ticket, a rate limit, a protocol breach) and 1003 is a frame it will
+ * not read. Coming straight back with the same client would get the same answer.
+ */
+const FATAL_CODES = new Set([1003, 1008]);
+
+function closeReason(code: number | undefined, given: string): string {
+  if (code === 1008) return given || "the world refused this connection";
+  if (code === 1003) return given || "the world could not read what this game sent";
+  if (code === 1011) return given || "the world server hit a fault";
+  return given || "the socket closed";
+}
 
 function socketUrl(ticket: string, base: string | null): string {
   const scheme = window.location.protocol === "https:" ? "wss" : "ws";
@@ -146,6 +186,8 @@ export function connectWorld(ticket: string): WorldConnection {
   let base: string | null = null;
   let baseKnown = false;
   let attempt = 0;
+  /** Consecutive 1011s. The world is faulting rather than this line being bad. */
+  let faults = 0;
   let round: number | null = null;
   let closed = false;
   let pinger: ReturnType<typeof setInterval> | null = null;
@@ -160,9 +202,31 @@ export function connectWorld(ticket: string): WorldConnection {
     pinger = null;
   }
 
-  function scheduleRetry(reason: string): void {
+  function giveUp(reason: string, code: number | undefined): void {
+    closed = true;
+    stopPings();
+    if (retry !== null) clearTimeout(retry);
+    retry = null;
+    emit("close", { willRetry: false, reason, fatal: true, ...(code === undefined ? {} : { code }) });
+  }
+
+  function scheduleRetry(reason: string, code?: number): void {
     if (closed) return;
-    emit("close", { willRetry: true, reason });
+
+    if (code !== undefined && FATAL_CODES.has(code)) {
+      return giveUp(closeReason(code, reason), code);
+    }
+    if (code === 1011) {
+      faults += 1;
+      if (faults >= MAX_SERVER_FAULTS) return giveUp(closeReason(code, reason), code);
+    } else if (code !== undefined) {
+      faults = 0;
+    }
+    if (attempt >= MAX_ATTEMPTS) {
+      return giveUp("the world server did not answer after eight tries", code);
+    }
+
+    emit("close", { willRetry: true, reason, ...(code === undefined ? {} : { code }) });
     const wait = backoff(attempt);
     attempt += 1;
     retry = setTimeout(() => {
@@ -190,7 +254,8 @@ export function connectWorld(ticket: string): WorldConnection {
     socket = live;
 
     live.addEventListener("open", () => {
-      attempt = 0;
+      // The retry count is not cleared here. A socket that upgrades and is then thrown
+      // out is exactly the case the cap exists for; only a welcome proves we are in.
       stopPings();
       pinger = setInterval(() => {
         send({ t: "ping", ts: Date.now() });
@@ -209,7 +274,11 @@ export function connectWorld(ticket: string): WorldConnection {
 
       const body = frame as { t?: string };
       if (body.t === "state") return emit("state", frame as StateFrame);
-      if (body.t === "welcome") return emit("welcome", frame as WelcomeFrame);
+      if (body.t === "welcome") {
+        attempt = 0;
+        faults = 0;
+        return emit("welcome", frame as WelcomeFrame);
+      }
       if (body.t === "event") return emit("event", frame as EventFrame);
       if (body.t === "pong") {
         const pong = frame as PongFrame;
@@ -226,7 +295,7 @@ export function connectWorld(ticket: string): WorldConnection {
       stopPings();
       if (socket !== live) return;
       socket = null;
-      scheduleRetry(event.reason || "the socket closed");
+      scheduleRetry(closeReason(event.code, event.reason), event.code);
     });
 
     live.addEventListener("error", () => {
@@ -261,7 +330,7 @@ export function connectWorld(ticket: string): WorldConnection {
       const live = socket;
       socket = null;
       live?.close(1000, "left the game");
-      emit("close", { willRetry: false, reason: "left the game" });
+      emit("close", { willRetry: false, reason: "left the game", code: 1000 });
     },
   };
 }

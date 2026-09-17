@@ -133,9 +133,12 @@ export default function Shop({ gear, network, reduced, onClose }: ShopProps) {
         setBuy({
           item,
           step: "stopped",
+          // Past the point where the wallet was handed a transaction, this page cannot
+          // know whether it went out. Saying nothing was sent would be a guess about
+          // somebody's money, so the only honest line is where to look.
           text: isUserRejection(error)
             ? "Payment cancelled. Nothing was sent."
-            : `${error instanceof Error ? error.message : "The wallet did not answer."} Nothing was sent.`,
+            : `${error instanceof Error ? error.message : "The wallet did not answer."} The wallet did not confirm. If a payment went out, the treasury records it; check the shop before paying again.`,
         });
       }
     },
@@ -293,8 +296,8 @@ function Progress({
     return (
       <div>
         <p className="text-sm text-paper/70">
-          This order ran out of time. If your payment did reach the chain, the treasury has the
-          record; start a new order and it will not be charged twice.
+          This order ran out of time. A payment that did reach the chain is recorded by the
+          treasury and settled by hand, so ask in Skool with the memo before you pay again.
         </p>
         <button
           type="button"

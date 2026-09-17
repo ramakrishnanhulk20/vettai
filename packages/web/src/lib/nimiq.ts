@@ -104,6 +104,11 @@ type MaybeError = {
  * A tap on Cancel in the native dialog. The phone throws a plain
  * Error("User rejected the request."), proven on Ram's iPhone, so the message is the only
  * thing to go on; the EIP-1193 code is matched too when a build sends one.
+ *
+ * The test is deliberately narrow. Anything matched here is told the player that nothing
+ * was sent, and a wallet that times out or drops the page while a transaction is in flight
+ * says words like "cancelled" too. Getting that wrong tells somebody their money is safe
+ * when it may already be on the chain, so only a plain refusal counts.
  */
 export function isUserRejection(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
@@ -112,5 +117,5 @@ export function isUserRejection(error: unknown): boolean {
   const words = [shape.name, shape.message, shape.error?.type, shape.error?.message]
     .filter((value): value is string => typeof value === "string")
     .join(" ");
-  return /reject|denied|permissiondenied|cancel/i.test(words);
+  return /reject|denied/i.test(words);
 }

@@ -232,9 +232,12 @@ export default function QuestBoard({
         setBusy(null);
         setTrouble({
           questId: quest.id,
+          // A claim is a signature, not a payment, and the claim only goes to the office
+          // after this comes back. So the honest thing to say is that nothing was claimed,
+          // rather than a promise about money that this line cannot make.
           text: isUserRejection(error)
             ? "Claim cancelled. Nothing was sent."
-            : `${error instanceof Error ? error.message : "The wallet did not answer."} Nothing was sent.`,
+            : `${error instanceof Error ? error.message : "The wallet did not confirm."} No claim reached the office. Try it again.`,
         });
         return;
       }
@@ -278,6 +281,12 @@ export default function QuestBoard({
       {capLine && (
         <p className="label-type pb-3 text-paper/40" data-testid="cap-line">
           {capLine}
+        </p>
+      )}
+
+      {claims.error && (
+        <p className="label-type pb-3 text-bad" data-testid="claims-error">
+          {claims.error} The board keeps asking; your payouts are safe where they are.
         </p>
       )}
 

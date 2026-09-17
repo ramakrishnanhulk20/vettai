@@ -9,7 +9,9 @@ import { clearToken, readToken } from "./session";
  * around a HUD refresh ends up dropping frames or swallowing the reason.
  */
 
-export type ApiResult<T> = { ok: true; data: T } | { ok: false; status: number; error: string };
+export type ApiResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; status: number; error: string; code?: string };
 
 export type Gear = { blaster: "mk1" | "mk2"; skin: string; sprint?: boolean };
 
@@ -135,6 +137,27 @@ function messageOf(payload: unknown): string | null {
   return typeof error === "string" ? error : null;
 }
 
+function codeOf(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const code = (payload as { code?: unknown }).code;
+  return typeof code === "string" ? code : null;
+}
+
+/** What the world says when the token itself is no longer good. */
+const SESSION_GONE = "not signed in";
+
+/**
+ * Whether a refusal is about the session or about the thing being asked for. Only the
+ * first kind may throw the sign in away: a claim the world will not pay is not a reason to
+ * make the player sign in again, and treating it as one used to cost them their session
+ * every time a signature arrived a second late.
+ */
+function sessionIsGone(status: number, message: string | null, code: string | null): boolean {
+  if (code === "session") return true;
+  if (status !== 401) return false;
+  return message !== null && message.toLowerCase().includes(SESSION_GONE);
+}
+
 /**
  * In the browser every call is same-origin and the Next rewrite forwards it, so the Pay
  * WebView has one hostname to trust for the API, the socket and the page.
@@ -164,11 +187,14 @@ async function request<T>(path: string, options: Options = {}): Promise<ApiResul
   const payload: unknown = await response.json().catch(() => null);
 
   if (!response.ok) {
-    if (response.status === 401 && options.auth) clearToken();
+    const message = messageOf(payload);
+    const code = codeOf(payload);
+    if (options.auth && sessionIsGone(response.status, message, code)) clearToken();
     return {
       ok: false,
       status: response.status,
-      error: messageOf(payload) ?? "The world server refused that. Try again.",
+      error: message ?? "The world server refused that. Try again.",
+      ...(code === null ? {} : { code }),
     };
   }
 

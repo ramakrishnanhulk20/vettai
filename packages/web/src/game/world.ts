@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import type { BoltWire, DroneWire, PlayerWire, StateFrame, TickEvent, WelcomeFrame } from "@/lib/ws";
+import { youOf, type BoltWire, type DroneWire, type PlayerWire, type StateFrame, type TickEvent, type WelcomeFrame } from "@/lib/ws";
 import type { Gear } from "@/lib/api";
 import { createCameraRig, type Blocker } from "./camera";
 import type { Box, WorldMap } from "./map";
@@ -301,7 +301,11 @@ function readTrack(track: Track, at: number): Sample | null {
 }
 
 export function createWorld(options: WorldOptions): World {
-  const { canvas, map, assets, you, reduced } = options;
+  const { canvas, map, assets, reduced } = options;
+  // What this room calls the player. It starts as the wallet address and is replaced by
+  // whatever the welcome frame says, because a world that hands out opaque handles names
+  // the same player differently in its players list.
+  let you = options.you;
 
   const renderer = new THREE.WebGLRenderer({
     canvas,
@@ -327,7 +331,9 @@ export function createWorld(options: WorldOptions): World {
   addNightLights(scene, map.size, LOOK);
 
   const camera = new THREE.PerspectiveCamera(60, 1, 0.2, 520);
-  const rig = createCameraRig();
+  // The rig walks the buildings once a frame; the aim assist reads its list rather than
+  // walking them again for every drone in sight.
+  const rig = createCameraRig(HITSCAN_RANGE);
 
   const city = buildCity(map, assets, LOOK);
   scene.add(city);
@@ -343,6 +349,20 @@ export function createWorld(options: WorldOptions): World {
   const markers: Markers = createMarkers({ scene, reduced });
   /** Refilled each frame: a handful of readings for the beacons, the strip and the rings. */
   const sighted: DroneSight[] = [];
+
+  /**
+   * Every place a tap could mean, worked out once. The block does not move, so rebuilding
+   * this list on every frame only made work for the garbage collector.
+   */
+  const places: [Prompt, Place][] = [
+    [{ kind: "office" }, map.office],
+    [{ kind: "shop" }, map.shop],
+    ...map.landmarks.map((landmark, index): [Prompt, Place] => [
+      { kind: "landmark", index },
+      landmark,
+    ]),
+    ...map.courier.map((point, index): [Prompt, Place] => [{ kind: "courier", point: index }, point]),
+  ];
 
   const boxes: Box[] = map.buildings.map((building) => building.aabb);
   const blockers: Blocker[] = map.buildings.map((building) => ({
@@ -630,19 +650,9 @@ export function createWorld(options: WorldOptions): World {
 
   /** The nearest place the player could tap, or nothing when they are not standing on one. */
   function nearestPlace(): Prompt | null {
-    const candidates: [Prompt, Place][] = [
-      [{ kind: "office" }, map.office],
-      [{ kind: "shop" }, map.shop],
-      ...map.landmarks.map((landmark, index): [Prompt, Place] => [
-        { kind: "landmark", index },
-        landmark,
-      ]),
-      ...map.courier.map((point, index): [Prompt, Place] => [{ kind: "courier", point: index }, point]),
-    ];
-
     let found: Prompt | null = null;
     let closest = INTERACT_RANGE;
-    for (const [prompt, place] of candidates) {
+    for (const [prompt, place] of places) {
       const range = Math.hypot(place.x - body.x, place.z - body.z);
       if (range > closest) continue;
       closest = range;
@@ -810,9 +820,15 @@ export function createWorld(options: WorldOptions): World {
   const along = new THREE.Vector3();
   const UP = new THREE.Vector3(0, 1, 0);
 
-  /** True when a building stands between the player's eye and the drone, as on the server. */
+  /**
+   * True when a building stands between the player's eye and the drone, as on the server.
+   * Only the buildings within hitscan range of the player are looked at, which is the list
+   * the camera rig already built this frame: a shot is never longer than that, so a box
+   * further away than that cannot be on the line.
+   */
   function behindWall(from: THREE.Vector3, to: THREE.Vector3): boolean {
-    for (const building of blockers) {
+    const near = rig.scanned() ? rig.inReach() : blockers;
+    for (const building of near) {
       if (segmentHitsBox(from, to, building.aabb, 0, building.height)) return true;
     }
     return false;
@@ -1060,6 +1076,7 @@ export function createWorld(options: WorldOptions): World {
       for (const wire of frame.players) trackPlayer(wire, at);
       for (const wire of frame.drones) trackDrone(wire, at);
 
+      you = youOf(frame);
       const mine = frame.players.find((wire) => wire.id === you);
       if (mine) {
         predicted = { x: mine.x, z: mine.z };
@@ -1360,6 +1377,9 @@ export function createWorld(options: WorldOptions): World {
       boltMaterial.dispose();
       sparkMaterial.dispose();
       renderer.dispose();
+      // The canvas this drew on is thrown away with the world, so the context goes back to
+      // the phone now rather than when the garbage collector gets round to it.
+      renderer.forceContextLoss();
     },
   };
 }

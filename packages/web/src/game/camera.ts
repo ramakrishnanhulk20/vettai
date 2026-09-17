@@ -39,6 +39,9 @@ const MIN_BOOM = 1.2;
 const HIGH_LIFT = 3.5;
 const HIGH_BACK = 1.2;
 
+/** The shared list's radius when a caller does not say, in metres: the game's hitscan range. */
+const DEFAULT_REACH = 60;
+
 /** How many slices the head to camera line is walked in before the answer is narrowed. */
 const MARCH = 12;
 
@@ -59,6 +62,15 @@ export type CameraRig = {
     blockers: readonly Blocker[],
     deltaSeconds: number,
   ) => void;
+  /**
+   * The buildings within `reachMetres` of the player, as of the last update. The rig walks
+   * the whole list once a frame to find its own handful, so anything else that needs to
+   * ask about walls near the player reads this rather than walking the list again. It is
+   * the live array, not a copy: read it, do not keep it.
+   */
+  inReach: () => readonly Blocker[];
+  /** False until the first update, when nothing has been looked at yet. */
+  scanned: () => boolean;
   /** Drops the camera straight onto its mark, for a spawn or a respawn. */
   snap: () => void;
 };
@@ -87,7 +99,12 @@ function inside(spot: THREE.Vector3, blockers: readonly Blocker[]): boolean {
   return false;
 }
 
-export function createCameraRig(): CameraRig {
+/**
+ * @param reachMetres how far out the shared blocker list goes. Anything asking about a
+ * line from the player that is no longer than this can trust it, because a box the line
+ * touches must lie within that distance of where the line starts.
+ */
+export function createCameraRig(reachMetres: number = DEFAULT_REACH): CameraRig {
   const head = new THREE.Vector3();
   const full = new THREE.Vector3();
   const probe = new THREE.Vector3();
@@ -97,7 +114,9 @@ export function createCameraRig(): CameraRig {
   const back = new THREE.Vector3();
   const ahead = new THREE.Vector3();
   const nearby: Blocker[] = [];
+  const withinReach: Blocker[] = [];
 
+  let scanned = false;
   let boom = BOOM;
   /** Zero is the over the shoulder shot, one is looking down from above. */
   let high = 0;
@@ -149,9 +168,25 @@ export function createCameraRig(): CameraRig {
       full.copy(head).addScaledVector(back, wide);
       full.y = EYE + climb * wide;
 
+      // One walk of the buildings a frame, filling two lists: the few the boom could hit,
+      // and the wider set anything else this frame needs to ask about.
+      // The shared list can never be narrower than the camera's own, whatever reach the
+      // caller asked for, because the camera reads its list out of this one.
+      const outer = Math.max(reachMetres, wide + 2);
       nearby.length = 0;
+      withinReach.length = 0;
       for (const building of blockers) {
         const box = building.aabb;
+        if (
+          at.x > box.minX - outer &&
+          at.x < box.maxX + outer &&
+          at.z > box.minZ - outer &&
+          at.z < box.maxZ + outer
+        ) {
+          withinReach.push(building);
+        } else {
+          continue;
+        }
         if (
           at.x > box.minX - wide - 2 &&
           at.x < box.maxX + wide + 2 &&
@@ -161,6 +196,7 @@ export function createCameraRig(): CameraRig {
           nearby.push(building);
         }
       }
+      scanned = true;
 
       const free =
         nearby.length === 0 ? wide : Math.max(0, freeReach(nearby, climb, wide) - CLEARANCE);
@@ -212,6 +248,10 @@ export function createCameraRig(): CameraRig {
       look.set(at.x, LOOK_HEIGHT, at.z).addScaledVector(ahead, LOOK_AHEAD * (1 - high));
       camera.lookAt(look);
     },
+
+    inReach: () => withinReach,
+
+    scanned: () => scanned,
 
     snap() {
       // Boom is worked out from scratch on the next frame, which is where the shape of the

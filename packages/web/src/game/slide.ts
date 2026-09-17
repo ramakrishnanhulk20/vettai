@@ -84,6 +84,29 @@ export function slideAgainstBoxes(
 }
 
 /**
+ * The share of the line that is inside one pair of planes, narrowing the run kept so far.
+ * The two numbers live outside the call: this is the innermost thing the aim assist does,
+ * once per building per drone per frame, and an array of tuples per call was the largest
+ * thing the frame handed to the garbage collector.
+ */
+let near = 0;
+let far = 1;
+
+function narrow(start: number, delta: number, low: number, high: number): boolean {
+  if (Math.abs(delta) < 1e-12) return start >= low && start <= high;
+  const first = (low - start) / delta;
+  const second = (high - start) / delta;
+  if (first < second) {
+    if (first > near) near = first;
+    if (second < far) far = second;
+  } else {
+    if (second > near) near = second;
+    if (first < far) far = first;
+  }
+  return near <= far;
+}
+
+/**
  * The slab test, as on the server: the share of the line inside the box on each axis, and
  * all three shares have to overlap for the line to touch the box. `minY` to `maxY` is how
  * tall the building stands, so a shot over the roof is not blocked.
@@ -95,26 +118,11 @@ export function segmentHitsBox(
   minY: number,
   maxY: number,
 ): boolean {
-  const slabs: [number, number, number, number][] = [
-    [a.x, b.x - a.x, aabb.minX, aabb.maxX],
-    [a.y, b.y - a.y, minY, maxY],
-    [a.z, b.z - a.z, aabb.minZ, aabb.maxZ],
-  ];
-
-  let near = 0;
-  let far = 1;
-  for (const [start, delta, low, high] of slabs) {
-    if (Math.abs(delta) < 1e-12) {
-      if (start < low || start > high) return false;
-      continue;
-    }
-    const first = (low - start) / delta;
-    const second = (high - start) / delta;
-    near = Math.max(near, Math.min(first, second));
-    far = Math.min(far, Math.max(first, second));
-    if (near > far) return false;
-  }
-  return true;
+  near = 0;
+  far = 1;
+  if (!narrow(a.x, b.x - a.x, aabb.minX, aabb.maxX)) return false;
+  if (!narrow(a.y, b.y - a.y, minY, maxY)) return false;
+  return narrow(a.z, b.z - a.z, aabb.minZ, aabb.maxZ);
 }
 
 /** The nearest target inside a cone around `dir`. `coneRadians` is the half angle. */

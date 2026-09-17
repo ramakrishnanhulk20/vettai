@@ -534,6 +534,28 @@ export function createMarkers({ scene, reduced }: MarkersOptions): Markers {
   const up = new THREE.Vector3();
   const forward = new THREE.Vector3();
 
+  /**
+   * The drones in sight this frame, nearest first. The list and the readings in it are kept
+   * between frames and written over, because this runs sixty times a second and a fresh
+   * array of fresh objects each time is pure work for the garbage collector.
+   */
+  type Sighting = { x: number; y: number; z: number; range: number };
+  const sightings: Sighting[] = [];
+  const seen: Sighting[] = [];
+
+  function noteSighting(x: number, y: number, z: number, range: number): void {
+    let slot = sightings[seen.length];
+    if (!slot) {
+      slot = { x: 0, y: 0, z: 0, range: 0 };
+      sightings.push(slot);
+    }
+    slot.x = x;
+    slot.y = y;
+    slot.z = z;
+    slot.range = range;
+    seen.push(slot);
+  }
+
   function hideQuad(
     position: THREE.BufferAttribute,
     colour: THREE.BufferAttribute,
@@ -605,11 +627,11 @@ export function createMarkers({ scene, reduced }: MarkersOptions): Markers {
 
       // The live drones, nearest first: the strip shows the closest few, the scene rings
       // them, and a hunt objective measures itself against the very nearest.
-      const seen: { x: number; y: number; z: number; range: number }[] = [];
+      seen.length = 0;
       for (const drone of drones) {
         const range = Math.hypot(drone.x - at.x, drone.z - at.z);
         if (range > DRONE_SIGHT_M) continue;
-        seen.push({ x: drone.x, y: drone.y, z: drone.z, range });
+        noteSighting(drone.x, drone.y, drone.z, range);
       }
       seen.sort((a, b) => a.range - b.range);
 
