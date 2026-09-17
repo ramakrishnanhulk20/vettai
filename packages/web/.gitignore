@@ -6,3 +6,4 @@ next-env.d.ts
 
 # fumadocs mdx writes its index here on every build
 /.source
+test-results/

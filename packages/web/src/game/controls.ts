@@ -21,7 +21,13 @@ const DEAD_ZONE = 8;
 const TURN_PER_SCREEN = Math.PI * 2;
 const PITCH_PER_SCREEN = 1.2;
 const PITCH_MIN = -0.35;
-const PITCH_MAX = 0.6;
+
+/**
+ * How far up the camera may tilt. An engaged drone closes to about six metres and hangs six
+ * metres up, which is 36 degrees above the eye, and the old ceiling of 0.6 rad put the thing
+ * shooting at you above the top of the screen with no way to look at it.
+ */
+const PITCH_MAX = 0.9;
 
 /** A look drag has to travel this far before it turns anything, so a tap is never a turn. */
 const LOOK_DEAD_ZONE = 3;

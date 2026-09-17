@@ -1,3 +1,8 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { getHealth } from "@/lib/api";
+
 export type Payout = {
   to: string;
   nim: string;
@@ -25,12 +30,29 @@ type Props = {
 export default function PayoutReceipt({ payout = null, settled }: Props) {
   const shown = payout ?? EXAMPLE;
   const isExample = payout === null;
+  // The chain comes off the same health call the game reads, so the receipt and the chip
+  // row at the top of the page can never name two different networks.
+  const [chain, setChain] = useState("Nimiq");
+  const count = Number(settled.replace(/,/g, ""));
+
+  useEffect(() => {
+    let alive = true;
+    void getHealth().then((result) => {
+      if (!alive || !result.ok) return;
+      setChain(result.data.network === "MainAlbatross" ? "Nimiq mainnet" : "Nimiq testnet");
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   return (
     <div className="relative w-full max-w-[22rem]">
       <div className="receipt-card relative -rotate-[1.6deg] bg-paper px-6 pb-12 pt-6 text-night shadow-[0_40px_80px_-40px_rgba(0,0,0,0.9)]">
         <div className="flex items-start justify-between">
-          <span className="label-type text-night/50">Nimiq testnet</span>
+          <span className="label-type text-night/50" data-testid="receipt-network">
+            {chain}
+          </span>
           <span aria-hidden className="h-3 w-3 bg-hunt" />
         </div>
 
@@ -64,10 +86,14 @@ export default function PayoutReceipt({ payout = null, settled }: Props) {
         )}
       </div>
 
-      <p className="mt-5 max-w-[24ch] text-sm text-paper/45">
-        <span className="font-mono tabular-nums text-paper">{settled}</span> payouts have
-        settled this way so far.
-      </p>
+      {/* Nobody needs telling that nothing has been paid yet. The line waits for a number
+          worth saying. */}
+      {Number.isFinite(count) && count > 0 && (
+        <p className="mt-5 max-w-[24ch] text-sm text-paper/45">
+          <span className="font-mono tabular-nums text-paper">{settled}</span> payouts have
+          settled this way so far.
+        </p>
+      )}
     </div>
   );
 }

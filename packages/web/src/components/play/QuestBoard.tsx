@@ -23,7 +23,17 @@ import {
 } from "@/game/markers";
 import Sheet, { SheetRow } from "./Sheet";
 import type { ClaimsFeed } from "./useClaims";
-import { explorer, localMoment, nim, shortHash, streakDay, utcDate, type Network } from "./format";
+import {
+  explorer,
+  localMoment,
+  nim,
+  refusalText,
+  shortHash,
+  streakDay,
+  utcDate,
+  type Network,
+} from "./format";
+import styles from "./play.module.css";
 
 /**
  * The board at the Vettai office: what today asks of you, what it pays, and the one door
@@ -68,44 +78,58 @@ const LUNA = 100_000;
 /** The states the treasury has already committed money to. A hold was never granted. */
 const GRANTED = new Set<ClaimView["state"]>(["queued", "sending", "sent", "paid"]);
 
+/** The same, plus the holds. What a player would count as spoken for, cap or no cap. */
+const SPOKEN_FOR = new Set<ClaimView["state"]>([...GRANTED, "held"]);
+
 /**
- * What is left of this wallet's day. The claims list is the same evidence the server
- * counts the cap from, so the board can say it without being told. A world that does not
- * publish its cap gets no line at all rather than a guess.
+ * What is left of this wallet's day, in luna. The claims list is the same evidence the
+ * server counts the cap from, so the board can work it out without being told. A world
+ * that does not publish its cap gets null, and the board then says nothing rather than
+ * guessing.
+ *
+ * `withHeld` counts the day's held claims as spent. The server does not, and it is right
+ * not to, because a hold is money it never granted. A sentence to a player is a different
+ * job: their day is gone either way, and tomorrow is when they see it.
  */
-function payableLeft(rows: ClaimView[], capNim: string | null, today: string): string | null {
+function payableLeftLuna(
+  rows: ClaimView[],
+  capNim: string | null,
+  today: string,
+  withHeld = false,
+): number | null {
   if (capNim === null) return null;
   const cap = Number(capNim);
   if (!Number.isFinite(cap) || cap <= 0) return null;
 
+  const counted = withHeld ? SPOKEN_FOR : GRANTED;
   const used = rows
-    .filter((row) => row.createdAt.slice(0, 10) === today && GRANTED.has(row.state))
+    .filter((row) => row.createdAt.slice(0, 10) === today && counted.has(row.state))
     .reduce((sum, row) => sum + Number(row.amountLuna), 0);
 
-  return `Today: ${nim(Math.max(0, cap * LUNA - used))} of ${capNim} NIM still payable`;
+  return Math.max(0, cap * LUNA - used);
 }
 
 type Busy = { questId: string; step: "signing" | "sending" };
 
+/**
+ * How far a job has got. The text is empty where the wayline below the row already says
+ * the same thing in bigger type, which is most of a row's height for no extra meaning.
+ */
 function progressOf(quest: QuestView): { done: number; text: string } {
   if (quest.kind === "landmarks") {
-    const reached = quest.visited?.filter(Boolean).length ?? quest.progress;
-    return { done: reached, text: `${reached} of ${quest.target} reached` };
+    return { done: quest.visited?.filter(Boolean).length ?? quest.progress, text: "" };
   }
   if (quest.kind === "hunt") {
-    const down = Math.min(quest.progress, quest.target);
-    return { done: down, text: `${down} of ${quest.target} drones down` };
+    return { done: Math.min(quest.progress, quest.target), text: "" };
   }
   if (quest.kind === "courier") {
     return {
       done: quest.progress,
-      text: quest.carrying
-        ? "Parcel in hand. Take it to the drop point"
-        : "Pick the parcel up, then deliver it inside two minutes",
+      text: quest.carrying ? "Two minutes to the drop" : "Two minutes from pickup to drop",
     };
   }
   if (quest.kind === "landlord") {
-    return { done: quest.progress, text: "Waiting for the treasury's daily read of your stake" };
+    return { done: quest.progress, text: "The treasury reads your stake once a day" };
   }
   return { done: quest.progress, text: "Turning up is the whole job" };
 }
@@ -115,8 +139,8 @@ export type Wayline = {
   sentence: string;
   /** Metres from where the player is standing, or null when the target is a live drone. */
   range: string | null;
-  /** The courier's two ends, each with its own distance. */
-  legs: { text: string; range: string | null }[];
+  /** The courier's two ends, each as a finished phrase with its own distance in it. */
+  legs: { text: string }[];
 };
 
 /**
@@ -139,10 +163,14 @@ function waylineFor(
   if (quest.kind === "courier" && quest.route && map) {
     const from = map.courier[quest.route.from];
     const to = map.courier[quest.route.to];
-    if (from) {
-      legs.push({ text: `pick up at P${quest.route.from + 1}`, range: rangeTo(from.x, from.z) });
-    }
-    if (to) legs.push({ text: `drop at P${quest.route.to + 1}`, range: rangeTo(to.x, to.z) });
+    // The point numbers mean nothing without a map, and there is no map. The distance is
+    // the whole of the meaning, so the distance is the whole of the line.
+    const leg = (label: string, tail: string, at: { x: number; z: number }) => {
+      const range = rangeTo(at.x, at.z);
+      return { text: range === null ? label : `${label} ${range} ${tail}` };
+    };
+    if (from) legs.push(leg("pick up", "away", from));
+    if (to) legs.push(leg("drop it", "on", to));
   }
 
   return {
@@ -152,19 +180,59 @@ function waylineFor(
   };
 }
 
+/** The next midnight UTC, which is when the day rolls over and the caps lift. */
+function nextUtcMidnight(from: number): number {
+  const now = new Date(from);
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+}
+
 /** Midnight UTC in the reader's own clock, which is when a capped claim is looked at again. */
 function tomorrowLocal(): string {
-  const now = new Date();
-  const midnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
-  return localMoment(new Date(midnight));
+  return localMoment(new Date(nextUtcMidnight(Date.now())));
+}
+
+/**
+ * What is left of the day, in the reader's own clock. The streak is the whole reason to
+ * come back tomorrow and no screen said when tomorrow starts. It is read once a minute:
+ * a countdown ticking at a second is a timer, and a timer says hurry.
+ */
+function DayLeft() {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const midnight = nextUtcMidnight(now);
+  const left = Math.max(0, midnight - now);
+  const hours = Math.floor(left / 3_600_000);
+  const minutes = Math.floor((left % 3_600_000) / 60_000);
+  const clock = new Date(midnight).toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+
+  return (
+    <p className={`pb-2 text-paper/55 ${styles.dayLine}`} data-testid="day-left">
+      Today ends in {hours}h {minutes}m, {clock} your time
+    </p>
+  );
 }
 
 function heldLine(reason: string | null): string {
-  if (reason === "pool") return "Pool exhausted, held for review";
-  if (reason === "ip cap") {
-    return `Held until tomorrow: too many wallets from this connection today. Looked at again after ${tomorrowLocal()}`;
+  if (reason === "pool") {
+    return "The prize pool is empty. Held for review, and paid by hand once the pool is topped up";
   }
-  return `Held until tomorrow: you reached today's cap. Looked at again after ${tomorrowLocal()}`;
+  if (reason === "ip cap") {
+    return `${refusalText("ip cap")} Looked at again after ${tomorrowLocal()}`;
+  }
+  if (reason === "daily cap" || reason === null) {
+    return `Held until tomorrow: you reached today's cap. Looked at again after ${tomorrowLocal()}`;
+  }
+  // A hold the treasury invented after this build went out. Saying the cap did it would
+  // be a guess, so the honest line is that it is waiting and where the reason came from.
+  return `Held for review: ${reason}. The treasury looks at it again after ${tomorrowLocal()}`;
 }
 
 export default function QuestBoard({
@@ -219,7 +287,10 @@ export default function QuestBoard({
       if (!alive()) return;
       if (!challenge.ok) {
         setBusy(null);
-        setTrouble({ questId: quest.id, text: `${challenge.error} Nothing was sent.` });
+        setTrouble({
+          questId: quest.id,
+          text: `${refusalText(challenge.code, challenge.error)} Nothing was sent.`,
+        });
         void reload();
         return;
       }
@@ -253,7 +324,7 @@ export default function QuestBoard({
       setBusy(null);
 
       if (!posted.ok) {
-        setTrouble({ questId: quest.id, text: posted.error });
+        setTrouble({ questId: quest.id, text: refusalText(posted.code, posted.error) });
       }
       await Promise.all([claims.refresh(), reload()]);
     },
@@ -267,7 +338,27 @@ export default function QuestBoard({
     (quest) => quest.state === "done" && !claims.byQuest.has(quest.id) && quest.rewardLuna !== "0",
   );
   const readyLuna = ready.reduce((sum, quest) => sum + Number(quest.rewardLuna), 0);
-  const capLine = payableLeft(claims.claims, dailyCapNim, today);
+  // Two readings off the same cap. The button's warning asks what the treasury would grant
+  // right now, which a held claim has no part in. The line at the top of the board is what
+  // a person would say out loud, and saying "5 of 5 still payable" above a payout that was
+  // just held reads as the board arguing with itself.
+  const capLeftLuna = payableLeftLuna(claims.claims, dailyCapNim, today);
+  const capLineLuna = payableLeftLuna(claims.claims, dailyCapNim, today, true);
+  const heldTodayLuna = claims.claims
+    .filter((row) => row.createdAt.slice(0, 10) === today && row.state === "held")
+    .reduce((sum, row) => sum + Number(row.amountLuna), 0);
+  // The server counts a streak day off its own quest rows, done as well as claimed, and a
+  // day the cap cut to nothing leaves no claim row at all. So its number wins whenever it
+  // sends one; the claims count is only the fallback for a world that does not.
+  const streakToday =
+    sorted.find((quest) => quest.kind === "streak")?.streakDay ??
+    streakDay(claims.claims, today);
+  const capLine =
+    capLineLuna === null
+      ? null
+      : heldTodayLuna > 0
+        ? `Today: ${nim(capLineLuna)} of ${dailyCapNim} NIM still payable, ${nim(heldTodayLuna)} NIM already in tomorrow's queue`
+        : `Today: ${nim(capLineLuna)} of ${dailyCapNim} NIM still payable`;
 
   return (
     <Sheet
@@ -278,6 +369,8 @@ export default function QuestBoard({
       reduced={reduced}
       onClose={onClose}
     >
+      <DayLeft />
+
       {capLine && (
         <p className="label-type pb-3 text-paper/40" data-testid="cap-line">
           {capLine}
@@ -308,6 +401,33 @@ export default function QuestBoard({
         </span>
       </motion.div>
 
+      {/* The money first. The headline above says what is ready, so the button that
+          collects it stands directly under it and the jobs wait their turn below. */}
+      {ready.length > 0 && (
+        <div className="border-b border-line py-4" data-testid="claim-now">
+          {ready.map((quest, index) => (
+            <div key={quest.id} className={index === 0 ? "" : "mt-4"}>
+              <p className="label-type text-paper/40">{NAMES[quest.kind]}</p>
+              <div className="mt-2">
+                <State
+                  quest={quest}
+                  claim={null}
+                  busy={busy?.questId === quest.id ? busy.step : null}
+                  network={network}
+                  capLeftLuna={capLeftLuna}
+                  reduced={reduced}
+                  onClaim={() => void claim(quest)}
+                  onCancel={cancel}
+                />
+                {trouble?.questId === quest.id && (
+                  <p className="mt-2 text-sm text-bad">{trouble.text}</p>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="flex items-center justify-between gap-3 pt-3">
         <span className="label-type text-paper/35">
           {tracked === null ? "Tracking the next job for you" : "Tracking your pick"}
@@ -317,7 +437,7 @@ export default function QuestBoard({
             type="button"
             onClick={() => onTrack(null)}
             data-testid="track-auto"
-            className="label-type rounded-btn border border-line px-3 py-1.5 text-paper/60 transition-colors duration-200 hover:border-hunt hover:text-paper"
+            className={`inline-flex items-center justify-center rounded-btn border border-line px-4 text-paper/60 transition-colors duration-200 hover:border-hunt hover:text-paper ${styles.action}`}
           >
             Auto
           </button>
@@ -335,8 +455,10 @@ export default function QuestBoard({
               claim={claims.byQuest.get(quest.id) ?? null}
               busy={busy?.questId === quest.id ? busy.step : null}
               trouble={trouble?.questId === quest.id ? trouble.text : null}
-              streak={quest.kind === "streak" ? streakDay(claims.claims, today) : 0}
+              streak={quest.kind === "streak" ? streakToday : 0}
               network={network}
+              capLeftLuna={capLeftLuna}
+              claimAbove={ready.some((row) => row.id === quest.id)}
               reduced={reduced}
               celebrating={celebrate !== null && claims.byQuest.get(quest.id)?.id === celebrate}
               onClaim={() => void claim(quest)}
@@ -375,6 +497,10 @@ type RowProps = {
   trouble: string | null;
   streak: number;
   network: Network | null;
+  /** What the day's cap will still pay, in luna, or null on a world that does not say. */
+  capLeftLuna: number | null;
+  /** True when this job's claim button is already standing under the headline. */
+  claimAbove: boolean;
   reduced: boolean;
   celebrating: boolean;
   onClaim: () => void;
@@ -391,6 +517,8 @@ function Row({
   trouble,
   streak,
   network,
+  capLeftLuna,
+  claimAbove,
   reduced,
   celebrating,
   onClaim,
@@ -419,7 +547,9 @@ function Row({
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <p className="text-[0.95rem] leading-snug text-paper">{name}</p>
-          <p className="label-type mt-1.5 text-paper/45">{progress.text}</p>
+          {progress.text !== "" && (
+            <p className="label-type mt-1.5 text-paper/45">{progress.text}</p>
+          )}
         </div>
         <div className="shrink-0 text-right">
           <p className="display-type text-2xl leading-none text-hunt">{nim(quest.rewardLuna)}</p>
@@ -439,7 +569,9 @@ function Row({
         </div>
       )}
 
-      {wayline && (
+      {/* A job whose claim is already standing at the top of the board has nowhere left to
+          be pointed at, so it keeps its name and its money and nothing else. */}
+      {wayline && !claimAbove && (
         <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2">
           <p className="display-type text-[1.05rem] uppercase leading-none tracking-[0.01em] text-paper">
             {wayline.sentence}
@@ -454,7 +586,7 @@ function Row({
               type="button"
               onClick={onTrack}
               data-testid={`track-${quest.kind}`}
-              className={`label-type ml-auto rounded-btn px-3 py-2 transition-colors duration-200 ${
+              className={`ml-auto inline-flex items-center justify-center rounded-btn px-4 transition-colors duration-200 ${styles.action} ${
                 tracking
                   ? "bg-hunt text-night"
                   : "border border-line text-paper/60 hover:border-hunt hover:text-paper"
@@ -466,25 +598,30 @@ function Row({
         </div>
       )}
 
-      {wayline && wayline.legs.length > 0 && (
+      {wayline && !claimAbove && wayline.legs.length > 0 && (
         <p className="label-type mt-2 text-paper/45" data-testid={`legs-${quest.kind}`}>
-          {wayline.legs
-            .map((leg) => (leg.range === null ? leg.text : `${leg.text} ${leg.range}`))
-            .join(", ")}
+          {wayline.legs.map((leg) => leg.text).join(", ")}
         </p>
       )}
 
       <div className={quiet ? "" : "mt-3"}>
-        <State
-          quest={quest}
-          claim={claim}
-          busy={busy}
-          network={network}
-          reduced={reduced}
-          onClaim={onClaim}
-          onCancel={onCancel}
-        />
-        {trouble && <p className="mt-2 text-sm text-bad">{trouble}</p>}
+        {claimAbove ? (
+          <p className="text-sm text-hunt">Ready. The claim is at the top of the board.</p>
+        ) : (
+          <>
+            <State
+              quest={quest}
+              claim={claim}
+              busy={busy}
+              network={network}
+              capLeftLuna={capLeftLuna}
+              reduced={reduced}
+              onClaim={onClaim}
+              onCancel={onCancel}
+            />
+            {trouble && <p className="mt-2 text-sm text-bad">{trouble}</p>}
+          </>
+        )}
       </div>
     </motion.div>
   );
@@ -495,10 +632,14 @@ function State({
   claim,
   busy,
   network,
+  capLeftLuna,
   reduced,
   onClaim,
   onCancel,
-}: Omit<RowProps, "trouble" | "streak" | "celebrating" | "wayline" | "tracking" | "onTrack">) {
+}: Omit<
+  RowProps,
+  "trouble" | "streak" | "celebrating" | "wayline" | "tracking" | "onTrack" | "claimAbove"
+>) {
   if (busy) {
     return (
       <div className="flex items-center justify-between gap-3">
@@ -512,7 +653,7 @@ function State({
           <button
             type="button"
             onClick={onCancel}
-            className="label-type rounded-btn border border-line px-3 py-2 text-paper/55 transition-colors duration-200 hover:border-hunt hover:text-paper"
+            className={`inline-flex items-center justify-center rounded-btn border border-line px-4 text-paper/55 transition-colors duration-200 hover:border-hunt hover:text-paper ${styles.action}`}
           >
             Cancel
           </button>
@@ -555,10 +696,16 @@ function State({
 
     if (claim.state === "failed") {
       return (
-        <p className="text-sm text-bad">
-          That payout did not go through. Nothing was taken from you and the treasury keeps the
-          record; ask in Skool and it is paid by hand.
-        </p>
+        <div>
+          <p className="text-sm text-bad">
+            That payout did not go through. Nothing was taken from you and the treasury keeps the
+            record: post in the Nimiq Mini Apps community on Skool with the memo below and it is
+            paid by hand.
+          </p>
+          <p className="mt-1.5 font-mono text-[11px] text-paper/70" data-testid="failed-memo">
+            {claim.memo}
+          </p>
+        </div>
       );
     }
 
@@ -585,20 +732,38 @@ function State({
   }
 
   if (quest.state === "done") {
+    // The cap is a delay, not a refusal, and the button says which of the two this claim
+    // is about to be. Promising a payment the day's cap would hold is the one thing this
+    // screen may not do.
+    const held = capLeftLuna !== null && Number(quest.rewardLuna) > capLeftLuna;
+
     return (
-      <motion.button
-        type="button"
-        onClick={onClaim}
-        whileHover={reduced ? undefined : { scale: 1.015 }}
-        whileTap={reduced ? undefined : { scale: 0.985 }}
-        data-testid={`claim-${quest.kind}`}
-        className="group flex w-full items-center justify-between gap-3 rounded-btn bg-hunt px-4 py-3 text-left font-medium text-night"
-      >
-        <span>Claim {nim(quest.rewardLuna)} NIM</span>
-        <span aria-hidden className="transition-transform duration-300 group-hover:translate-x-1">
-          &#8594;
-        </span>
-      </motion.button>
+      <>
+        <motion.button
+          type="button"
+          onClick={onClaim}
+          whileHover={reduced ? undefined : { scale: 1.015 }}
+          whileTap={reduced ? undefined : { scale: 0.985 }}
+          data-testid={`claim-${quest.kind}`}
+          className={`group flex w-full items-center justify-between gap-3 rounded-btn px-4 py-3.5 text-left font-medium ${
+            held ? "border border-hunt/60 bg-hunt/12 text-paper" : "bg-hunt text-night"
+          }`}
+        >
+          <span>
+            Claim {nim(quest.rewardLuna)} NIM{held ? ", held until tomorrow" : ""}
+          </span>
+          <span aria-hidden className="transition-transform duration-300 group-hover:translate-x-1">
+            &#8594;
+          </span>
+        </motion.button>
+        {held && (
+          <p className="mt-2 text-sm text-paper/70" data-testid={`held-ahead-${quest.kind}`}>
+            {capLeftLuna === 0
+              ? "This wallet has used today's cap, so the treasury holds this one and pays it after midnight UTC."
+              : `Only ${nim(capLeftLuna ?? 0)} NIM of today's cap is left, so the treasury holds this one and pays it after midnight UTC.`}
+          </p>
+        )}
+      </>
     );
   }
 

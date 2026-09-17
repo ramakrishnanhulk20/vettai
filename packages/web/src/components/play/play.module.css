@@ -78,8 +78,8 @@
 
 .range {
   font-family: var(--font-mono);
-  font-size: 0.75rem;
-  letter-spacing: 0.06em;
+  font-size: 0.6875rem;
+  letter-spacing: 0.04em;
   color: var(--hunt);
   white-space: nowrap;
 }
@@ -88,11 +88,72 @@
   content: var(--objective-range, "");
 }
 
+/* What the job pays. Same mono as the metres, a shade brighter, because the amount is the
+   reason anybody walks anywhere in this city. */
+.reward {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.04em;
+  color: var(--hunt);
+  white-space: nowrap;
+}
+
+/* The line under the board's date. It says the same things the label type says everywhere
+   else, with the tracking pulled in so the hours and the clock reading stay on one line on
+   a 390 pixel phone. */
+.dayLine {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.6875rem;
+}
+
+/* The day's jobs, lifted off the street the same way the objective line is. */
+.strip {
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+
+/* Anything a thumb has to hit. Fourteen pixels of label and a 44 pixel box is the floor
+   for a control on a phone, and the whole label is declared here rather than beside
+   .label-type, which would otherwise win the size back. */
+.action {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 0.875rem;
+  min-height: 44px;
+  min-width: 44px;
+}
+
+/* The same box for a control that keeps its own type, like the round trip reading. */
+.tap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  min-width: 44px;
+}
+
 /* The compass strip. Two hundred pixels of city, a hundred of them to each side. Every
    tick is parked with a transform the render loop writes, never with a React render, and
    the rule underneath fades at both ends so the strip reads as a horizon, not a box.
    Nothing here may declare the tick variables: a value set on this element would shadow
    the one the render loop writes on the root, and every tick would sit dark forever. */
+
+/* The strip's own night, so the ticks read over a lit shop front. It is a pseudo element
+   rather than a background on the box itself, because the box has to stay transparent at
+   the edges or the horizon would read as a card. */
+.compass::before {
+  content: "";
+  position: absolute;
+  inset: -12px -34px -10px;
+  background: radial-gradient(
+    58% 130% at 50% 34%,
+    rgba(11, 15, 26, 0.72) 0%,
+    rgba(11, 15, 26, 0) 100%
+  );
+  pointer-events: none;
+}
 
 .compassRule {
   position: absolute;

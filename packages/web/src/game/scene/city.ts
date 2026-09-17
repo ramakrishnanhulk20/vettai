@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import type { BuildingAsset, CityAssets } from "./assets";
 import type { WorldMap } from "../map";
 import { glowTexture, type Look, noiseTexture, PALETTE } from "./materials";
@@ -304,6 +305,94 @@ function place(map: WorldMap, assets: CityAssets): Placed[] {
   return placed;
 }
 
+/**
+ * How wide a merged block of buildings is, in lots. Twenty building types meant twenty
+ * instanced meshes, and because each type's instances were scattered across the whole map
+ * every one of them was inside the frame from anywhere in the city: twenty draw calls that
+ * frustum culling could never take away. Every model shares one texture, so the type's own
+ * tint goes into the vertices instead and the block merges into a single mesh that stands
+ * in one place and drops out of the frame like anything else.
+ */
+const TILE_LOTS = 3;
+
+/** The attributes a merged facade carries. Anything else a model ships with is dropped. */
+const FACADE_ATTRIBUTES = ["position", "normal", "uv", "color"] as const;
+
+/**
+ * One building, ready to weld: standing where it stands, with its type's colour written
+ * into its vertices so that every block in the city can share one material.
+ */
+function facadeGeometry(item: Placed): THREE.BufferGeometry {
+  const source = item.asset.geometry;
+  const geometry = new THREE.BufferGeometry();
+  const count = source.getAttribute("position").count;
+
+  for (const name of FACADE_ATTRIBUTES) {
+    const attribute = source.getAttribute(name);
+    if (attribute) geometry.setAttribute(name, attribute.clone());
+  }
+  if (source.index) geometry.setIndex(source.index.clone());
+
+  // The second look already shades the wall from the pavement up; the first look has no
+  // colours at all. Either way the type's tint is multiplied in here and the shared
+  // material is left white, which is exactly what the per type material was doing.
+  const tint = item.asset.material.color;
+  const existing = geometry.getAttribute("color");
+  const shades = new Float32Array(count * 3);
+  for (let point = 0; point < count; point += 1) {
+    const r = existing ? existing.getX(point) : 1;
+    const g = existing ? existing.getY(point) : 1;
+    const b = existing ? existing.getZ(point) : 1;
+    shades[point * 3] = r * tint.r;
+    shades[point * 3 + 1] = g * tint.g;
+    shades[point * 3 + 2] = b * tint.b;
+  }
+  geometry.setAttribute("color", new THREE.BufferAttribute(shades, 3));
+
+  geometry.applyMatrix4(item.matrix);
+  return geometry;
+}
+
+/** The whole block, as one mesh per tile of the map rather than one per building type. */
+function facades(map: WorldMap, placed: Placed[]): THREE.Mesh[] {
+  const first = placed[0];
+  if (!first) return [];
+
+  const span = (map.lotSize + map.street) * TILE_LOTS;
+  const tiles = new Map<string, THREE.BufferGeometry[]>();
+  for (const item of placed) {
+    const column = Math.floor((item.centre.x + map.size / 2) / span);
+    const row = Math.floor((item.centre.z + map.size / 2) / span);
+    const key = `${column}:${row}`;
+    const list = tiles.get(key);
+    const geometry = facadeGeometry(item);
+    if (list) list.push(geometry);
+    else tiles.set(key, [geometry]);
+  }
+
+  // Every model points at the same colormap and none of them offsets it, so one material
+  // carries the lot. The tint that used to live on it now lives in the vertices.
+  const shared = first.asset.material.clone();
+  shared.color.setHex(0xffffff);
+  shared.vertexColors = true;
+
+  const meshes: THREE.Mesh[] = [];
+  for (const [key, parts] of tiles) {
+    const indexed = parts.every((part) => part.index !== null);
+    const ready = indexed ? parts : parts.map((part) => part.toNonIndexed());
+    const welded = mergeGeometries(ready, false);
+    if (!welded) continue;
+    for (const part of parts) part.dispose();
+    if (!indexed) for (const part of ready) part.dispose();
+
+    welded.computeBoundingSphere();
+    const mesh = new THREE.Mesh(welded, shared);
+    mesh.name = `facades ${key}`;
+    meshes.push(mesh);
+  }
+  return meshes;
+}
+
 const FACES: { rotation: number; axis: "x" | "z"; sign: number }[] = [
   { rotation: 0, axis: "z", sign: 1 },
   { rotation: Math.PI, axis: "z", sign: -1 },
@@ -579,6 +668,41 @@ function streetLamps(map: WorldMap): THREE.InstancedMesh {
   return lamps;
 }
 
+/** The accent, the one colour the whole game marks its own things with. */
+const SAFE_RING_COLOUR = 0xff6a2b;
+const SAFE_RING_WIDTH = 0.22;
+
+/**
+ * The no-fire circle around the office, drawn on the road as a thin accent line. The rule
+ * is the server's: no shot is accepted from inside it and no bolt crosses it, and until
+ * this ring existed the only way to learn that was to pull the trigger and watch nothing
+ * happen. One draw call, and it culls with the corner of the block the office stands on.
+ *
+ * @param radius metres, as the world server reports them. Nothing here assumes a number.
+ */
+export function safeCircle(at: { x: number; z: number }, radius: number): THREE.Mesh {
+  const ring = new THREE.RingGeometry(radius - SAFE_RING_WIDTH, radius + SAFE_RING_WIDTH, 96);
+  ring.rotateX(-Math.PI / 2);
+
+  const mesh = new THREE.Mesh(
+    ring,
+    new THREE.MeshBasicMaterial({
+      color: SAFE_RING_COLOUR,
+      transparent: true,
+      opacity: 0.22,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false,
+    }),
+  );
+  mesh.name = "safeCircle";
+  // Just clear of the road so it never fights the tarmac for the same pixels, and under
+  // the beams and the labels, which are drawn over the whole city.
+  mesh.position.set(at.x, 0.05, at.z);
+  mesh.renderOrder = 1;
+  return mesh;
+}
+
 export function buildCity(map: WorldMap, assets: CityAssets, look: Look = "v1"): THREE.Group {
   const city = new THREE.Group();
   city.name = "city";
@@ -631,20 +755,7 @@ export function buildCity(map: WorldMap, assets: CityAssets, look: Look = "v1"):
   }
 
   const placed = place(map, assets);
-  const byType = new Map<BuildingAsset, Placed[]>();
-  for (const item of placed) {
-    const list = byType.get(item.asset);
-    if (list) list.push(item);
-    else byType.set(item.asset, [item]);
-  }
-
-  for (const [asset, items] of byType) {
-    const mesh = new THREE.InstancedMesh(asset.geometry, asset.material, items.length);
-    items.forEach((item, index) => mesh.setMatrixAt(index, item.matrix));
-    mesh.instanceMatrix.needsUpdate = true;
-    mesh.computeBoundingSphere();
-    city.add(mesh);
-  }
+  for (const block of facades(map, placed)) city.add(block);
 
   city.add(streetLamps(map));
   if (look === "v2") city.add(lampPools(map));
@@ -667,6 +778,10 @@ export function animateCity(city: THREE.Group, elapsed: number): void {
 export function disposeCity(city: THREE.Group, assets: CityAssets): void {
   const shared = new Set<THREE.BufferGeometry>(assets.buildings.map((asset) => asset.geometry));
   const keep = new Set<THREE.Material>(assets.buildings.map((asset) => asset.material));
+  // The facades are welded here but their texture is not: it came with the assets and
+  // goes back with them, so freeing it twice is not this function's to do.
+  const keepMaps = new Set<THREE.Texture>();
+  for (const asset of assets.buildings) if (asset.material.map) keepMaps.add(asset.material.map);
 
   city.traverse((child) => {
     const mesh = child as THREE.Mesh;
@@ -676,7 +791,7 @@ export function disposeCity(city: THREE.Group, assets: CityAssets): void {
     for (const material of materials) {
       if (keep.has(material)) continue;
       const textured = material as THREE.MeshStandardMaterial;
-      textured.map?.dispose();
+      if (textured.map && !keepMaps.has(textured.map)) textured.map.dispose();
       textured.roughnessMap?.dispose();
       material.dispose();
     }

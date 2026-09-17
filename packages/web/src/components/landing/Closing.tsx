@@ -135,6 +135,10 @@ export default function Closing() {
                 href={href}
                 {...(href.startsWith("http") ? { target: "_blank", rel: "noreferrer" } : {})}
                 className="group relative label-type text-paper/55 transition-colors duration-300 hover:text-paper"
+                // Eleven pixels was measured on a phone and it is under the floor for
+                // something a thumb has to find. Inline, because the label class carries
+                // its own size and would win it straight back.
+                style={{ fontSize: "0.75rem" }}
               >
                 {label}
                 <span

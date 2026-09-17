@@ -10,6 +10,10 @@ import styles from "./play.module.css";
  * Not one of these ticks is React's business. The render loop writes a pixel offset per
  * tick into a CSS variable every frame and the transforms below read it, so a player can
  * swing the camera around without the HUD rendering once.
+ *
+ * It hangs three rem down from the safe area inset rather than at the inset itself: inside
+ * Nimiq Pay that inset reports the notch, not the wallet's own bar sitting above this page,
+ * and the only navigation aid in the game was under it.
  */
 
 /** How many drone ticks the strip has room for. The nearest ones win. */
@@ -23,7 +27,7 @@ export default function Compass({ reduced }: { reduced: boolean }) {
       transition={{ duration: reduced ? 0 : 0.5, ease: [0.16, 1, 0.3, 1], delay: reduced ? 0 : 0.2 }}
       data-testid="compass"
       aria-hidden
-      className={`pointer-events-none absolute left-1/2 top-[max(0.75rem,env(safe-area-inset-top))] h-7 w-[200px] -translate-x-1/2 ${styles.compass}`}
+      className={`pointer-events-none absolute left-1/2 top-[calc(env(safe-area-inset-top)+3rem)] h-7 w-[200px] -translate-x-1/2 ${styles.compass}`}
     >
       <span className={styles.compassRule} />
       <span className={styles.compassAhead} />

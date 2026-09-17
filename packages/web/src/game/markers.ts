@@ -173,9 +173,10 @@ export type ObjectiveInput = {
 };
 
 /**
- * What the player is sent at next. The player's own pick wins; otherwise the order is the
- * one a new player needs: finish the leg you are on, then the walking jobs, then the
- * shooting, then the money, and only then the shop.
+ * What the player is sent at next. The player's own pick wins; otherwise the hunt leads
+ * until a drone is down, because shooting is what the game is about and what the weekly
+ * ladder pays for. Once the day has its first kill the walking jobs come back in front,
+ * then the money, and only then the shop.
  */
 export function chooseObjective({ quests, pinned, seenShop }: ObjectiveInput): Objective | null {
   if (pinned !== null) {
@@ -187,7 +188,13 @@ export function chooseObjective({ quests, pinned, seenShop }: ObjectiveInput): O
     }
   }
 
-  for (const kind of ["courier", "landmarks", "hunt"] as const) {
+  const hunt = questOf(quests, "hunt");
+  const killedToday = hunt !== undefined && hunt.progress > 0;
+  const order = killedToday
+    ? (["courier", "landmarks", "hunt"] as const)
+    : (["hunt", "courier", "landmarks"] as const);
+
+  for (const kind of order) {
     const quest = questOf(quests, kind);
     const chosen = quest ? objectiveFor(quest) : null;
     if (chosen) return chosen;
@@ -208,6 +215,11 @@ export function groundRange(from: Place, to: Place): number {
   return Math.hypot(to.x - from.x, to.z - from.z);
 }
 
+/** The same distance, and never a NaN: an unknown range prints nothing rather than "NaN m". */
+function rangeTo(from: Place, to: { x: number; z: number }): number {
+  return Math.hypot(to.x - from.x, to.z - from.z);
+}
+
 export function metres(range: number): string {
   return `${Math.round(range)} m`;
 }
@@ -224,7 +236,10 @@ export function nearestSpot(
   for (const spot of spots) {
     if (!objective.spots.includes(spot.id)) continue;
     const range = groundRange(from, spot);
-    if (range >= closest) continue;
+    // A comparison against a range that is not a number is false whichever way round it
+    // is written, so without this the last spot in the list wins and the player is sent
+    // at a courier point a hundred metres away.
+    if (!Number.isFinite(range) || range >= closest) continue;
     closest = range;
     best = spot;
   }
@@ -642,8 +657,8 @@ export function createMarkers({ scene, reduced }: MarkersOptions): Markers {
 
       trackedId = target?.id ?? null;
 
-      if (objective && target) {
-        const range = Math.hypot(target.x - at.x, target.z - at.z);
+      const range = objective && target ? rangeTo(at, target) : Number.NaN;
+      if (objective && target && Number.isFinite(range)) {
         rangeText = `${objective.prefix}${metres(range)}`;
         put("--objective-range", `" · ${rangeText}"`);
         const bearing = bearingTo(at, target.x, target.z, yaw);

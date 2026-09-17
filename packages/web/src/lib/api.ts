@@ -29,6 +29,11 @@ export type QuestView = {
   route?: { from: number; to: number };
   visited?: boolean[];
   carrying?: boolean;
+  /**
+   * Which day of the run this streak is, counted by the server from its own quest rows.
+   * Absent on a world that does not send it, and the board then counts claim rows instead.
+   */
+  streakDay?: number;
 };
 
 export type Challenge = { message: string; nonce: string; expiresAt: number };

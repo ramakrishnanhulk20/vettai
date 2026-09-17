@@ -154,9 +154,9 @@ export default function Sheet({
               type="button"
               onClick={onClose}
               aria-label="Close"
-              className="-mr-1 -mt-1 flex h-9 w-9 items-center justify-center rounded-btn border border-line text-paper/55 transition-colors duration-200 hover:border-hunt hover:text-paper active:border-hunt"
+              className="-mr-2 -mt-2 flex h-11 w-11 items-center justify-center rounded-btn border border-line text-paper/55 transition-colors duration-200 hover:border-hunt hover:text-paper active:border-hunt"
             >
-              <svg viewBox="0 0 14 14" className="h-3.5 w-3.5" aria-hidden>
+              <svg viewBox="0 0 14 14" className="h-4 w-4" aria-hidden>
                 <path d="M1 1l12 12M13 1L1 13" stroke="currentColor" strokeWidth="1.6" fill="none" />
               </svg>
             </button>

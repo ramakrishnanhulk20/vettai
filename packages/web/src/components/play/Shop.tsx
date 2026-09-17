@@ -13,7 +13,8 @@ import {
 } from "@/lib/api";
 import { isUserRejection, sendWithData } from "@/lib/nimiq";
 import Sheet, { SheetRow } from "./Sheet";
-import { explorer, nim, shortHash, type Network } from "./format";
+import { explorer, groupAddress, nim, shortHash, type Network } from "./format";
+import styles from "./play.module.css";
 
 /**
  * The shop, paid with a real NIM transaction carrying the order's memo. Nothing here
@@ -154,13 +155,13 @@ export default function Shop({ gear, network, reduced, onClose }: ShopProps) {
     <Sheet
       kicker="Vettai shop"
       title="Better kit"
-      meta="Paid in NIM, straight from your wallet"
+      meta="Paid in NIM from your own wallet"
       watermark="Shop"
       reduced={reduced}
       onClose={onClose}
     >
       {failed && <p className="py-6 text-sm text-bad">{failed}</p>}
-      {!items && !failed && <p className="py-6 text-sm text-paper/50">Opening the cabinet</p>}
+      {!items && !failed && <p className="py-6 text-sm text-paper/50">Opening the shop</p>}
 
       <ul>
         {(items ?? []).map((item, index) => (
@@ -246,7 +247,7 @@ function Progress({
         <button
           type="button"
           onClick={onClear}
-          className="label-type mt-2 rounded-btn border border-line px-3 py-2 text-paper/55 transition-colors duration-200 hover:border-hunt hover:text-paper"
+          className={`mt-2 inline-flex items-center justify-center rounded-btn border border-line px-4 text-paper/55 transition-colors duration-200 hover:border-hunt hover:text-paper ${styles.action}`}
         >
           Back
         </button>
@@ -259,7 +260,9 @@ function Progress({
       <div className="rounded-btn border border-line bg-paper/[0.03] px-3 py-3">
         <p className="label-type text-paper/40">Nimiq Pay will show</p>
         <dl className="mt-2 space-y-1.5 text-[13px]">
-          <Line term="Recipient" value={buy.order.to} mono />
+          {/* Nimiq Pay shows the address in fours, so the screen whose whole job is to
+              match the wallet shows it in fours too. */}
+          <Line term="Recipient" value={groupAddress(buy.order.to)} mono />
           <Line term="Amount" value={`${nim(buy.order.luna)} NIM`} />
           <Line term="Message" value={buy.order.memo} mono />
         </dl>
@@ -268,14 +271,14 @@ function Progress({
             type="button"
             onClick={onPay}
             data-testid="pay-now"
-            className="flex-1 rounded-btn bg-hunt px-4 py-2.5 font-medium text-night transition-transform duration-300 hover:scale-[1.02] active:scale-[0.99]"
+            className="min-h-[44px] flex-1 rounded-btn bg-hunt px-4 py-3 font-medium text-night transition-transform duration-300 hover:scale-[1.02] active:scale-[0.99]"
           >
             Pay in Nimiq Pay
           </button>
           <button
             type="button"
             onClick={onClear}
-            className="label-type rounded-btn border border-line px-3 py-2.5 text-paper/55 transition-colors duration-200 hover:border-hunt hover:text-paper"
+            className={`inline-flex items-center justify-center rounded-btn border border-line px-4 text-paper/55 transition-colors duration-200 hover:border-hunt hover:text-paper ${styles.action}`}
           >
             Not now
           </button>
@@ -297,12 +300,16 @@ function Progress({
       <div>
         <p className="text-sm text-paper/70">
           This order ran out of time. A payment that did reach the chain is recorded by the
-          treasury and settled by hand, so ask in Skool with the memo before you pay again.
+          treasury and settled by hand: post in the Nimiq Mini Apps community on Skool with
+          the memo below before you pay again.
+        </p>
+        <p className="mt-1.5 font-mono text-[11px] text-paper/70" data-testid="expired-memo">
+          {buy.order.memo}
         </p>
         <button
           type="button"
           onClick={onClear}
-          className="label-type mt-2 rounded-btn border border-line px-3 py-2 text-paper/55 transition-colors duration-200 hover:border-hunt hover:text-paper"
+          className={`mt-2 inline-flex items-center justify-center rounded-btn border border-line px-4 text-paper/55 transition-colors duration-200 hover:border-hunt hover:text-paper ${styles.action}`}
         >
           Back
         </button>

@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   getHealth,
+  getLadderWeek,
+  getQuestsToday,
   getTicket,
   getWorldMap,
   type ClaimView,
@@ -30,7 +32,7 @@ import Hud, { type Panel, type PromptAction, type Toast } from "./Hud";
 import Ladder from "./Ladder";
 import QuestBoard from "./QuestBoard";
 import Shop from "./Shop";
-import { nim, type Network } from "./format";
+import { nim, refusalText, shortAddress, type Network } from "./format";
 import { useClaims } from "./useClaims";
 import styles from "./play.module.css";
 
@@ -57,6 +59,14 @@ type Phase =
 const PROVIDER_WAIT_MS = 15_000;
 
 /**
+ * How long the way in stays quiet before it shows the deep link. The wallet answers in a
+ * second or two inside Nimiq Pay; a browser never answers at all, and a judge who opened
+ * the link on a laptop used to watch a progress dot for sixteen seconds before being told
+ * anything. The wait above carries on underneath, so a wallet that turns up still boots.
+ */
+const PROVIDER_HINT_MS = 2500;
+
+/**
  * How long a socket gets to hand over a room. The world sends the welcome on the tick
  * after the upgrade, so anything past this is a connection that upgraded and then went
  * quiet, which no amount of waiting fixes.
@@ -71,6 +81,15 @@ const TOAST_MS = 2600;
 
 /** The parcel's window, the same two minutes COURIER_WINDOW_MS gives it on the server. */
 const COURIER_WINDOW_MS = 120_000;
+
+/** How long the world keeps a downed player on the ground, DOWNED_MS in the simulation. */
+const DOWNED_MS = 3000;
+
+/** How often the week's standing is read while the hunt is finished. It moves slowly. */
+const LADDER_MS = 60_000;
+
+/** How long the note about the no-fire circle holds after a refused trigger pull. */
+const OFFICE_NOTE_MS = 3600;
 
 /** Four shots a second with the mk1 blaster, six with the mk2, as the simulation allows. */
 const FIRE_INTERVAL: Record<Gear["blaster"], number> = { mk1: 250, mk2: 167 };
@@ -134,12 +153,6 @@ function questStep(quest: QuestView, map: WorldMap | null, at: { x: number; z: n
   return `${name} ${quest.progress}/${quest.target}`;
 }
 
-function refusalText(code: string): string | null {
-  if (code === "too far") return "Too far away. Walk closer.";
-  if (code === "unknown place") return "Nothing to do here.";
-  return null;
-}
-
 export default function PlayScreen() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -155,6 +168,9 @@ export default function PlayScreen() {
   /** The last ten round trips, for the jitter line in the readout. */
   const pongsRef = useRef<number[]>([]);
   const celebrateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Read on the trigger pull, never rendered: inside the circle the world refuses the shot. */
+  const insideSafeRef = useRef(false);
+  const officeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** The HUD's fire button, so a rebuilt set of controls can take it over. */
   const fireButtonRef = useRef<HTMLElement | null>(null);
   /** The room as the server last described it, which is what a rebuilt picture starts from. */
@@ -182,6 +198,8 @@ export default function PlayScreen() {
   const [picture, setPicture] = useState(0);
   const [host, setHost] = useState("");
   const [copied, setCopied] = useState(false);
+  /** True once the provider wait has gone on long enough to show the way in by hand. */
+  const [waitedForWallet, setWaitedForWallet] = useState(false);
   /** True when this page is running inside Nimiq Pay, which changes what a missing wallet means. */
   const [insidePay, setInsidePay] = useState(false);
 
@@ -189,12 +207,18 @@ export default function PlayScreen() {
   const [quests, setQuests] = useState<QuestView[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [aimHot, setAimHot] = useState(false);
+  /** True while the drone a shot would take is off the top of the screen. */
+  const [aimAbove, setAimAbove] = useState(false);
+  /** True for a few seconds after the office circle refused a trigger pull. */
+  const [officeNote, setOfficeNote] = useState(false);
   const [firedAt, setFiredAt] = useState(0);
   const [prompt, setPrompt] = useState<Prompt | null>(null);
   /** Where the player stood when that prompt appeared, which is what its distances mean. */
   const [promptAt, setPromptAt] = useState<{ x: number; z: number } | null>(null);
   const [latency, setLatency] = useState<number | null>(null);
   const [hitAt, setHitAt] = useState(0);
+  /** When the body gets up again, as a clock reading, or 0 while the player is on their feet. */
+  const [downedUntil, setDownedUntil] = useState(0);
 
   const [sheet, setSheet] = useState<"board" | "shop" | "ladder" | null>(null);
   const [gear, setGear] = useState<Gear>({ blaster: "mk1", skin: "default", sprint: false });
@@ -227,6 +251,17 @@ export default function PlayScreen() {
     [pinned, quests, seenShop],
   );
   const spots = useMemo(() => (worldMap ? worldSpots(worldMap, quests) : []), [quests, worldMap]);
+
+  // Where this wallet stands on the week, asked for only once the day's hunt is finished:
+  // before that the strip has a target to count towards and the ladder is not the story.
+  const [weekPlace, setWeekPlace] = useState<number | null>(null);
+  const huntQuest = quests.find((quest) => quest.kind === "hunt") ?? null;
+  const huntDone = huntQuest !== null && huntQuest.state !== "open";
+  const huntKills = huntQuest?.progress ?? 0;
+  const huntStanding = useMemo(
+    () => (huntDone ? { count: huntKills, rank: weekPlace } : null),
+    [huntDone, huntKills, weekPlace],
+  );
 
   // The scene is built inside the boot effect, which may not have run yet when the first
   // quests land, so the latest choice is kept here and pushed again the moment it exists.
@@ -302,6 +337,28 @@ export default function PlayScreen() {
   const playing =
     phase.name === "playing" || phase.name === "reconnecting" || phase.name === "resigning";
 
+  // The ladder publishes ten places and shortens the addresses on the way out, so a wallet
+  // outside those ten cannot be found in it. The strip then shows the kill count on its own
+  // rather than inventing a position for it.
+  useEffect(() => {
+    if (!playing || !huntDone || address === "") return;
+    let alive = true;
+    const mine = shortAddress(address);
+    const read = () => {
+      void getLadderWeek().then((result) => {
+        if (!alive || !result.ok) return;
+        const row = result.data.entries.find((entry) => entry.address === mine);
+        setWeekPlace(row ? row.place : null);
+      });
+    };
+    read();
+    const timer = setInterval(read, LADDER_MS);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [address, huntDone, playing]);
+
   /**
    * The signature moment. A payout that landed is announced wherever the player is
    * standing: the amount, the block it is in, the shield bars taking the accent, and the
@@ -336,6 +393,17 @@ export default function PlayScreen() {
 
   useEffect(() => () => {
     if (celebrateTimer.current) clearTimeout(celebrateTimer.current);
+    if (officeTimer.current) clearTimeout(officeTimer.current);
+  }, []);
+
+  /**
+   * The trigger was pulled inside the office circle. The world refuses every shot from in
+   * there, so nothing is drawn and nothing is sent: the player is told the rule instead.
+   */
+  const noteOffice = useCallback(() => {
+    setOfficeNote(true);
+    if (officeTimer.current) clearTimeout(officeTimer.current);
+    officeTimer.current = setTimeout(() => setOfficeNote(false), OFFICE_NOTE_MS);
   }, []);
 
   const openSheet = useCallback((next: "board" | "shop" | "ladder") => {
@@ -360,6 +428,15 @@ export default function PlayScreen() {
   const takeQuests = useCallback((next: QuestView[]) => {
     questsRef.current = next;
     setQuests(next);
+  }, []);
+
+  /** Reads the day's jobs again, which is what a rolled-over day needs from every screen. */
+  const refreshQuests = useCallback(async () => {
+    const result = await getQuestsToday();
+    if (!result.ok) return;
+    setCarryUntil(null);
+    questsRef.current = result.data.quests;
+    setQuests(result.data.quests);
   }, []);
 
   useEffect(() => {
@@ -449,7 +526,14 @@ export default function PlayScreen() {
         // A panel is up: the body stands still rather than walking on under the sheet.
         readMove: () =>
           sheetRef.current ? { dx: 0, dz: 0 } : (controlsRef.current?.move() ?? { dx: 0, dz: 0 }),
-        onAim: setAimHot,
+        // Three readings off one frame, and not one of them may render React sixty times a
+        // second: the two booleans settle to the same value most frames, and where the
+        // player is standing is only ever read on a trigger pull.
+        onAim: (hot, crosshair) => {
+          setAimHot(hot);
+          setAimAbove(crosshair.droneAboveView);
+          insideSafeRef.current = crosshair.insideSafeCircle;
+        },
         onPrompt: (next) => {
           promptRef.current = next;
           setPrompt(next);
@@ -468,7 +552,10 @@ export default function PlayScreen() {
             if (hunt && hunt.state === "open") return;
             return toast("Drone down");
           }
-          if (event.kind === "downed") return toast("Downed. Back at the office in 3");
+          // The overlay holds for as long as the body is down, so the screen never looks
+          // like a normal one while the stick does nothing.
+          if (event.kind === "downed") return setDownedUntil(Date.now() + DOWNED_MS);
+          if (event.kind === "respawn") return setDownedUntil(0);
           if (event.kind === "shieldHit") return setHitAt(Date.now());
         },
       });
@@ -489,6 +576,14 @@ export default function PlayScreen() {
         },
         onFire: (yaw, pitch) => {
           if (sheetRef.current) return;
+          // Inside the circle the world refuses the shot. Drawing the tracer and kicking the
+          // trigger anyway is the game pretending it fired, which is how a judge standing on
+          // the office door decides the fire button is broken.
+          if (insideSafeRef.current) {
+            noteOffice();
+            lessonDone(1);
+            return;
+          }
           const shot = worldRef.current?.fire(yaw, pitch) ?? { yaw, pitch };
           setFiredAt(Date.now());
           lessonDone(1);
@@ -741,6 +836,28 @@ export default function PlayScreen() {
         let spoke = 0;
         connection.on("state", (frame) => {
           worldRef.current?.state(frame);
+
+          // Three things the world says that the scene has no way of showing: a kill
+          // somebody else was credited with, a parcel that is back where it started, and
+          // a day that turned over while this player was still standing in the street.
+          for (const event of frame.events) {
+            if (event.kind === "assist") {
+              toast("Assist: your shot finished it");
+            }
+            if (event.kind === "courier-reset") {
+              setCarryUntil(null);
+              toast(
+                event.reason === "cold"
+                  ? "Parcel went cold, pick it up again"
+                  : "New day, new route",
+              );
+            }
+            if (event.kind === "quests-rolled") {
+              toast("A new day's jobs are up");
+              void refreshQuests();
+            }
+          }
+
           if (process.env.NODE_ENV === "production") return;
           // One line a second while developing: enough to see the room ticking, not enough
           // to drown the console at twenty frames a second.
@@ -784,8 +901,11 @@ export default function PlayScreen() {
             return;
           }
           if (frame.kind === "error") {
-            const line = refusalText(frame.code);
-            if (line) toast(line);
+            // A refusal with nothing to do at this spot carries the job the player is
+            // actually being pointed at, so the toast ends on the next step.
+            const nextStep =
+              frame.code === "nothing to do" ? (objectiveRef.current?.sentence ?? null) : null;
+            toast(refusalText(frame.code, nextStep));
           }
         });
 
@@ -830,13 +950,33 @@ export default function PlayScreen() {
       document.removeEventListener("visibilitychange", onVisibility);
       drop();
     };
-  }, [announce, attempt, lessonDone, openSheet, reduced, toast]);
+  }, [announce, attempt, lessonDone, noteOffice, openSheet, reduced, refreshQuests, toast]);
+
+  // A respawn frame that never arrives must not leave the screen lying on the floor, so
+  // the overlay lets go a few seconds after the world said the body would be back up.
+  useEffect(() => {
+    if (downedUntil === 0) return;
+    const timer = setTimeout(
+      () => setDownedUntil(0),
+      Math.max(0, downedUntil - Date.now()) + 4000,
+    );
+    return () => clearTimeout(timer);
+  }, [downedUntil]);
 
   // Nothing is drawn while a panel owns the screen. A phone that is waiting to connect or
   // has lost its picture should not be spending its battery on frames nobody sees.
   useEffect(() => {
     setLoop.current(playing);
   }, [playing]);
+
+  // Two and a half seconds into the wait the panel stops saying "looking" and starts
+  // saying what to do, while the wallet is still being looked for underneath.
+  useEffect(() => {
+    if (phase.name !== "provider") return;
+    setWaitedForWallet(false);
+    const timer = setTimeout(() => setWaitedForWallet(true), PROVIDER_HINT_MS);
+    return () => clearTimeout(timer);
+  }, [phase.name, attempt]);
 
   /**
    * Pay can be slow to hand a cold start its wallet, and on a phone that has been asleep it
@@ -857,17 +997,37 @@ export default function PlayScreen() {
    * for ever. This gives a room eight seconds to arrive and then says so out loud. The
    * socket keeps trying underneath, so a welcome that turns up late still drops the player
    * straight into the city.
+   *
+   * The eight seconds only run while somebody is watching. A phone taking a call is not a
+   * world that will not answer, and a player used to come back to a dead end that was
+   * decided while the screen was off.
    */
   useEffect(() => {
     if (phase.name !== "connecting" && phase.name !== "reconnecting") return;
-    const timer = setTimeout(() => {
-      setPhase({
-        name: "error",
-        title: "The city did not answer",
-        body: "The world server took the connection but never handed over a room. Tap below to try again.",
-      });
-    }, WELCOME_WAIT_MS);
-    return () => clearTimeout(timer);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const stop = () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+    };
+    const start = () => {
+      stop();
+      timer = setTimeout(() => {
+        setPhase({
+          name: "error",
+          title: "The city did not answer",
+          body: "The world server took the connection but never handed over a room. Tap below to try again.",
+        });
+      }, WELCOME_WAIT_MS);
+    };
+
+    const watch = () => (document.hidden ? stop() : start());
+    watch();
+    document.addEventListener("visibilitychange", watch);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", watch);
+    };
   }, [phase.name]);
 
   const interact = useCallback(() => {
@@ -958,6 +1118,7 @@ export default function PlayScreen() {
 
       <div
         ref={surfaceRef}
+        data-testid="surface"
         className={`absolute inset-0 select-none ${sheet ? "pointer-events-none" : "touch-none"}`}
         style={{ touchAction: "none" }}
       />
@@ -967,10 +1128,13 @@ export default function PlayScreen() {
           shield={shield}
           quests={quests}
           objective={objective}
+          hunt={huntStanding}
           carryUntil={carryUntil}
           toasts={toasts}
           latency={latency}
           aimHot={aimHot}
+          aimAbove={aimAbove}
+          officeNote={officeNote}
           firedAt={firedAt}
           prompt={promptAction(prompt, quests, objective, worldMap, promptAt)}
           onInteract={interact}
@@ -981,6 +1145,7 @@ export default function PlayScreen() {
           paidAt={paidAt}
           attachFire={attachFire}
           hitAt={hitAt}
+          downedUntil={downedUntil}
           sheetOpen={sheet !== null}
           reduced={Boolean(reduced)}
           readout={readout}
@@ -1095,7 +1260,9 @@ export default function PlayScreen() {
                   "linear-gradient(to top, #0b0f1a 15%, rgba(11,15,26,0.88) 33%, rgba(11,15,26,0.18) 62%, rgba(11,15,26,0) 100%)",
               }}
             />
-            <div className="label-type absolute inset-x-0 top-0 flex items-center justify-between gap-3 border-b border-line px-6 pb-3 pt-[max(1.25rem,env(safe-area-inset-top))] text-paper/35">
+            {/* The same allowance the compass carries: inside Nimiq Pay the wallet's own
+                bar sits above this page and the inset does not know about it. */}
+            <div className="label-type absolute inset-x-0 top-0 flex items-center justify-between gap-3 border-b border-line px-6 pb-3 pt-[calc(env(safe-area-inset-top)+3rem)] text-paper/35">
               <span>Vettai</span>
               <span>The hunt</span>
               <span className="text-hunt/70">Nimiq Pay</span>
@@ -1108,7 +1275,7 @@ export default function PlayScreen() {
               animate={{ opacity: 1, y: 0 }}
               transition={reduced ? { duration: 0 } : { duration: 0.7, ease: EASE, delay: 0.1 }}
               data-testid="loading-mark"
-              className="absolute left-6 top-[max(4.5rem,calc(env(safe-area-inset-top)+3.6rem))] flex items-center gap-3"
+              className="absolute left-6 top-[calc(env(safe-area-inset-top)+6.4rem)] flex items-center gap-3"
             >
               <motion.span
                 aria-hidden
@@ -1126,7 +1293,8 @@ export default function PlayScreen() {
               </span>
             </motion.div>
             <Panel
-              phase={phase}
+              phase={phase.name === "provider" && waitedForWallet ? { name: "outside" } : phase}
+              stillLooking={phase.name === "provider" && waitedForWallet}
               reduced={Boolean(reduced)}
               deepLink={deepLink}
               copied={copied}
@@ -1171,20 +1339,27 @@ function promptAction(
 
   // One of the other six points. The server would throw an interact here away without a
   // word, so the phone answers instead: this is not the one, and here is the one that is.
+  // The point's number means nothing to anybody, so the line carries the distance.
   const wanted = carrying ? courier.route.to : courier.route.from;
   const spot = map?.courier[wanted] ?? null;
-  const away = spot && at ? `, ${metres(groundRange(at, spot))}` : "";
+  const away = spot && at ? ` ${metres(groundRange(at, spot))} away` : " at the other point";
   return {
     kind: "note",
-    text: `Not this one. ${carrying ? "Deliver" : "Pick up"} at P${wanted + 1}${away}`,
+    text: `Not this one. ${carrying ? "Drop it" : "Pick it up"}${away}`,
   };
 }
 
 /**
  * The first minute, and only ever the first. Three lines, each one dismissed by doing the
- * thing it asks for or by tapping it. Everything but the words is left clickable, so the
- * lesson can be finished with the thumb it is teaching.
+ * thing it asks for, by tapping it, or by six seconds passing. Everything but the words is
+ * left clickable, so the lesson can be finished with the thumb it is teaching.
+ *
+ * The timer is the important one. Card three used to wait for the board to be opened, so a
+ * player who only ever shot spent the whole session reading it, and the city behind it was
+ * dimmed the entire time.
  */
+const LESSON_MS = 6000;
+
 const LESSONS = [
   {
     step: "Walk",
@@ -1213,6 +1388,17 @@ function FirstMinute({
   onTap: () => void;
 }) {
   const words = LESSONS[lesson];
+
+  // Reads the live handler off a ref so the six seconds are not restarted every time the
+  // screen re-renders around it, which on this HUD is a couple of times a second.
+  const tap = useRef(onTap);
+  tap.current = onTap;
+  useEffect(() => {
+    if (!words) return;
+    const timer = setTimeout(() => tap.current(), LESSON_MS);
+    return () => clearTimeout(timer);
+  }, [lesson, words]);
+
   if (!words) return null;
 
   const glow = ["18% 82%", "84% 86%", "16% 16%"][lesson] ?? "50% 50%";
@@ -1227,11 +1413,15 @@ function FirstMinute({
       data-testid="first-minute"
       className="pointer-events-none absolute inset-0 z-30"
     >
+      {/* A wash, not a blackout. The lesson is about the city, so the city has to be the
+          brightest thing on screen while it is read, and the shield bars and the quest
+          strip under here have to stay legible. The words carry their own shadow instead. */}
       <div
         aria-hidden
+        data-testid="first-minute-scrim"
         className="absolute inset-0"
         style={{
-          background: `radial-gradient(70% 45% at ${glow}, rgba(255,106,43,0.18) 0%, rgba(11,15,26,0.82) 45%, rgba(11,15,26,0.88) 100%)`,
+          background: `radial-gradient(70% 45% at ${glow}, rgba(255,106,43,0.14) 0%, rgba(11,15,26,0.28) 45%, rgba(11,15,26,0.35) 100%)`,
         }}
       />
 
@@ -1260,6 +1450,7 @@ function FirstMinute({
           transition={{ duration: reduced ? 0 : 0.5, ease: EASE }}
           data-testid="first-minute-tap"
           className="pointer-events-auto absolute left-6 right-6 top-[38%] text-left"
+          style={{ textShadow: "0 2px 22px rgba(11,15,26,0.95), 0 0 6px rgba(11,15,26,0.8)" }}
         >
           <span className="label-type text-hunt">
             {lesson + 1} / {LESSONS.length} &#183; {words.step}
@@ -1289,6 +1480,8 @@ function Ghost({ className, reduced }: { className: string; reduced: boolean }) 
 
 type PanelProps = {
   phase: Phase;
+  /** The wallet is still being looked for behind this panel, so the wait says so. */
+  stillLooking: boolean;
   reduced: boolean;
   deepLink: string;
   copied: boolean;
@@ -1313,7 +1506,7 @@ const COPY: Record<string, { label: string; title: string; body: string }> = {
   outside: {
     label: "Nimiq Pay",
     title: "Open Vettai inside Nimiq Pay",
-    body: "The bounty is paid in NIM to your wallet, so the game runs inside Nimiq Pay. Open this link on the phone that has the app.",
+    body: "The bounty is paid in NIM straight to your wallet, so Vettai runs inside Nimiq Pay. Open this link on the phone that has the app.",
   },
   signing: {
     label: "One signature",
@@ -1342,7 +1535,16 @@ const COPY: Record<string, { label: string; title: string; body: string }> = {
   },
 };
 
-function Panel({ phase, reduced, deepLink, copied, insidePay, onCopy, onRetry }: PanelProps) {
+function Panel({
+  phase,
+  stillLooking,
+  reduced,
+  deepLink,
+  copied,
+  insidePay,
+  onCopy,
+  onRetry,
+}: PanelProps) {
   const words =
     phase.name === "error"
       ? { label: "Stopped", title: phase.title, body: phase.body }
@@ -1351,7 +1553,7 @@ function Panel({ phase, reduced, deepLink, copied, insidePay, onCopy, onRetry }:
         : COPY[phase.name];
   if (!words) return null;
 
-  const status = statusOf(phase);
+  const status = stillLooking ? "still looking for the wallet" : statusOf(phase);
 
   const rise = {
     initial: { opacity: 0, y: 26 },
@@ -1390,34 +1592,34 @@ function Panel({ phase, reduced, deepLink, copied, insidePay, onCopy, onRetry }:
 
         {status && <Status text={status} />}
 
+        {/* One thing to do, and one quiet way to move the link to a phone. Nothing here
+            asks the player to try again: the page is already looking on its own. */}
         {phase.name === "outside" && !insidePay && (
-          <div className="flex flex-col gap-3">
+          <div className="mt-5 flex flex-col items-start gap-1">
             <a
               href={deepLink}
-              className="rounded-btn bg-hunt px-5 py-3 text-center font-medium text-night transition-transform duration-300 hover:scale-[1.02] active:scale-[0.99]"
+              data-testid="open-in-pay"
+              className="w-full rounded-btn bg-hunt px-5 py-4 text-center font-medium text-night transition-transform duration-300 hover:scale-[1.02] active:scale-[0.99] sm:w-auto sm:px-8"
             >
               Open in Nimiq Pay
             </a>
             <button
               type="button"
               onClick={onCopy}
-              className="label-type rounded-btn border border-line px-5 py-3 text-paper/60 transition-colors duration-300 hover:border-hunt hover:text-paper"
+              data-testid="copy-link"
+              className={`inline-flex items-center text-[0.875rem] text-paper/55 underline decoration-line underline-offset-4 transition-colors duration-300 hover:text-paper hover:decoration-hunt ${styles.tap}`}
             >
-              {copied ? "Link copied" : "Copy the link"}
+              {copied ? "Link copied" : "Copy the link instead"}
             </button>
           </div>
         )}
 
-        {(phase.name === "cancelled" || phase.name === "error" || phase.name === "outside") && (
+        {(phase.name === "cancelled" || phase.name === "error") && (
           <button
             type="button"
             onClick={onRetry}
             data-testid="try-again"
-            className={`rounded-btn px-5 py-3 font-medium transition-transform duration-300 hover:scale-[1.02] active:scale-[0.99] ${
-              phase.name === "outside" && !insidePay
-                ? "mt-3 border border-line text-paper/60"
-                : "bg-hunt text-night"
-            }`}
+            className="rounded-btn bg-hunt px-5 py-4 font-medium text-night transition-transform duration-300 hover:scale-[1.02] active:scale-[0.99]"
           >
             Try again
           </button>

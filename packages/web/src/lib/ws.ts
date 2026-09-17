@@ -47,7 +47,13 @@ export type TickEvent =
   | { kind: "spawn"; drone: string; x: number; y: number; z: number }
   | { kind: "pickup"; player: string; point: number }
   | { kind: "deliver"; player: string; point: number }
-  | { kind: "landmark"; player: string; index: number };
+  | { kind: "landmark"; player: string; index: number }
+  /** Your shot finished a drone somebody else had done most of the damage to. */
+  | { kind: "assist"; drone: string }
+  /** The parcel is back at its pickup point: it went cold, or the day turned over. */
+  | { kind: "courier-reset"; reason: "cold" | "day" }
+  /** Midnight UTC passed while this player was in the city, and today's jobs are new. */
+  | { kind: "quests-rolled" };
 
 /**
  * Who the room says you are. A world that names players by their wallet sends the address
@@ -163,12 +169,23 @@ function backoff(attempt: number): number {
   return BACKOFF_MS[attempt] ?? BACKOFF_CAP_MS;
 }
 
+/** True while this page is not the one on screen: another tab, or a phone taking a call. */
+function away(): boolean {
+  return typeof document !== "undefined" && document.hidden;
+}
+
 const dev = process.env.NODE_ENV !== "production";
 
 /**
  * Opens the world socket with a ticket that was already fetched, and keeps it open. A
  * dropped socket is reconnected on its own with a fresh ticket, because a ticket is spent
  * the moment it is used and lives one minute.
+ *
+ * A page nobody is looking at gets different treatment. Its timers are throttled to about
+ * one a minute, so a backoff running behind a phone call used to burn every retry the cap
+ * allows and leave a stopped game on screen when the player came back. While the page is
+ * away nothing is retried and nothing is counted: the socket comes back the moment the
+ * player does, on the visibility event rather than on a timer.
  */
 export function connectWorld(ticket: string): WorldConnection {
   const listeners: { [K in keyof Channels]: Set<(frame: Channels[K]) => void> } = {
@@ -192,6 +209,8 @@ export function connectWorld(ticket: string): WorldConnection {
   let closed = false;
   let pinger: ReturnType<typeof setInterval> | null = null;
   let retry: ReturnType<typeof setTimeout> | null = null;
+  /** True between asking for a ticket and having a socket, so two opens cannot race. */
+  let opening = false;
 
   function emit<K extends keyof Channels>(kind: K, frame: Channels[K]): void {
     for (const handler of listeners[kind]) handler(frame);
@@ -205,6 +224,7 @@ export function connectWorld(ticket: string): WorldConnection {
   function giveUp(reason: string, code: number | undefined): void {
     closed = true;
     stopPings();
+    stopWatching();
     if (retry !== null) clearTimeout(retry);
     retry = null;
     emit("close", { willRetry: false, reason, fatal: true, ...(code === undefined ? {} : { code }) });
@@ -227,6 +247,12 @@ export function connectWorld(ticket: string): WorldConnection {
     }
 
     emit("close", { willRetry: true, reason, ...(code === undefined ? {} : { code }) });
+
+    // Nobody is looking. A try made now would be throttled, would probably fail, and would
+    // spend one of the eight the player needs when they come back, so the wait is the
+    // visibility event instead of a timer.
+    if (away()) return;
+
     const wait = backoff(attempt);
     attempt += 1;
     retry = setTimeout(() => {
@@ -234,13 +260,36 @@ export function connectWorld(ticket: string): WorldConnection {
     }, wait);
   }
 
+  /** Straight back in, with no backoff left to wait out. Used when the page comes back. */
+  function reconnectNow(): void {
+    if (closed || opening || socket !== null) return;
+    if (retry !== null) clearTimeout(retry);
+    retry = null;
+    void open();
+  }
+
+  function onVisibility(): void {
+    if (away()) return;
+    reconnectNow();
+  }
+
+  function stopWatching(): void {
+    if (typeof document === "undefined") return;
+    document.removeEventListener("visibilitychange", onVisibility);
+  }
+
   async function open(): Promise<void> {
-    if (closed) return;
+    if (closed || opening || socket !== null) return;
+    opening = true;
 
     if (next === null || !baseKnown) {
       const fresh = await getTicket();
-      if (closed) return;
+      if (closed) {
+        opening = false;
+        return;
+      }
       if (!fresh.ok) {
+        opening = false;
         scheduleRetry(fresh.error);
         return;
       }
@@ -252,12 +301,16 @@ export function connectWorld(ticket: string): WorldConnection {
     const live = new WebSocket(socketUrl(next, base));
     next = null;
     socket = live;
+    opening = false;
 
     live.addEventListener("open", () => {
       // The retry count is not cleared here. A socket that upgrades and is then thrown
       // out is exactly the case the cap exists for; only a welcome proves we are in.
       stopPings();
       pinger = setInterval(() => {
+        // A throttled wakeup on a hidden page carries a timestamp minutes old, which would
+        // be read as a round trip of minutes. The beat is skipped rather than counted.
+        if (away()) return;
         send({ t: "ping", ts: Date.now() });
       }, PING_EVERY_MS);
       send({ t: "ping", ts: Date.now() });
@@ -311,6 +364,10 @@ export function connectWorld(ticket: string): WorldConnection {
     }
   }
 
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", onVisibility);
+  }
+
   void open();
 
   return {
@@ -326,6 +383,7 @@ export function connectWorld(ticket: string): WorldConnection {
     close() {
       closed = true;
       stopPings();
+      stopWatching();
       if (retry !== null) clearTimeout(retry);
       const live = socket;
       socket = null;

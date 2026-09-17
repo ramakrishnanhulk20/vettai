@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { youOf, type BoltWire, type DroneWire, type PlayerWire, type StateFrame, type TickEvent, type WelcomeFrame } from "@/lib/ws";
 import type { Gear } from "@/lib/api";
 import { createCameraRig, type Blocker } from "./camera";
-import type { Box, WorldMap } from "./map";
+import { fetchWorldConstants, type Box, type WorldMap } from "./map";
 import { segmentHitsBox, slideAgainstBoxes } from "./slide";
 import type { SentMove } from "./controls";
 import {
@@ -15,9 +15,15 @@ import {
 } from "./markers";
 import type { CityAssets } from "./scene/assets";
 import { createAtmosphere, type Atmosphere } from "./scene/atmosphere";
-import { animateCity, buildCity, disposeCity, lampSpots } from "./scene/city";
+import { animateCity, buildCity, disposeCity, lampSpots, safeCircle } from "./scene/city";
 import { createCharacter, type Character } from "./scene/character";
-import { animateDrone, createDrone, disposeDrone, disposeDrones } from "./scene/drone";
+import {
+  animateDrone,
+  createDrone,
+  disposeDrone,
+  disposeDrones,
+  setDroneDetail,
+} from "./scene/drone";
 import { addLampGlow, addNightLights } from "./scene/lights";
 import { tuneRenderer, type Look } from "./scene/materials";
 import { createNeon, type Neon } from "./scene/neon";
@@ -147,6 +153,19 @@ export type Prompt =
   | { kind: "landmark"; index: number }
   | { kind: "courier"; point: number };
 
+/**
+ * What the crosshair is on this frame. The ring is only lit when the shot would really
+ * land: a drone inside the cone in both directions, from a place the world accepts a shot
+ * from. The other two say why it is dark, so the HUD can answer instead of going quiet.
+ */
+export type Crosshair = {
+  hot: boolean;
+  /** Standing in the office circle, where every trigger pull is refused. */
+  insideSafeCircle: boolean;
+  /** A drone the crosshair is lined up with in yaw, sitting above the top of the frame. */
+  droneAboveView: boolean;
+};
+
 export type WorldEvent =
   | { kind: "kill" }
   | { kind: "downed" }
@@ -163,7 +182,7 @@ export type WorldOptions = {
   /** The thumb as it is on this frame, already turned into a world direction. */
   readMove: () => { dx: number; dz: number };
   /** Fires only when the answer changes, so the HUD never re-renders per frame. */
-  onAim: (hot: boolean) => void;
+  onAim: (hot: boolean, crosshair: Crosshair) => void;
   onPrompt: (prompt: Prompt | null) => void;
   onShield: (shield: number) => void;
   onEvent: (event: WorldEvent) => void;
@@ -216,6 +235,8 @@ export type World = {
   cameraAt: () => { x: number; y: number; z: number };
   /** When the reduced motion kill flash last fired, so a check can prove it did. */
   killFlashAt: () => number;
+  /** What the crosshair is on right now, for the HUD and for a check. */
+  crosshair: () => Crosshair;
   dispose: () => void;
 };
 
@@ -264,6 +285,15 @@ type Shot = { yaw: number; pitch: number; at: THREE.Vector3; distance: number };
 type Wreck = { group: THREE.Group; started: number; fromY: number };
 
 type Spark = { points: THREE.Points; started: number; velocities: Float32Array };
+
+/**
+ * A position both this file and the HUD can do arithmetic with. One frame that works out
+ * a NaN would otherwise spread it: the body, the offset, the metres on the objective line
+ * and the prompt under the crosshair are all the same number read four ways.
+ */
+function solid(place: Place): boolean {
+  return Number.isFinite(place.x) && Number.isFinite(place.z);
+}
 
 function pushSample(track: Track, sample: Sample): void {
   const samples = track.samples;
@@ -345,6 +375,25 @@ export function createWorld(options: WorldOptions): World {
 
   const lamps = lampSpots(map);
   const lampGlow = addLampGlow(scene);
+
+  /**
+   * The circle on the ground, built the moment the world server says how wide it is. The
+   * radius is never assumed here: no ring is better than a ring in the wrong place.
+   */
+  let safeRing: THREE.Mesh | null = null;
+  /** False once the city has been thrown away, so a late answer does not build into it. */
+  let live = true;
+  void fetchWorldConstants()
+    .then((constants) => {
+      const radius = constants.officeSafeRadius;
+      if (!live || safeRing || !Number.isFinite(radius) || radius <= 0) return;
+      safeRadius = radius;
+      safeRing = safeCircle(map.office, radius);
+      city.add(safeRing);
+    })
+    .catch(() => {
+      // A circle nobody can draw is not worth a broken city: the game plays on without it.
+    });
 
   const markers: Markers = createMarkers({ scene, reduced });
   /** Refilled each frame: a handful of readings for the beacons, the strip and the rings. */
@@ -447,6 +496,8 @@ export function createWorld(options: WorldOptions): World {
   let predicted: Place = { x: map.spawn.x, z: map.spawn.z };
   /** What is actually drawn: that walk, plus the correction still bleeding off it. */
   let body: Place = { x: map.spawn.x, z: map.spawn.z };
+  /** The last place that was a real place. A step that works out a NaN falls back to it. */
+  let lastSolid: Place = { x: map.spawn.x, z: map.spawn.z };
   let offsetX = 0;
   let offsetZ = 0;
   const pending: (SentMove & { at: number })[] = [];
@@ -457,6 +508,12 @@ export function createWorld(options: WorldOptions): World {
   let downed = false;
   let lastFrameAt = 0;
   let aimHot = false;
+  let crosshair: Crosshair = { hot: false, insideSafeCircle: false, droneAboveView: false };
+  /**
+   * The radius of the no-fire circle around the office, as the world server reports it.
+   * Zero until the answer lands: nothing about the circle is guessed on this side.
+   */
+  let safeRadius = 0;
   let promptNow: Prompt | null = null;
   let lastCorrection = 0;
   let maxCorrection = 0;
@@ -638,8 +695,10 @@ export function createWorld(options: WorldOptions): World {
       return;
     }
     if (event.kind === "respawn" && event.player === you) {
+      if (!Number.isFinite(event.x) || !Number.isFinite(event.z)) return;
       predicted = { x: event.x, z: event.z };
       body = { x: event.x, z: event.z };
+      lastSolid = { x: event.x, z: event.z };
       offsetX = 0;
       offsetZ = 0;
       pending.length = 0;
@@ -654,7 +713,9 @@ export function createWorld(options: WorldOptions): World {
     let closest = INTERACT_RANGE;
     for (const [prompt, place] of places) {
       const range = Math.hypot(place.x - body.x, place.z - body.z);
-      if (range > closest) continue;
+      // Both comparisons against a NaN range are false, so without the first test every
+      // place in the list passes and the last one wins, whatever it is.
+      if (!Number.isFinite(range) || range > closest) continue;
       closest = range;
       found = prompt;
     }
@@ -705,6 +766,10 @@ export function createWorld(options: WorldOptions): World {
    * moved it would be the step this whole file exists to avoid.
    */
   function reconcile(wire: PlayerWire): void {
+    // A frame that cannot say where the player is says nothing about where the player is.
+    // The body keeps walking from the last answer that was a place.
+    if (!Number.isFinite(wire.x) || !Number.isFinite(wire.z)) return;
+
     const seen = typeof wire.seq === "number" ? wire.seq : Number.POSITIVE_INFINITY;
     const now = performance.now();
 
@@ -733,9 +798,9 @@ export function createWorld(options: WorldOptions): World {
       place = stepAlong(place, move.dx, move.dz, (ends - move.at) / 1000);
     }
 
-    predicted = place;
-    offsetX = body.x - place.x;
-    offsetZ = body.z - place.z;
+    predicted = solid(place) ? place : { x: body.x, z: body.z };
+    offsetX = body.x - predicted.x;
+    offsetZ = body.z - predicted.z;
 
     const error = Math.hypot(offsetX, offsetZ);
     lastCorrection = error;
@@ -747,7 +812,8 @@ export function createWorld(options: WorldOptions): World {
     if (error <= SNAP_METRES) return;
     offsetX = 0;
     offsetZ = 0;
-    body = { x: place.x, z: place.z };
+    body = { x: predicted.x, z: predicted.z };
+    lastSolid = { x: body.x, z: body.z };
   }
 
   /**
@@ -760,11 +826,22 @@ export function createWorld(options: WorldOptions): World {
     dir: { dx: number; dz: number },
     look: { yaw: number; pitch: number },
   ): number {
+    // Nothing downstream of here can recover from a body that is not a place, so the
+    // frame starts from the last one that was, with a thumb that is a real direction.
+    if (!solid(body)) body = { x: lastSolid.x, z: lastSolid.z };
+    if (!solid(predicted)) predicted = { x: body.x, z: body.z };
+    if (!Number.isFinite(offsetX) || !Number.isFinite(offsetZ)) {
+      offsetX = 0;
+      offsetZ = 0;
+    }
+    const dx = Number.isFinite(dir.dx) ? dir.dx : 0;
+    const dz = Number.isFinite(dir.dz) ? dir.dz : 0;
+
     const speed = gear.sprint ? SPRINT_SPEED : WALK_SPEED;
     const fromX = body.x;
     const fromZ = body.z;
 
-    const walked = stepAlong(predicted, dir.dx, dir.dz, dt);
+    const walked = stepAlong(predicted, dx, dz, dt);
     const forward = Math.hypot(walked.x - predicted.x, walked.z - predicted.z);
     predicted = walked;
 
@@ -772,11 +849,11 @@ export function createWorld(options: WorldOptions): World {
     let nextX = offsetX * keep;
     let nextZ = offsetZ * keep;
 
-    const given = (nextX - offsetX) * dir.dx + (nextZ - offsetZ) * dir.dz;
+    const given = (nextX - offsetX) * dx + (nextZ - offsetZ) * dz;
     const floor = -BACK_SHARE * forward;
     if (given < floor) {
-      nextX += dir.dx * (floor - given);
-      nextZ += dir.dz * (floor - given);
+      nextX += dx * (floor - given);
+      nextZ += dz * (floor - given);
     }
 
     let stepX = walked.x + nextX - fromX;
@@ -797,21 +874,32 @@ export function createWorld(options: WorldOptions): World {
       PLAYER_RADIUS,
       boxes,
     );
+    // The walk itself is the last place a NaN can get in: a wall list or a thumb that
+    // went bad takes the body back to the last place it really stood.
+    if (!solid(body)) {
+      body = { x: lastSolid.x, z: lastSolid.z };
+      predicted = { x: lastSolid.x, z: lastSolid.z };
+      offsetX = 0;
+      offsetZ = 0;
+    } else {
+      lastSolid = { x: body.x, z: body.z };
+    }
+
     offsetX = body.x - predicted.x;
     offsetZ = body.z - predicted.z;
 
     const travelled = Math.hypot(body.x - fromX, body.z - fromZ);
-    lastStep = travelled;
+    lastStep = Number.isFinite(travelled) ? travelled : 0;
 
     if (me) {
       me.group.position.set(body.x, 0, body.z);
       me.group.rotation.y = look.yaw;
-      me.setMoving(dt > 0 ? travelled / dt : 0);
+      me.setMoving(dt > 0 ? lastStep / dt : 0);
       me.update(dt);
     }
     if (marker) marker.position.set(body.x, 0.03, body.z);
 
-    return travelled;
+    return lastStep;
   }
 
   const eye = new THREE.Vector3();
@@ -863,6 +951,47 @@ export function createWorld(options: WorldOptions): World {
       best = { yaw: Math.atan2(dx, dz), pitch: Math.atan2(dy, flat), at, distance };
     }
     return best;
+  }
+
+  /**
+   * Off production the page carries a debug handle the browser checks read. The crosshair
+   * is hung on it from here rather than from where the handle is built, because the handle
+   * is built after the world is and would otherwise know nothing about this reading.
+   */
+  let handled: object | null = null;
+  function publishCrosshair(): void {
+    if (!dev) return;
+    const page = window as unknown as { vettaiDebug?: Record<string, unknown> };
+    const handle = page.vettaiDebug;
+    if (!handle || handle === handled) return;
+    handled = handle;
+    handle.crosshair = () => crosshair;
+  }
+
+  /** True while the player stands inside the office circle, where every shot is refused. */
+  function insideSafeCircle(): boolean {
+    if (safeRadius <= 0) return false;
+    return Math.hypot(body.x - map.office.x, body.z - map.office.z) <= safeRadius;
+  }
+
+  /**
+   * What the crosshair is on. The shot itself keeps the wide yaw cone, because a thumb on
+   * a moving phone cannot hold a drone six metres overhead, but the ring is honest: it
+   * only lights on a drone the crosshair is really pointed at, and never from inside the
+   * circle, where the world refuses the shot whatever the screen says.
+   */
+  function readCrosshair(look: { yaw: number; pitch: number }, shot: Shot | null): Crosshair {
+    const safe = insideSafeCircle();
+    if (shot === null || safe) {
+      return { hot: false, insideSafeCircle: safe, droneAboveView: false };
+    }
+
+    const off = shot.pitch - look.pitch;
+    const hot = Math.abs(off) <= ASSIST_CONE;
+    // The top edge of the frame, worked out from the camera rather than from the control
+    // that tilts it: a drone past this one is off the screen, however far the thumb pushes.
+    const topEdge = (camera.fov * Math.PI) / 360;
+    return { hot, insideSafeCircle: false, droneAboveView: !hot && off > topEdge };
   }
 
   /**
@@ -961,6 +1090,7 @@ export function createWorld(options: WorldOptions): World {
         drone.group.rotation.y = sample.yaw;
       }
       animateDrone(drone.group, elapsed, !reduced);
+      setDroneDetail(drone.group, drone.group.position.distanceTo(camera.position));
       const flashing = now < drone.flashUntil;
       drone.group.scale.setScalar(flashing ? 1.25 : 1);
     }
@@ -1078,9 +1208,10 @@ export function createWorld(options: WorldOptions): World {
 
       you = youOf(frame);
       const mine = frame.players.find((wire) => wire.id === you);
-      if (mine) {
+      if (mine && Number.isFinite(mine.x) && Number.isFinite(mine.z)) {
         predicted = { x: mine.x, z: mine.z };
         body = { x: mine.x, z: mine.z };
+        lastSolid = { x: mine.x, z: mine.z };
         offsetX = 0;
         offsetZ = 0;
         pending.length = 0;
@@ -1216,6 +1347,12 @@ export function createWorld(options: WorldOptions): World {
       // the phone asks for less motion.
       const sceneTime = reduced ? 0 : now / 1000;
       animateCity(city, sceneTime);
+      if (safeRing) {
+        // The line breathes, slowly, so the eye reads it as a live rule rather than as
+        // paint on the road. Held still when the phone has asked for less motion.
+        const material = safeRing.material as THREE.MeshBasicMaterial;
+        material.opacity = reduced ? 0.22 : 0.19 + 0.07 * Math.sin(sceneTime * 1.6);
+      }
       neon.update(sceneTime);
       sky.update(sceneTime, camera.position);
 
@@ -1230,13 +1367,19 @@ export function createWorld(options: WorldOptions): World {
       killFlash.visible = killFlashAt > 0 && now - killFlashAt < KILL_FLASH_MS;
 
       const shot = assist(look);
-      paintRing(shot);
+      const reading = readCrosshair(look, shot);
+      paintRing(reading.hot ? shot : null);
       fadeShot(now);
 
-      const hot = shot !== null;
-      if (hot !== aimHot) {
-        aimHot = hot;
-        options.onAim(hot);
+      publishCrosshair();
+      const changed =
+        reading.hot !== crosshair.hot ||
+        reading.insideSafeCircle !== crosshair.insideSafeCircle ||
+        reading.droneAboveView !== crosshair.droneAboveView;
+      if (changed) {
+        crosshair = reading;
+        aimHot = reading.hot;
+        options.onAim(aimHot, crosshair);
       }
 
       const near = nearestPlace();
@@ -1271,6 +1414,8 @@ export function createWorld(options: WorldOptions): World {
     cameraAt: () => ({ x: camera.position.x, y: camera.position.y, z: camera.position.z }),
 
     killFlashAt: () => killFlashAt,
+
+    crosshair: () => crosshair,
 
     stats: () => {
       let worstStep = 0;
@@ -1322,6 +1467,7 @@ export function createWorld(options: WorldOptions): World {
     },
 
     dispose() {
+      live = false;
       for (const [, entry] of players) dropPlayer(entry);
       players.clear();
       for (const [, view] of drones) {

@@ -37,6 +37,24 @@ export type WorldMap = {
 /** Drones fly their loops at this height, matching PATROL_Y on the server. */
 export const PATROL_Y = 6;
 
+/**
+ * The numbers the world server and this client have to agree on. Only the ones the scene
+ * draws with are listed: the rest of the endpoint is the simulation's business.
+ */
+export type WorldConstants = {
+  officeSafeRadius: number;
+  interactRange: number;
+  patrolY: number;
+  hitscanRange: number;
+  aimConeDegrees: number;
+};
+
+export async function fetchWorldConstants(signal?: AbortSignal): Promise<WorldConstants> {
+  const response = await fetch("/api/world/constants", { signal });
+  if (!response.ok) throw new Error(`the world server answered ${response.status}`);
+  return (await response.json()) as WorldConstants;
+}
+
 export async function fetchWorldMap(signal?: AbortSignal): Promise<WorldMap> {
   const response = await fetch("/api/world/map", { signal });
   if (!response.ok) throw new Error(`the world server answered ${response.status}`);

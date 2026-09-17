@@ -564,6 +564,48 @@ export function animateDrone(drone: THREE.Group, elapsed: number, spin: boolean)
 }
 
 /**
+ * Where the belly light and the searchlight on the road stop earning their draw calls, and
+ * where the beacon halo does. Twelve drones at four calls each is a fifth of the whole
+ * frame budget, and at twenty metres the pool on the street is a smudge the size of a
+ * fingernail. The halo holds all the way out to the range a blaster reaches, because a red
+ * light in the dark is how a player finds the next drone.
+ */
+const LIGHT_FULL_M = 14;
+const LIGHT_GONE_M = 20;
+const HALO_FULL_M = 52;
+const HALO_GONE_M = 60;
+
+/** One at full strength, nothing past `gone`, and a straight fade in between. */
+function strength(distance: number, full: number, gone: number): number {
+  if (!Number.isFinite(distance) || distance <= full) return 1;
+  if (distance >= gone) return 0;
+  return 1 - (distance - full) / (gone - full);
+}
+
+/**
+ * Trims a drone to what can actually be seen of it at this range. Run it after
+ * animateDrone, which writes every light back up to full strength on each frame.
+ */
+export function setDroneDetail(drone: THREE.Group, distance: number): void {
+  const parts = drone.userData.parts as DroneParts | undefined;
+  if (!parts) return;
+
+  const near = strength(distance, LIGHT_FULL_M, LIGHT_GONE_M);
+  if (parts.under && parts.underMaterial) {
+    parts.under.visible = near > 0;
+    parts.underMaterial.opacity *= near;
+  }
+  if (parts.pool && parts.poolMaterial) {
+    parts.pool.visible = near > 0;
+    parts.poolMaterial.opacity *= near;
+  }
+
+  const far = strength(distance, HALO_FULL_M, HALO_GONE_M);
+  parts.halo.visible = far > 0;
+  parts.haloMaterial.opacity *= far;
+}
+
+/**
  * Puts a drone on its loop, `travelled` metres in. The loop is the list of street
  * crossings the server sent, walked in order and closed back to the first, so a drone on
  * the hero flies the same path a drone in the live game does.

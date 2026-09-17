@@ -12,9 +12,55 @@ const EASE = [0.16, 1, 0.3, 1] as const;
 
 type Stats = {
   playersToday: number;
+  playersAllTime: number;
   killsToday: number;
   paidNim: string;
 };
+
+type Counter = {
+  label: string;
+  value: string;
+  /** Today's figure, shown small beside the all time one, or null when today is empty. */
+  today: string | null;
+};
+
+/**
+ * What the first live numbers on the page say. All time leads, because a world whose first
+ * three readings are zeros reads as a world nobody is in. A row whose number is zero is
+ * dropped rather than printed.
+ */
+function counters(live: Live): Counter[] {
+  if (live.state !== "ready") {
+    const holding = live.state === "loading" ? "..." : "offline";
+    return [
+      { label: "Hunters", value: holding, today: null },
+      { label: "Drones downed", value: holding, today: null },
+      { label: "NIM paid", value: holding, today: null },
+    ];
+  }
+
+  const stats = live.stats;
+  const rows: Counter[] = [];
+
+  if (stats.playersAllTime > 0) {
+    rows.push({
+      label: "Hunters",
+      value: whole(stats.playersAllTime),
+      today: stats.playersToday > 0 ? `${whole(stats.playersToday)} today` : null,
+    });
+  }
+  // The server counts kills for today and for the last seven days, never for all time, so
+  // this row can only ever say today and it stands down on a quiet morning.
+  if (stats.killsToday > 0) {
+    rows.push({ label: "Drones downed today", value: whole(stats.killsToday), today: null });
+  }
+  if (Number(stats.paidNim) > 0) {
+    rows.push({ label: "NIM paid", value: nim(stats.paidNim), today: null });
+  }
+
+  if (rows.length === 0) return [{ label: "The city", value: "open", today: null }];
+  return rows;
+}
 
 type Live =
   | { state: "loading" }
@@ -84,13 +130,7 @@ export default function Hero() {
 
   const openInPay = host ? `https://nimpay.app/miniapps/open/${host}/play` : "/play";
 
-  const reading = (value: string) => {
-    if (live.state === "loading") return "...";
-    if (live.state === "offline") return "offline";
-    return value;
-  };
-
-  const stats = live.state === "ready" ? live.stats : null;
+  const rows = counters(live);
 
   return (
     <>
@@ -209,14 +249,19 @@ export default function Hero() {
                 <span aria-hidden className="live-dot h-1.5 w-1.5 rounded-full bg-hunt" />
                 <span className="label-type text-paper/40">Live from the block</span>
               </div>
-              {[
-                ["Hunters today", reading(whole(stats?.playersToday ?? 0))],
-                ["Drones downed today", reading(whole(stats?.killsToday ?? 0))],
-                ["NIM paid", reading(nim(stats?.paidNim ?? "0"))],
-              ].map(([label, value]) => (
-                <div key={label} className="flex items-baseline gap-3 md:justify-end">
-                  <dt className="label-type text-paper/40">{label}</dt>
-                  <dd className="font-mono text-[0.9375rem] tabular-nums text-paper">{value}</dd>
+              {rows.map((row) => (
+                <div key={row.label} className="flex items-baseline gap-3 md:justify-end">
+                  <dt className="label-type text-paper/40">{row.label}</dt>
+                  <dd className="flex items-baseline gap-2">
+                    <span className="font-mono text-[0.9375rem] tabular-nums text-paper">
+                      {row.value}
+                    </span>
+                    {row.today && (
+                      <span className="font-mono text-[11px] tabular-nums text-hunt">
+                        +{row.today}
+                      </span>
+                    )}
+                  </dd>
                 </div>
               ))}
             </motion.dl>

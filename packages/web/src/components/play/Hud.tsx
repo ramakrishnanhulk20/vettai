@@ -45,11 +45,21 @@ export type HudProps = {
   quests: QuestView[];
   /** The one thing to do next. The sentence comes from React, the metres from the frame. */
   objective: Objective | null;
+  /**
+   * This week's kills and where they stand, once today's hunt is finished. Null while the
+   * hunt is still open. `rank` is null when the wallet is outside the ten places the ladder
+   * publishes, and the strip then shows the count alone.
+   */
+  hunt: { count: number; rank: number | null } | null;
   /** When a carried parcel goes cold, as a clock reading, or null when nothing is carried. */
   carryUntil: number | null;
   toasts: Toast[];
   latency: number | null;
   aimHot: boolean;
+  /** True when the drone the shot would take is above the top of the screen. */
+  aimAbove: boolean;
+  /** True for a few seconds after a trigger pull the office circle refused. */
+  officeNote: boolean;
   /** The moment of the last shot this phone drew, which kicks the crosshair. */
   firedAt: number;
   /** The action for the place the player is standing on, accent when it is the objective. */
@@ -68,6 +78,8 @@ export type HudProps = {
   attachFire: (button: HTMLElement | null) => void;
   /** The moment the last shield bar was lost, which flashes the edge of the screen. */
   hitAt: number;
+  /** When the body gets up again, as a clock reading, or 0 while the player is on their feet. */
+  downedUntil: number;
   /** While a panel is up the thumb belongs to the panel, so the controls step back. */
   sheetOpen: boolean;
   reduced: boolean;
@@ -85,6 +97,29 @@ function questTitle(kind: QuestView["kind"]): string {
   return "Streak";
 }
 
+/**
+ * What the job the objective is pointing at pays, in NIM, as the server wrote it on the
+ * quest row. Empty when the objective is not a job or when today has nothing left to pay
+ * on it, because a "0 NIM" on the street would be worse than saying nothing.
+ */
+function objectiveReward(objective: Objective | null, quests: QuestView[]): string {
+  if (!objective || objective.questId === null) return "";
+  const quest = quests.find((row) => row.id === objective.questId);
+  if (!quest || Number(quest.rewardLuna) <= 0) return "";
+  return quest.rewardNim;
+}
+
+/** 3 becomes "3rd". The ladder's places are read out loud by everybody who sees them. */
+function ordinal(place: number): string {
+  const tens = place % 100;
+  if (tens >= 11 && tens <= 13) return `${place}th`;
+  const last = place % 10;
+  if (last === 1) return `${place}st`;
+  if (last === 2) return `${place}nd`;
+  if (last === 3) return `${place}rd`;
+  return `${place}th`;
+}
+
 function questCount(quest: QuestView): string {
   if (quest.kind === "landmarks" && quest.visited) {
     return `${quest.visited.filter(Boolean).length}/${quest.target}`;
@@ -96,10 +131,13 @@ export default function Hud({
   shield,
   quests,
   objective,
+  hunt,
   carryUntil,
   toasts,
   latency,
   aimHot,
+  aimAbove,
+  officeNote,
   firedAt,
   prompt,
   onInteract,
@@ -110,11 +148,13 @@ export default function Hud({
   paidAt,
   attachFire,
   hitAt,
+  downedUntil,
   sheetOpen,
   reduced,
   readout,
 }: HudProps) {
   const claimable = quests.some((quest) => quest.state === "done" && Number(quest.rewardLuna) > 0);
+  const downed = downedUntil > 0;
   const [openReadout, setOpenReadout] = useState(false);
   const [panel, setPanel] = useState<Panel | null>(null);
   const [copied, setCopied] = useState(false);
@@ -156,6 +196,17 @@ export default function Hud({
         )}
       </AnimatePresence>
 
+      {/* The street behind the top of the screen can be a lit shop sign, and white type on
+          a lit shop sign is nothing at all. Everything up here sits on this. */}
+      <div
+        aria-hidden
+        className="absolute inset-x-0 top-0 h-44"
+        style={{
+          background:
+            "linear-gradient(to bottom, rgba(11,15,26,0.78) 0%, rgba(11,15,26,0.42) 46%, rgba(11,15,26,0) 100%)",
+        }}
+      />
+
       <Compass reduced={reduced} />
 
       <div className="absolute left-4 top-[max(3.1rem,calc(env(safe-area-inset-top)+2.6rem))] flex flex-col gap-2">
@@ -173,58 +224,92 @@ export default function Hud({
             />
           ))}
         </div>
-        <span className="label-type text-paper/45">Shield</span>
-        <Objective objective={objective} carryUntil={carryUntil} reduced={reduced} />
+        <span className="label-type text-paper/70">Shield</span>
+        <Objective
+          objective={objective}
+          reward={objectiveReward(objective, quests)}
+          carryUntil={carryUntil}
+          reduced={reduced}
+        />
       </div>
 
-      <div className="absolute right-4 top-[max(3.1rem,calc(env(safe-area-inset-top)+2.6rem))] flex w-40 flex-col items-end gap-1.5 text-right">
-      <button
-        type="button"
-        onClick={onOpenBoard}
-        data-testid="hud-quests"
-        aria-label="Open the day's jobs"
-        className={`pointer-events-auto flex w-full flex-col items-end gap-1.5 text-right transition-opacity duration-300 ${
-          sheetOpen ? "opacity-30" : "opacity-100"
-        }`}
-      >
-        <span className={`label-type ${claimable ? "text-hunt" : "text-paper/45"}`}>
-          {claimable ? "Today, claim" : "Today"}
-        </span>
-        {quests.map((quest) => (
-          <motion.span
-            key={quest.id}
-            initial={{ opacity: 0, x: 16 }}
-            animate={{ opacity: 1, x: 0 }}
-            transition={{ duration: reduced ? 0 : 0.4, ease: "easeOut" }}
-            className="flex w-full items-baseline justify-end gap-2"
+      <div className="absolute right-4 top-[max(3.1rem,calc(env(safe-area-inset-top)+2.6rem))] flex w-44 flex-col items-end gap-1">
+        {/* The day's jobs wear the same plate the objective line wears. Only the header is
+            a button: the rows underneath let a look-swipe through to the street, which is
+            the control that lives in this half of the screen. */}
+        <div
+          data-testid="quest-strip"
+          className={`flex w-full flex-col items-end gap-1.5 border-r-2 border-hunt bg-night/55 py-2 pl-3 pr-2.5 text-right backdrop-blur-sm transition-opacity duration-300 ${
+            sheetOpen ? "opacity-30" : "opacity-100"
+          } ${styles.strip}`}
+        >
+          <button
+            type="button"
+            onClick={onOpenBoard}
+            data-testid="hud-quests"
+            aria-label="Open the day's jobs"
+            className={`pointer-events-auto flex w-full items-center justify-end ${styles.action} ${
+              claimable ? "text-hunt" : "text-paper/70"
+            }`}
           >
-            <span
-              className={`label-type ${quest.state === "open" ? "text-paper/55" : "text-hunt"}`}
-            >
-              {questTitle(quest.kind)}
-            </span>
-            <span className="font-mono text-xs text-paper/80">
-              {quest.state === "open" ? questCount(quest) : "done"}
-            </span>
-            {quest.state !== "open" && (
-              <span aria-hidden className="text-xs leading-none text-hunt">
-                &#10003;
+            {claimable ? "Today, claim" : "Today"}
+          </button>
+
+          <div className="pointer-events-none flex w-full flex-col items-end gap-1.5">
+            {quests.map((quest) => {
+              // The hunt is the one job that keeps counting past its target, and that count
+              // is what the weekly ladder pays on, so the row stops saying "done" the moment
+              // there is a real number to show instead.
+              const kills = quest.kind === "hunt" && quest.state !== "open" ? hunt : null;
+              return (
+                <motion.span
+                  key={quest.id}
+                  initial={{ opacity: 0, x: 16 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ duration: reduced ? 0 : 0.4, ease: "easeOut" }}
+                  className="flex w-full flex-wrap items-baseline justify-end gap-x-2 gap-y-0.5"
+                >
+                  <span
+                    className={`label-type ${quest.state === "open" ? "text-paper/70" : "text-hunt"}`}
+                  >
+                    {questTitle(quest.kind)}
+                  </span>
+                  <span className="font-mono text-xs text-paper/85" data-testid={`strip-${quest.kind}`}>
+                    {quest.state === "open"
+                      ? questCount(quest)
+                      : kills
+                        ? `${kills.count} ${kills.count === 1 ? "kill" : "kills"}`
+                        : "done"}
+                  </span>
+                  {quest.state !== "open" && (
+                    <span aria-hidden className="text-xs leading-none text-hunt">
+                      &#10003;
+                    </span>
+                  )}
+                  {kills?.rank && (
+                    <span
+                      className="w-full font-mono text-[11px] text-hunt"
+                      data-testid="hunt-rank"
+                    >
+                      {ordinal(kills.rank)} this week
+                    </span>
+                  )}
+                </motion.span>
+              );
+            })}
+            {payouts > 0 && (
+              <span className="mt-1 font-mono text-[11px] text-hunt" data-testid="payouts-line">
+                {payouts === 1 ? "1 payout on its way" : `${payouts} payouts on their way`}
               </span>
             )}
-          </motion.span>
-        ))}
-        {payouts > 0 && (
-          <span className="mt-1 font-mono text-[11px] text-hunt" data-testid="payouts-line">
-            {payouts === 1 ? "1 payout on its way" : `${payouts} payouts on their way`}
-          </span>
-        )}
-        {held > 0 && (
-          <span className="mt-1 font-mono text-[11px] text-paper/70" data-testid="held-line">
-            {held === 1 ? "1 payout held" : `${held} payouts held`}
-            {heldOnPool ? ", pool exhausted" : " until tomorrow"}
-          </span>
-        )}
-      </button>
+            {held > 0 && (
+              <span className="mt-1 font-mono text-[11px] text-paper/80" data-testid="held-line">
+                {held === 1 ? "1 payout held" : `${held} payouts held`}
+                {heldOnPool ? ", the prize pool is empty" : " until tomorrow"}
+              </span>
+            )}
+          </div>
+        </div>
 
         {latency !== null && (
           <button
@@ -233,16 +318,16 @@ export default function Hud({
             data-testid="latency"
             aria-label="Show what this phone is doing"
             aria-expanded={openReadout}
-            className={`pointer-events-auto mt-1 font-mono text-[10px] tracking-wide transition-colors duration-200 hover:text-hunt ${
-              openReadout ? "text-hunt" : "text-paper/30"
+            className={`pointer-events-auto font-mono text-[14px] tracking-wide transition-colors duration-200 hover:text-hunt ${styles.tap} ${
+              openReadout ? "text-hunt" : "text-paper/60"
             }`}
           >
             {latency} ms
           </button>
         )}
         {latency !== null && latency > 250 && (
-          <span className="font-mono text-[10px] text-paper/30" data-testid="far-note">
-            far from the server
+          <span className="font-mono text-[11px] text-paper/60" data-testid="far-note">
+            slow line to the server
           </span>
         )}
       </div>
@@ -258,27 +343,29 @@ export default function Hud({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: reduced ? 0 : -8 }}
             transition={{ duration: reduced ? 0 : 0.22, ease: "easeOut" }}
-            className={`pointer-events-auto absolute left-4 top-[max(9.4rem,calc(env(safe-area-inset-top)+8.9rem))] max-h-[calc(46svh-9.4rem)] w-max max-w-[60%] overflow-y-auto border border-line bg-night/85 p-2.5 text-left backdrop-blur-sm ${styles.readout}`}
+            className={`pointer-events-auto absolute left-4 top-[max(9.4rem,calc(env(safe-area-inset-top)+8.9rem))] flex max-h-[calc(46svh-9.4rem)] w-max max-w-[62%] flex-col overflow-hidden border border-line bg-night/85 p-2.5 text-left backdrop-blur-sm ${styles.readout}`}
           >
-            {panel === null ? (
-              <p className="font-mono text-[9px] text-paper/40 min-[390px]:text-[10px]">
-                reading the frame
-              </p>
-            ) : (
-              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-[3px] font-mono text-[9px] leading-tight min-[390px]:text-[10px]">
-                {readoutRows(panel).map(([label, value]) => (
-                  <div key={label} className="contents">
-                    <dt className="text-paper/45">{label}</dt>
-                    <dd className="truncate text-right text-paper/85">{value}</dd>
-                  </div>
-                ))}
-              </dl>
-            )}
+            {/* The list scrolls, the copy button does not: the one thing this panel is for
+                is handing a reading to somebody else. */}
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {panel === null ? (
+                <p className="font-mono text-[11px] text-paper/50">reading the frame</p>
+              ) : (
+                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-[3px] font-mono text-[11px] leading-tight">
+                  {readoutRows(panel).map(([label, value]) => (
+                    <div key={label} className="contents">
+                      <dt className="text-paper/55">{label}</dt>
+                      <dd className="truncate text-right text-paper/90">{value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+            </div>
             <button
               type="button"
               onClick={copyReadout}
               data-testid="readout-copy"
-              className="label-type mt-2 w-full border border-line px-2 py-1.5 text-paper/60 transition-colors duration-200 hover:border-hunt hover:text-paper"
+              className={`mt-2 flex w-full shrink-0 items-center justify-center border border-line px-2 text-paper/70 transition-colors duration-200 hover:border-hunt hover:text-paper ${styles.action}`}
             >
               {copied ? "copied" : "copy"}
             </button>
@@ -311,6 +398,28 @@ export default function Hud({
 
       <AnimatePresence>
         {aimHot && !sheetOpen && <AimRing key="aim-ring" reduced={reduced} />}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {aimAbove && !sheetOpen && !downed && <Overhead key="overhead" reduced={reduced} />}
+      </AnimatePresence>
+
+      {/* The one rule in this city nothing on screen used to mention. It is said at the
+          moment it bites, which is the trigger pull, and it says where to go. */}
+      <AnimatePresence>
+        {officeNote && !sheetOpen && (
+          <motion.p
+            key="office-note"
+            data-testid="office-note"
+            initial={{ opacity: 0, y: reduced ? 0 : 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: reduced ? 0 : 0.25, ease: "easeOut" }}
+            className="absolute inset-x-0 top-[calc(50%+2.6rem)] mx-auto w-max max-w-[86%] rounded-btn border border-hunt/50 bg-night/80 px-4 py-2.5 text-center text-sm text-paper backdrop-blur"
+          >
+            No shooting at the office. Step outside the ring.
+          </motion.p>
+        )}
       </AnimatePresence>
 
       <AnimatePresence>
@@ -348,18 +457,23 @@ export default function Hud({
         )}
       </AnimatePresence>
 
+      <AnimatePresence>{downed && <Downed until={downedUntil} reduced={reduced} />}</AnimatePresence>
+
       <motion.button
         type="button"
         ref={attachFire}
         initial={{ opacity: 0, scale: 0.9 }}
-        animate={{ opacity: sheetOpen ? 0 : 1, scale: sheetOpen ? 0.9 : 1 }}
+        animate={{
+          opacity: sheetOpen ? 0 : downed ? 0.3 : 1,
+          scale: sheetOpen ? 0.9 : 1,
+        }}
         transition={{ duration: reduced ? 0 : 0.35, ease: "easeOut" }}
-        whileTap={reduced ? undefined : { scale: 0.92 }}
+        whileTap={reduced || downed ? undefined : { scale: 0.92 }}
         aria-label="Fire"
         aria-hidden={sheetOpen}
         data-testid="fire"
-        className={`label-type absolute bottom-[max(2.5rem,calc(env(safe-area-inset-bottom)+1.5rem))] right-6 flex h-[72px] w-[72px] items-center justify-center rounded-full border-2 border-hunt bg-hunt/15 text-hunt backdrop-blur-sm transition-colors duration-200 hover:bg-hunt/30 ${
-          sheetOpen ? "pointer-events-none" : "pointer-events-auto"
+        className={`absolute bottom-[max(2.5rem,calc(env(safe-area-inset-bottom)+1.5rem))] right-6 flex h-[72px] w-[72px] items-center justify-center rounded-full border-2 border-hunt bg-hunt/15 text-hunt backdrop-blur-sm transition-colors duration-200 hover:bg-hunt/30 ${styles.action} ${
+          sheetOpen || downed ? "pointer-events-none" : "pointer-events-auto"
         }`}
         style={{ touchAction: "none" }}
       >
@@ -380,16 +494,80 @@ export default function Hud({
 }
 
 /**
+ * Three seconds on the ground, held on screen for every one of them. The number is the
+ * whole message: the game has not broken, and this is how long until the stick answers
+ * again. A toast that outlived two and a half of those seconds left the screen looking
+ * exactly like a working one.
+ */
+function Downed({ until, reduced }: { until: number; reduced: boolean }) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 200);
+    return () => clearInterval(timer);
+  }, []);
+
+  const left = Math.max(0, until - now);
+  const seconds = Math.ceil(left / 1000);
+
+  return (
+    <motion.div
+      key="downed"
+      data-testid="downed"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: reduced ? 0 : 0.25, ease: "easeOut" }}
+      className="pointer-events-none absolute inset-0 z-30 flex flex-col items-center justify-center bg-night/72 px-8 text-center backdrop-blur-[2px]"
+    >
+      <span
+        aria-hidden
+        className="absolute inset-0"
+        style={{
+          background:
+            "radial-gradient(80% 55% at 50% 50%, rgba(255,77,109,0.22) 0%, rgba(11,15,26,0) 70%)",
+        }}
+      />
+      <span className="label-type relative text-bad">Downed</span>
+      {seconds > 0 ? (
+        <>
+          <motion.span
+            key={seconds}
+            initial={{ opacity: 0, scale: reduced ? 1 : 1.25 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: reduced ? 0 : 0.3, ease: "easeOut" }}
+            className="display-type relative mt-2 leading-[0.8] text-paper"
+            style={{ fontSize: "clamp(5rem,26vw,9rem)" }}
+          >
+            {seconds}
+          </motion.span>
+          <span className="relative mt-3 text-base text-paper/70">
+            Back on your feet in {seconds} {seconds === 1 ? "second" : "seconds"}
+          </span>
+        </>
+      ) : (
+        <span className="display-type relative mt-3 text-[clamp(2rem,9vw,3rem)] uppercase leading-none tracking-[-0.02em] text-paper">
+          Getting you up
+        </span>
+      )}
+    </motion.div>
+  );
+}
+
+/**
  * The line that answers "what now". The words change only when the job changes, so they
  * come from React; the metres change every frame, so they arrive as a CSS variable the
  * render loop writes and this span prints. Nothing here renders sixty times a second.
  */
 function Objective({
   objective,
+  reward,
   carryUntil,
   reduced,
 }: {
   objective: Objective | null;
+  /** What this job pays, in NIM, straight off the quest row. Empty when it pays nothing. */
+  reward: string;
   carryUntil: number | null;
   reduced: boolean;
 }) {
@@ -404,12 +582,27 @@ function Objective({
           exit={{ opacity: 0, y: reduced ? 0 : -6 }}
           transition={{ duration: reduced ? 0 : 0.3, ease: "easeOut" }}
           data-testid="objective"
-          className={`mt-0.5 max-w-[64vw] border-l-2 border-hunt bg-night/55 py-1.5 pl-2.5 pr-3 backdrop-blur-sm ${styles.objective}`}
+          className={`mt-0.5 max-w-[calc(100vw-13rem)] border-l-2 border-hunt bg-night/55 py-1.5 pl-2.5 pr-3 backdrop-blur-sm ${styles.objective}`}
         >
-          <p className="flex items-baseline gap-2">
-            <span className="display-type text-[1.05rem] uppercase leading-none tracking-[0.01em] text-paper">
-              {objective.sentence}
-            </span>
+          {/* The money is the whole point of walking anywhere, so it sits in the sentence
+              rather than one tap away on the board. The line runs as text rather than as a
+              row of boxes: on a 390 pixel screen the job wraps, and the amount and the
+              metres have to land together under it, not one orphan each. */}
+          <p className="display-type text-[1.05rem] uppercase leading-tight tracking-[0.01em] text-paper">
+            {objective.sentence}
+            {reward !== "" && ","}
+          </p>
+          {/* The amount and the metres are one reading and they stay one line. The job above
+              is what wraps on a 390 pixel screen, and it may not drag the money with it. */}
+          <p className="mt-0.5">
+            {reward !== "" && (
+              <span data-testid="objective-reward" className={styles.reward}>
+                {reward} NIM
+              </span>
+            )}
+            {/* The space is load bearing: without it the amount and the metres are one
+                unbreakable run and a long walk pushes the metres off the plate. */}
+            {reward !== "" && " "}
             <span aria-hidden data-testid="objective-range" className={styles.range} />
           </p>
           {carryUntil !== null && <Countdown until={carryUntil} dim={elsewhere} />}
@@ -457,8 +650,10 @@ function readoutRows(panel: Panel): [string, string][] {
     ["intents", `${panel.sendRate}/s`],
     ["draw calls", String(panel.calls)],
     ["triangles", String(panel.triangles)],
-    ["pixel ratio", panel.pixelRatio.toFixed(2)],
-    ["canvas", `${panel.width}x${panel.height} (${panel.bufferWidth}x${panel.bufferHeight})`],
+    [
+      "canvas",
+      `${panel.width}x${panel.height} @${panel.pixelRatio.toFixed(2)} (${panel.bufferWidth}x${panel.bufferHeight})`,
+    ],
     ["webgl", String(panel.webgl)],
     ["gpu", panel.gpu],
     ["build", BUILD],
@@ -514,6 +709,38 @@ function AimRing({ reduced }: { reduced: boolean }) {
         ))}
       </motion.div>
     </div>
+  );
+}
+
+/**
+ * The drone the shot would take is off the top of the screen. An engaged drone closes to
+ * six metres and hangs six up, so the fight happens above the roofline of the crosshair and
+ * a player with no arrow to follow reads it as being shot by nothing.
+ */
+function Overhead({ reduced }: { reduced: boolean }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: reduced ? 0 : 6 }}
+      animate={reduced ? { opacity: 1, y: 0 } : { opacity: 1, y: [0, -6, 0] }}
+      exit={{ opacity: 0 }}
+      transition={
+        reduced
+          ? { duration: 0 }
+          : { y: { duration: 1.4, repeat: Infinity, ease: "easeInOut" }, opacity: { duration: 0.2 } }
+      }
+      data-testid="overhead"
+      className="absolute left-1/2 top-[max(5.6rem,calc(env(safe-area-inset-top)+5.2rem))] flex -translate-x-1/2 flex-col items-center gap-1"
+    >
+      <svg width="26" height="14" viewBox="0 0 26 14" fill="none" aria-hidden>
+        <path
+          d="M2 12 L13 2 L24 12"
+          stroke="var(--hunt)"
+          strokeWidth="2.5"
+          strokeLinecap="square"
+        />
+      </svg>
+      <span className="label-type text-hunt">Above you</span>
+    </motion.div>
   );
 }
 

@@ -28,11 +28,87 @@ export function shortHash(txHash: string): string {
   return `${txHash.slice(0, 10)}...${txHash.slice(-6)}`;
 }
 
+/** A Nimiq address in the four character groups the wallet's own screens use. */
+export function groupAddress(address: string): string {
+  const stripped = address.replace(/\s+/g, "").toUpperCase();
+  return (stripped.match(/.{1,4}/g) ?? [stripped]).join(" ");
+}
+
 /**
- * Which day of the streak today is, counted the same way the server counts it: the run of
- * UTC days directly before today on which this wallet actually claimed its streak, plus
- * today. A claim row exists exactly when a streak quest was claimed, so the claims list is
- * the same evidence the server reads and nothing here is guessed.
+ * An address cut the way the ladder route cuts it before it sends a row, which is the only
+ * way a screen can tell whether one of those rows is this wallet's own.
+ */
+export function shortAddress(address: string): string {
+  const stripped = address.replace(/\s+/g, "").toUpperCase();
+  return `${stripped.slice(0, 8)}...${stripped.slice(-4)}`;
+}
+
+/** What every refusal the world can send says, keyed by the code it sends with it. */
+const REFUSALS: Record<string, string> = {
+  "too far": "Too far away. Walk closer.",
+  "unknown place": "Nothing to do here.",
+  malformed: "That did not go through, try again.",
+  session: "Your sign in ran out. Sign once more and carry on.",
+  not_claimable: "That job is not finished yet. The board has been brought up to date.",
+  bad_signature: "The wallet's signature did not check out. Nothing was sent, claim it again.",
+  other_wallet: "That signature is from another wallet, not the one signed in. Nothing was sent.",
+  nonce: "That claim sat too long and its code expired. Nothing was sent, claim it again.",
+  // The treasury pays a limited number of wallets per connection per day, which a shared
+  // office or a phone network trips long before anybody is gaming anything. The player is
+  // in a queue, not under suspicion, and the sentence has to read that way.
+  "ip cap":
+    "More wallets on this network than we pay in one day. Yours is first in tomorrow's queue.",
+};
+
+/** The refusals the server sends as words with no code of their own. */
+const BY_WORDS: Record<string, string> = {
+  "no such quest": "That job is not on today's board any more.",
+  "already claimed": "You have already claimed that one. The payout is on its way.",
+  "that quest is not done yet": "That job is not finished yet.",
+  "nothing to claim":
+    "There is nothing to pay on that job today. The daily cap resets at midnight UTC.",
+  "message is not a claim challenge for this quest":
+    "That signature did not match the job. Claim it again.",
+};
+
+function sentence(words: string): string {
+  const text = words.trim();
+  if (text === "") return text;
+  const capital = text[0]?.toUpperCase() + text.slice(1);
+  return /[.!?]$/.test(capital) ? capital : `${capital}.`;
+}
+
+/**
+ * One sentence for every refusal the world can hand back, so no screen ever prints a
+ * server log line at a player.
+ *
+ * `detail` is the server's own words on the claim path, used when the code is one this
+ * build has never heard of. On a socket refusal with nothing to do it is the job the
+ * player is being pointed at instead, which is added to the end.
+ */
+export function refusalText(code?: string | null, detail?: string | null): string {
+  const extra = detail?.trim() ?? "";
+
+  if (code === "nothing to do") {
+    return extra === "" ? "Nothing to do here yet." : `Nothing to do here yet. ${sentence(extra)}`;
+  }
+
+  const byCode = code ? REFUSALS[code] : undefined;
+  if (byCode) return byCode;
+
+  const byWords = BY_WORDS[extra.toLowerCase()];
+  if (byWords) return byWords;
+
+  return extra === "" ? "That did not go through, try again." : sentence(extra);
+}
+
+/**
+ * Which day of the streak today is, worked out from the claims this phone can see: the run
+ * of UTC days directly before today on which this wallet claimed its streak, plus today.
+ *
+ * This is the fallback. The server counts a day the daily cap cut to nothing as part of the
+ * run even though it leaves no claim row, and the phone cannot see those days at all, so
+ * when the world sends its own number on the streak quest that number wins.
  */
 export function streakDay(claims: ClaimView[], todayUtc: string): number {
   const claimed = new Set(

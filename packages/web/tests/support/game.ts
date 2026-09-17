@@ -12,6 +12,8 @@ import { newWallet, type Signed, type Wallet } from "./wallet";
 
 export type LoopReading = { running: boolean; frames: number };
 
+export type Place = { x: number; z: number };
+
 type DebugWindow = {
   vettaiDebug?: {
     loop: () => LoopReading;
@@ -19,6 +21,7 @@ type DebugWindow = {
     welcome: (frame: unknown) => void;
     readout: () => { calls: number; triangles: number } | null;
     heap: () => number | null;
+    place: () => Place | null;
   };
   __vettaiSign?: (message: string) => Promise<Signed>;
   nimiq?: unknown;
@@ -87,4 +90,56 @@ export function loop(page: Page): Promise<LoopReading> {
 
 export function session(page: Page): Promise<string | null> {
   return page.evaluate(() => window.localStorage.getItem("vettai.session"));
+}
+
+/** Where the body is standing, as the render loop has it. Null before the city is built. */
+export function place(page: Page): Promise<Place | null> {
+  return page.evaluate(() => {
+    const debug = (window as unknown as DebugWindow).vettaiDebug;
+    return debug?.place() ?? null;
+  });
+}
+
+/**
+ * Pushes the walk stick for a while, with the same pointer events a thumb produces: down on
+ * the left half of the surface, then a move every frame or so, because a stick that holds a
+ * direction without moving for a second and a half is dropped on purpose.
+ *
+ * `dx` and `dy` are the push, in screen directions: dy of -1 is forward.
+ */
+export async function walk(page: Page, ms: number, dx: number, dy: number): Promise<void> {
+  await page.evaluate(
+    ({ ms, dx, dy }) =>
+      new Promise<void>((done) => {
+        const surface = document.querySelector<HTMLElement>('[data-testid="surface"]');
+        if (!surface) throw new Error("the play surface is not on the page");
+
+        const box = surface.getBoundingClientRect();
+        const from = { x: box.width * 0.22, y: box.height * 0.72 };
+        const to = { x: from.x + dx * 70, y: from.y + dy * 70 };
+        const event = (kind: string, at: { x: number; y: number }) =>
+          surface.dispatchEvent(
+            new PointerEvent(kind, {
+              pointerId: 21,
+              pointerType: "touch",
+              isPrimary: true,
+              bubbles: true,
+              cancelable: true,
+              clientX: at.x,
+              clientY: at.y,
+            }),
+          );
+
+        event("pointerdown", from);
+        const started = Date.now();
+        const nudge = setInterval(() => {
+          event("pointermove", to);
+          if (Date.now() - started < ms) return;
+          clearInterval(nudge);
+          event("pointerup", to);
+          done();
+        }, 120);
+      }),
+    { ms, dx, dy },
+  );
 }

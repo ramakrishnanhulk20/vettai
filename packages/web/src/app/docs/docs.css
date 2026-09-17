@@ -466,6 +466,16 @@ a:hover > .docs-mark {
   font-family: var(--docs-body);
 }
 
+/* The two controls the whole docs site is steered by on a phone came out of the library at
+   34 pixels square, which is under the floor for a thumb. The icon inside keeps its size. */
+.docs-shell button[aria-label="Open Search"],
+.docs-shell button[aria-label="Open Sidebar"],
+.docs-shell button[aria-label="Close Sidebar"],
+.docs-shell button[aria-label="Collapse Sidebar"] {
+  min-width: 44px;
+  min-height: 44px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   #nd-sidebar a:hover,
   #nd-sidebar-mobile a:hover,
