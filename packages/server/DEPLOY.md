@@ -121,3 +121,68 @@ With `--fund` the shop check also runs: the treasury key in `packages/server/.en
 floats a fresh wallet, that wallet pays its own order, and the run waits for the deployed
 watcher to settle it. It refuses to start if that key does not derive the address the
 deployment takes payments at.
+
+## Getting the money back
+
+Ram funds the treasury from his phone, so the key lives on the server side only and there
+is no wallet app to open when the NIM has to come back out. One command does it:
+
+```sh
+cd packages/server
+npm run treasury:sweep -- --to NQ63 NLNX 4H6R M3R4 XB92 8Y1X 5GTS JUGC 5QFJ
+```
+
+It reads the key from `packages/server/.env.treasury`, the same file the treasury process
+reads, and never prints it. It follows `NIMIQ_RPC_URL` and `NIMIQ_NETWORK` from `.env`, so
+it empties whichever wallet that environment points at.
+
+Run it once without `--yes` first. That prints the plan (network, from, to, balance, what
+is being sent, what is left) and sends nothing. npm reports the dry run as a failed script
+because the command exits 1 whenever it did not send: forgetting `--yes` inside a script
+must never read as a sweep that happened. Add `--yes` to the same line to send it.
+
+| Option | What it does |
+|---|---|
+| `--to` | The address the money goes to. The spaced form pastes in fine, quotes or not |
+| `--amount` | An amount of NIM, for example `0.1`. Left out, it sends the whole balance |
+| `--memo` | Text carried with the payment, up to 64 bytes. Default `vettai treasury sweep` |
+| `--yes` | Actually send it. Without this nothing is signed |
+
+`TREASURY_ENV_FILE` points the command at another env file, so the mainnet wallet is swept
+without its key ever being copied next to the testnet one:
+
+```sh
+TREASURY_ENV_FILE=.env.mainnet.treasury NIMIQ_NETWORK=MainAlbatross \
+  NIMIQ_RPC_URL=https://rpc.nimiqwatch.com \
+  npm run treasury:sweep -- --to NQ.. --yes
+```
+
+A bare filename is read against `packages/server`. The `TREASURY_ADDRESS` beside the key in
+that file is the one the key is checked against, so a mainnet key is never measured against
+the testnet address in `.env`.
+
+It refuses, and sends nothing, when: the address is not a real Nimiq address, the amount is
+more than the wallet holds or is not more than nothing, the recipient is the treasury
+itself, the wallet is empty, the key does not derive the address its env file names, the
+node is on a different network from `NIMIQ_NETWORK`, or an option is written that the
+command does not know. That last one matters: a typed `--ammount 0.1` is refused rather
+than ignored, because ignoring it would send the whole balance.
+
+After a send it waits up to two minutes for a block and prints the hash and the block
+number. If no block carries it in time it prints the hash and stops: look that hash up
+before running anything again, since the payment may still land.
+
+One proven run, on the testnet on 17 September 2026:
+
+```
+network   TestAlbatross
+from      NQ92 YGUB VUV9 LX6H 36G0 33C1 081V TMDD 9152
+to        NQ63 NLNX 4H6R M3R4 XB92 8Y1X 5GTS JUGC 5QFJ
+balance   16.78 NIM
+sending   0.1 NIM (leaving 16.68 NIM)
+memo      vettai sweep test
+
+hash      63d8f4222d637592aa2727624cdcb73da2d2876ac4aea4d87163d238840c77df
+block     11659524
+sent      0.1 NIM to NQ63 NLNX 4H6R M3R4 XB92 8Y1X 5GTS JUGC 5QFJ
+```
