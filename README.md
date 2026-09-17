@@ -9,7 +9,7 @@ Vettai is Tamil for "the hunt".
   <img src="./docs/submission/icon.png" width="64" height="64" alt="Vettai icon" />
 </p>
 
-[Live app](https://vettai-web.vercel.app) · [Docs](https://vettai-web.vercel.app/docs) · [GitHub](https://github.com/ramakrishnanhulk20/vettai) · [Open in Nimiq Pay](https://nimpay.app/miniapps/open/vettai-web.vercel.app/play)
+[Live app](https://vettai-web.vercel.app) · [Docs](https://vettai-web.vercel.app/docs) · [GitHub](https://github.com/ramakrishnanhulk20/vettai) · [Open in Nimiq Pay](https://nimpay.app/miniapps/open/vettai-web.vercel.app/play) · [Treasury on mainnet](https://nimiq.watch/#NQ69PKNUL14LDXNNK86Q0J812R97XMDPVEVH)
 
 ## Live deployments
 
@@ -18,8 +18,9 @@ Vettai is Tamil for "the hunt".
 | App | `https://vettai-web.vercel.app` |
 | Docs | `https://vettai-web.vercel.app/docs` |
 | World API | `https://world-production-4620.up.railway.app` |
-| Network | Nimiq testnet (TestAlbatross) today. Mainnet follows when the reward pool is funded |
-| Treasury | `NQ92 YGUB VUV9 LX6H 36G0 33C1 081V TMDD 9152` |
+| Network | Nimiq mainnet (MainAlbatross) |
+| Treasury | `NQ69 PKNU L14L DXNN K86Q 0J81 2R97 XMDP VEVH` |
+| Reward pool | 1000 NIM, funded 17 September 2026 |
 
 ## Overview
 
@@ -94,21 +95,26 @@ happened.
   pushed, so a crash mid-send cannot pay the same claim twice.
 - Three caps bound the loss from a scripted player: per wallet per UTC day, distinct
   wallets per IP per day, and a hard ceiling on the whole pool.
-- 338 tests, including property tests over the simulation and over the caps, plus one
+- 350 tests, including property tests over the simulation and over the caps, plus one
   command that proves the whole thing against the live chain.
 - MIT licensed, with the docs inside the app at `/docs`.
 
-## Testnet deployment
+## Mainnet deployment
 
-Testnet is the live network today. Mainnet follows once the reward pool is funded.
+Mainnet is the live network. The founder funded the treasury with 1000 NIM on 17 September
+2026, and the pool cap is set to that same 1000 NIM, so the game can never pay out more than
+what is in the wallet.
 
 | What | Value | Explorer |
 |---|---|---|
 | World API | `https://world-production-4620.up.railway.app` | |
-| Treasury | `NQ92 YGUB VUV9 LX6H 36G0 33C1 081V TMDD 9152` | [test.nimiq.watch](https://test.nimiq.watch/#NQ92YGUBVUV9LX6H36G033C1081VTMDD9152) |
-| Latest payout | 0.5 NIM, memo `vettai:fe66c3cd`, block 11578257 | [`c6bd2b63...9ea704`](https://test.nimiq.watch/#c6bd2b63fdfb9b8694ed1b59d147ffef3df09539f0312a254c1a39ed719ea704) |
-| RPC node | `https://rpc.testnet.nimiqwatch.com` | |
-| Network | TestAlbatross | [test.nimiq.watch](https://test.nimiq.watch) |
+| Treasury | `NQ69 PKNU L14L DXNN K86Q 0J81 2R97 XMDP VEVH` | [nimiq.watch](https://nimiq.watch/#NQ69PKNUL14LDXNNK86Q0J812R97XMDPVEVH) |
+| Network | MainAlbatross | [nimiq.watch](https://nimiq.watch) |
+| RPC node | `https://rpc.nimiqwatch.com` | |
+| Reward pool | 1000 NIM, funded by the founder on 17 September 2026 | |
+| Daily cap | 5 NIM per wallet per UTC day | |
+| Landlord quest | Built, switched off (`LANDLORD_ENABLED=false`) | |
+| Latest mainnet payout | 0.5 NIM, memo `vettai:e47d1142`, block 61817025, [`3dca159e...d18113`](https://nimiq.watch/#3dca159edf4df9ec23a42aafb5e5fa95de6dda82be7405c09064a0d039d18113) |
 
 ## How it works
 
@@ -252,7 +258,7 @@ flowchart TD
 
 ## The two-minute judge path
 
-On a phone, inside Nimiq Pay, with testnet mode on:
+On a phone, inside Nimiq Pay on mainnet:
 
 1. Open `https://nimpay.app/miniapps/open/vettai-web.vercel.app/play`, or paste `https://vettai-web.vercel.app` into Pay's
    Custom URL field.
@@ -269,13 +275,15 @@ On a phone, inside Nimiq Pay, with testnet mode on:
    with.
 
 Then prove every claim on this page from a clone of the repo. Against the live deployment,
-which needs no key at all:
+which needs no key at all. It runs against mainnet and pays one real 0.5 NIM quest to the
+wallet the run signs in with:
 
 ```bash
 cd packages/server && npm run prove -- --url https://world-production-4620.up.railway.app
 ```
 
-The real run of 16 September 2026, saved at `docs/proofs/prove-remote-20260916-0702.txt`:
+The testnet run of 16 September 2026, kept here as the record of the deployment before the
+move to mainnet, saved at `docs/proofs/prove-remote-20260916-0702.txt`:
 
 ```
  1/12  PASS  the deployment answers, names its network, and sees the caller it should: TestAlbatross at block 11578188 through https://rpc.testnet.nimiqwatch.com, 0 room(s) and 0 online, it reads this caller as 152.233.15.120, map 1-1hrrxku
@@ -298,13 +306,15 @@ The real run of 16 September 2026, saved at `docs/proofs/prove-remote-20260916-0
 Five of the twelve are skipped rather than faked: the three cap checks and the outbox check
 need the host's own database and its configured caps, and the shop check needs the treasury
 key to fund a fresh wallet. Those five run in the local mode, which starts the real world in
-the process and spends real test NIM:
+the process and spends real test NIM. The local mode is a testnet tool by design, so it never
+touches the mainnet pool:
 
 ```bash
 cd packages/server && npm run prove
 ```
 
-From `docs/proofs/prove-20260916-0704.txt`, the checks the remote run cannot reach:
+From the testnet run `docs/proofs/prove-20260916-0704.txt`, the checks the remote run cannot
+reach:
 
 ```
  7/12  PASS  the daily cap holds the claim that would cross it: 0.5 NIM already committed today, 0.2 NIM more crosses the 0.6 NIM cap, landmarks and streak both held for "daily cap"
@@ -420,7 +430,7 @@ packages/
   server/   the world process, the treasury process, domain logic, tests, the CLI
   web/      the Next.js app: landing, /play, /docs, the three.js city
 docs/
-  proofs/      saved output of real prove-it runs against the live testnet
+  proofs/      saved output of real prove-it runs against the live chain
   security/    the threat model
   submission/  the icon and the thumbnail
 reference/  saved program material and research notes
@@ -454,7 +464,7 @@ one address can take, and a payout is idempotent by claim id with the hash saved
 send.
 
 Every claim in [`docs/security/threat-model.md`](./docs/security/threat-model.md) has an
-attack in `npm run prove` that tries it against the live testnet, and the output of each run
+attack in `npm run prove` that tries it against the live chain, and the output of each run
 is saved under `docs/proofs/`.
 
 What we did not fix, in short, with the full list in the threat model:

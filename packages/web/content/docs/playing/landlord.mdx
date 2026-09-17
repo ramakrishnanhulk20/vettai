@@ -34,7 +34,10 @@ Two details keep it honest:
 - The job is gated on the UTC day rather than on a 24 hour timer, so a restart cannot make a
   day run twice or skip it.
 
-## What is still to be confirmed
+## The call has been made
 
-Whether the landlord quest ships at all, and at what minimum stake, is the operator's call
-and has not been made.
+This is not an open question any more. Vettai runs on mainnet with `LANDLORD_ENABLED=false`,
+so the landlord quest is built and tested but never generated. Asking a player to lock up 10
+NIM of their own to earn 0.2 NIM is a different promise from paying them for playing, and it
+is not the promise this game makes. The code stays in because turning it on is one
+environment variable for an operator who wants it.

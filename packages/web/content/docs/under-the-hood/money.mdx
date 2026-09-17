@@ -69,9 +69,9 @@ error message.
 ## Refusing to start
 
 The treasury will not boot if the private key does not derive the configured treasury
-address, or if the node reports a different network from the configured one. A node on
-mainnet while the configuration says testnet turns a demo into real money leaving a real
-wallet, so it fails at boot rather than at the moment somebody is owed a payout.
+address, or if the node reports a different network from the configured one. A node on one
+network while the configuration names the other would send payouts on a chain nobody is
+watching, so it fails at boot rather than at the moment somebody is owed a payout.
 
 The world refuses the mirror image: it will not boot if it can see the treasury key at all.
 

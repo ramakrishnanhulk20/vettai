@@ -1,11 +1,11 @@
 ---
 title: The prove-it run
-description: One command, twelve checks, run against the live Nimiq testnet. Real payouts, real refusals, saved output.
+description: One command, twelve checks, run against the live Nimiq chain. Real payouts, real refusals, saved output.
 ---
 
 Claims in a threat model are only worth what they are worth when somebody runs them. So
 every claim Vettai makes about its money path is exercised by one command, against the live
-Nimiq testnet, and the output of each run is saved in the repository.
+Nimiq chain, and the output of each run is saved in the repository.
 
 ## The command
 
@@ -19,7 +19,8 @@ real socket, then attacks it: forged signatures, replays, somebody else's quest,
 caps, a short shop payment from the wrong wallet, a flood on the socket, and a payout the
 treasury has already sent once. Every refusal is printed with the reason the server gave.
 
-Testnet only. It moves real test NIM out of a real wallet.
+The local run is a testnet tool by design. It moves real test NIM out of a real test wallet,
+so running it never spends the mainnet pool.
 
 There is a second mode that points at a deployment:
 
@@ -29,9 +30,12 @@ npm run prove -- --url https://world-production-4620.up.railway.app
 
 Nothing runs locally in that mode and no key is needed. The run signs in over the network,
 plays the deployed world through its own socket, claims, waits for the deployed treasury to
-pay, and reads that payment back off the chain the deployment says it is on. The checks that
-need the host's own database or its configured caps are skipped rather than faked, and the
-summary counts them as skipped.
+pay, and reads that payment back off the chain the deployment says it is on. Against Vettai's
+own deployment that chain is Nimiq mainnet, and the run pays one real 0.5 NIM quest. The
+checks that need the host's own database or its configured caps are skipped rather than
+faked, and the summary counts them as skipped.
+
+Mainnet proof: 0.5 NIM, memo `vettai:e47d1142`, block 61817025, [`3dca159e...d18113`](https://nimiq.watch/#3dca159edf4df9ec23a42aafb5e5fa95de6dda82be7405c09064a0d039d18113)
 
 ## What each of the twelve checks proves
 
@@ -55,7 +59,9 @@ three.
 
 ## The last saved run
 
-This is the file as it was written, not a summary of it.
+This is a testnet run, kept as the record of all twelve checks, because five of them need the
+host's own database and its configured caps. It is the file as it was written, not a summary
+of it.
 
 ```
 vettai prove-it, 2026-09-16T12:39:04.425Z

@@ -71,7 +71,7 @@ All of them are run from `packages/server`.
 |---|---|
 | `npm test` | The whole suite, including the property tests over the simulation |
 | `npm run typecheck` | Types only |
-| `npm run prove` | The twelve checks against the live testnet. See [The prove-it run](/docs/trust/proof) |
+| `npm run prove` | The twelve checks. The local run is a testnet tool; `npm run prove -- --url <world>` points it at the mainnet deployment. See [The prove-it run](/docs/trust/proof) |
 | `npm run bot` | A scripted player: signs in, joins the real socket, kills drones with computed aim, dodges bolts and walks the courier route |
 | `npm run seed` | Fills the database so the screens have something to read |
 | `npm run db:generate` | Regenerates the migrations after a schema change |

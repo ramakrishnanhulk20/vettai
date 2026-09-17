@@ -94,6 +94,8 @@ docker run --rm -p 8788:8788 \
   -e TREASURY_ADDRESS=NQ.. vettai-server
 ```
 
+That example points at testnet on purpose. A smoke test should never reach the live pool.
+
 With no `DATABASE_URL` the world falls back to the embedded database inside the container,
 which is fine for a smoke test and disappears when the container stops. It logs
 `vettai world ready`.
@@ -104,5 +106,8 @@ which is fine for a smoke test and disappears when the container stops. It logs
 balance on that network. Point a testnet key at a mainnet node and the sender refuses by
 construction, which is the behaviour we want.
 
-Vettai is on testnet today, at `https://world-production-4620.up.railway.app`. The mainnet
-treasury key, its funding and the final pool numbers are still to be confirmed.
+Vettai runs on Nimiq mainnet, at `https://world-production-4620.up.railway.app`, with
+`NIMIQ_RPC_URL=https://rpc.nimiqwatch.com` and `NIMIQ_NETWORK=MainAlbatross`. The treasury is
+`NQ69 PKNU L14L DXNN K86Q 0J81 2R97 XMDP VEVH`, funded by the founder with 1000 NIM on 17
+September 2026. The live settings are `POOL_TOTAL_NIM=1000`, `DAILY_CAP_NIM=5` and
+`LANDLORD_ENABLED=false`.
