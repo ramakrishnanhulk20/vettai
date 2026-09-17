@@ -96,8 +96,8 @@ happened.
   pushed, so a crash mid-send cannot pay the same claim twice.
 - Three caps bound the loss from a scripted player: per wallet per UTC day, distinct
   wallets per IP per day, and a hard ceiling on the whole pool.
-- 446 server tests and 21 browser specs, including property tests over the simulation and over the caps, plus one
-  command that proves the whole thing against the live chain.
+- 446 server tests and 21 browser specs, including property tests over the simulation
+  and over the caps, plus one command that proves the whole thing against the live chain.
 - MIT licensed, with the docs inside the app at `/docs`.
 
 ## Mainnet deployment
@@ -398,8 +398,8 @@ the smallest NIM unit (1 NIM = 100,000 luna).
 ## Tests
 
 ```
- Test Files  39 passed (39)
-      Tests  423 passed (423)
+ Test Files  44 passed (44)
+      Tests  446 passed (446)
 ```
 
 Run with `npm test` inside `packages/server`. Alongside the unit and route tests there are
