@@ -19,6 +19,7 @@ import {
   recordWorldEvents,
   type Rooms,
 } from '../src/world/rooms.js'
+import { INITIAL_DRONES } from '../src/world/sim.js'
 import type { DroneState } from '../src/world/types.js'
 import { listenOnAnyPort, signIn, testApp } from './support/api.js'
 import { clearTables, freshDb } from './support/db.js'
@@ -156,7 +157,7 @@ describe('the welcome', () => {
     })
     // The client resets its move counter from this, so a reconnect never replays old moves.
     expect(welcome?.['youSeq']).toBe(0)
-    expect(welcome?.['drones']).toHaveLength(2)
+    expect(welcome?.['drones']).toHaveLength(INITIAL_DRONES)
     const joinedPlayers = welcome?.['players'] as { id: string; seq: number }[]
     expect(joinedPlayers).toHaveLength(1)
     // The player is named by the handle from `you`, not by the wallet behind it.
