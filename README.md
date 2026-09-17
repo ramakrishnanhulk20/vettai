@@ -96,7 +96,7 @@ happened.
   pushed, so a crash mid-send cannot pay the same claim twice.
 - Three caps bound the loss from a scripted player: per wallet per UTC day, distinct
   wallets per IP per day, and a hard ceiling on the whole pool.
-- 423 tests, including property tests over the simulation and over the caps, plus one
+- 446 server tests and 21 browser specs, including property tests over the simulation and over the caps, plus one
   command that proves the whole thing against the live chain.
 - MIT licensed, with the docs inside the app at `/docs`.
 
