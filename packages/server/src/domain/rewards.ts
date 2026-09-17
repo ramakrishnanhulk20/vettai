@@ -10,7 +10,7 @@ export const rewards = {
   hunt: nimToLuna(config.REWARD_HUNT ?? '0.5'),
   courier: nimToLuna(config.REWARD_COURIER ?? '0.3'),
   landmarksFirst: nimToLuna(config.REWARD_LANDMARKS ?? '0.2'),
-  landmarksRepeat: nimToLuna(config.REWARD_LANDMARKS_REPEAT ?? '0.05'),
+  landmarksRepeat: nimToLuna(config.REWARD_LANDMARKS_REPEAT ?? '0.15'),
   landlord: nimToLuna(config.REWARD_LANDLORD ?? '0.2'),
   ladder: parsePrizes(config.LADDER_PRIZES_NIM ?? '2,1,0.5'),
 } as const

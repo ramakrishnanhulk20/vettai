@@ -91,7 +91,7 @@ describe('POST /api/shop/orders', () => {
     expect(response.statusCode).toBe(200)
     expect(body.memo).toBe(`vettai:shop:${body.orderId.slice(0, 8)}`)
     expect(body.to).toBe(config.TREASURY_ADDRESS)
-    expect(body.nim).toBe('0.8')
+    expect(body.nim).toBe('0.3')
 
     const [row] = await db.select().from(shopOrders).where(eq(shopOrders.id, body.orderId))
     expect(row?.state).toBe('pending')

@@ -73,6 +73,25 @@ export function streetCentre(index: number): number {
   return -HALF + index * CELL + STREET / 2
 }
 
+/**
+ * Every street crossing on a map, in grid order. The cell size is read off the map itself
+ * rather than off this module's constants, so a map built by hand for a test, or an older
+ * one loaded from somewhere else, is measured by its own grid.
+ */
+export function crossings(map: WorldMap): Place[] {
+  const cell = map.lotSize + map.street
+  if (!(cell > 0) || !(map.size > 0)) return []
+
+  const half = map.size / 2
+  const cells = Math.floor(map.size / cell)
+  const centre = (index: number) => -half + index * cell + map.street / 2
+  const places: Place[] = []
+  for (let i = 0; i < cells; i++) {
+    for (let j = 0; j < cells; j++) places.push({ x: centre(i), z: centre(j) })
+  }
+  return places
+}
+
 function lotBox(i: number, j: number) {
   const minX = -HALF + i * CELL + STREET
   const minZ = -HALF + j * CELL + STREET

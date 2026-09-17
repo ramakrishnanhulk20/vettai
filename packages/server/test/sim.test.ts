@@ -10,7 +10,9 @@ import {
   applyMove,
   createRoom,
   removePlayer,
+  respawnPoint,
   step,
+  DRONE_ENGAGE_RANGE,
   INITIAL_DRONES,
   MAX_DRONES,
   MAX_STEP_SECONDS,
@@ -200,7 +202,7 @@ describe('taking fire', () => {
     expect(mustPlayer(after.room, 'p1').shield).toBe(3)
   })
 
-  it('goes down at zero shield and comes back at the spawn three seconds later', () => {
+  it('goes down at zero shield and comes back on a nearby crossing three seconds later', () => {
     let room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
     let now = START
     const events: SimEvent[] = []
@@ -221,8 +223,9 @@ describe('taking fire', () => {
     const respawns = back.events.filter((event) => event.kind === 'respawn')
     expect(respawns).toHaveLength(1)
     const player = mustPlayer(back.room, 'p1')
-    expect(player.x).toBe(map.spawn.x)
-    expect(player.z).toBe(map.spawn.z)
+    const crossing = respawnPoint(map, OPEN_GROUND)
+    expect(player.x).toBe(crossing.x)
+    expect(player.z).toBe(crossing.z)
     expect(player.shield).toBe(3)
     expect(player.downedUntil).toBe(0)
   })
@@ -245,16 +248,17 @@ describe('drones', () => {
     const room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
     const ready = withDrone(room, droneNear(mustPlayer(room, 'p1'), 20))
 
-    const after = run(ready, 3, START)
+    // Two seconds of looking, then a bolt, then one more two seconds after that.
+    const after = run(ready, 5, START)
     expect(mustDrone(after.room, 'd1').state).toBe('engage')
     expect(after.room.ids.bolt).toBe(2)
   })
 
-  it('ignores a player who is further than 25 m away', () => {
+  it('ignores a player who is further than the engage range away', () => {
     const room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
-    const ready = withDrone(room, droneNear(mustPlayer(room, 'p1'), 26))
+    const ready = withDrone(room, droneNear(mustPlayer(room, 'p1'), DRONE_ENGAGE_RANGE + 1))
 
-    const after = step(ready, map, DT, START)
+    const after = run(ready, 3, START)
     expect(mustDrone(after.room, 'd1').state).toBe('patrol')
     expect(after.room.ids.bolt).toBe(0)
   })
@@ -263,7 +267,7 @@ describe('drones', () => {
     const room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
     const ready = withDrone(room, droneNear(mustPlayer(room, 'p1'), 16))
 
-    const after = run(ready, 3, START)
+    const after = run(ready, 8, START)
     const drone = mustDrone(after.room, 'd1')
     const player = mustPlayer(after.room, 'p1')
     expect(Math.hypot(drone.x - player.x, drone.z - player.z)).toBeCloseTo(12, 1)
@@ -302,13 +306,13 @@ describe('drones', () => {
     expect(near.length).toBeGreaterThanOrEqual(2)
   })
 
-  it('is born with two and fills up on the spawn clock, so rejoining buys no batch', () => {
+  it('is born with six and fills up on the spawn clock, so rejoining buys no batch', () => {
     const fresh = createRoom(map, 'room-1')
     expect(fresh.drones.size).toBe(INITIAL_DRONES)
 
     let room = fresh
     let now = START
-    // One spawn every fifteen seconds, and the room needs ten more to be full.
+    // One spawn every fifteen seconds, and the room needs six more to be full.
     for (let cycle = 0; cycle < MAX_DRONES - INITIAL_DRONES; cycle += 1) {
       now += 15_000
       room = step(room, map, DT, now).room
@@ -346,7 +350,7 @@ describe('drones', () => {
     const walking = run(room, 5, START, open)
     expect(walking.events.filter((event) => event.kind === 'droneHit').length).toBeGreaterThan(0)
 
-    const fired = run(room, 0.1, START, open)
+    const fired = run(room, 2.15, START, open)
     expect(fired.room.bolts.length).toBe(1)
     const dodging = applyMove(fired.room, 'p1', { dx: -1, dz: 0, yaw: 0 }, fired.now)
     const after = run(dodging, 1.5, fired.now, open)

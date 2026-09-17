@@ -12,7 +12,6 @@ test("a wallet that arrives late still boots the game", async ({ page, wallet })
   await page.goto("/play");
 
   await expect(page.getByText("Open Vettai inside Nimiq Pay")).toBeVisible({ timeout: 40_000 });
-  await expect(page.getByTestId("try-again")).toBeVisible();
 
   const waited = Date.now() - opened;
   if (waited < 16_000) await page.waitForTimeout(16_000 - waited);

@@ -56,6 +56,8 @@ export type QuestView = {
   visited?: boolean[]
   /** True while the player is carrying a parcel. */
   carrying?: boolean
+  /** Which day of the run today is, on a streak quest, so the phone never counts it itself. */
+  streakDay?: number
 }
 
 function dayBefore(day: string): string {
@@ -124,6 +126,11 @@ export function questView(quest: Quest): QuestView {
     const visited: boolean[] = []
     for (let index = 0; index < LANDMARK_COUNT; index += 1) visited.push(reached.includes(index))
     return { ...base, visited }
+  }
+
+  if (kind === 'streak') {
+    const streak = detailObject(quest).streak
+    return typeof streak === 'number' ? { ...base, streakDay: streak } : base
   }
 
   return base
@@ -263,7 +270,7 @@ export async function todaysQuests(
       state: 'done',
       doneAt: now,
       rewardLuna: streakLuna,
-      ...(streakLuna < earned ? { detail: { clamped: true } } : {}),
+      detail: { streak, ...(streakLuna < earned ? { clamped: true } : {}) },
     },
   ]
 

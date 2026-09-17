@@ -148,7 +148,7 @@ describe('rewards', () => {
     expect(rewards.hunt).toBe(50_000n)
     expect(rewards.courier).toBe(30_000n)
     expect(rewards.landmarksFirst).toBe(20_000n)
-    expect(rewards.landmarksRepeat).toBe(5_000n)
+    expect(rewards.landmarksRepeat).toBe(15_000n)
     expect(rewards.ladder).toEqual([200_000n, 100_000n, 50_000n])
   })
 })

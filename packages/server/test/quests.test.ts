@@ -177,7 +177,7 @@ describe('todaysQuests', () => {
     )
 
     expect(first.rewardLuna).toBe(20_000n)
-    expect(later.rewardLuna).toBe(5_000n)
+    expect(later.rewardLuna).toBe(15_000n)
   })
 
   it('leaves the landlord quest out while the key is off', async () => {
@@ -383,7 +383,7 @@ describe('the streak', () => {
     expect(dailyCapLuna).toBe(500_000n)
     expect(streakReward(11)).toBe(520_000n)
     expect(streak.rewardLuna).toBe(450_000n)
-    expect(streak.detail).toEqual({ clamped: true })
+    expect(streak.detail).toEqual({ streak: 11, clamped: true })
   })
 
   it('leaves the full curve alone when the day has room for it', async () => {
@@ -392,7 +392,7 @@ describe('the streak', () => {
     const streak = byKind(await todaysQuests(db, address, map, DAY_ONE), 'streak')
 
     expect(streak.rewardLuna).toBe(streakReward(3))
-    expect(streak.detail).toBeNull()
+    expect(streak.detail).toEqual({ streak: 3 })
   })
 
   it('writes a streak worth nothing for a wallet that has had its whole day', async () => {
@@ -402,7 +402,7 @@ describe('the streak', () => {
 
     expect(streak.rewardLuna).toBe(0n)
     expect(streak.state).toBe('done')
-    expect(streak.detail).toEqual({ clamped: true })
+    expect(streak.detail).toEqual({ streak: 1, clamped: true })
 
     // The payout path is what refuses it, which is how the route answers "nothing to claim".
     await expect(

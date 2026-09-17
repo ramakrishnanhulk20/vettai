@@ -30,7 +30,7 @@ export const items: Record<ShopItemId, ShopItem> = {
     priceLuna: nimToLuna('0.6'),
     gear: { blaster: 'mk2' },
   },
-  sprint: { id: 'sprint', name: 'Sprint boots', priceLuna: nimToLuna('0.8'), gear: { sprint: true } },
+  sprint: { id: 'sprint', name: 'Sprint boots', priceLuna: nimToLuna('0.3'), gear: { sprint: true } },
   'skin-neon': { id: 'skin-neon', name: 'Neon skin', priceLuna: nimToLuna('0.4'), gear: { skin: 'neon' } },
   'skin-carbon': {
     id: 'skin-carbon',

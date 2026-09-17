@@ -5,7 +5,7 @@ import {
   segmentHitsBox,
   slideAgainstBoxes,
 } from './geometry.js'
-import { LOTS_PER_SIDE, OFFICE_SAFE_RADIUS, PATROL_Y, streetCentre } from './map.js'
+import { crossings, LOTS_PER_SIDE, OFFICE_SAFE_RADIUS, PATROL_Y, streetCentre } from './map.js'
 import { seeded } from './prng.js'
 import type {
   BoltState,
@@ -51,12 +51,29 @@ const AIM_CONE = (AIM_CONE_DEGREES * Math.PI) / 180
 
 const DRONE_HP = 3
 const DRONE_SPEED = 3
-const DRONE_ENGAGE_RANGE = 25
+/**
+ * How far out a drone notices a player standing in the open. The centre patrol loop passes
+ * about 24 m from the board, so a shorter range left the streets a new player spends their
+ * first minutes in safe to stand still in, and the shield was decoration.
+ */
+export const DRONE_ENGAGE_RANGE = 35
+/**
+ * How long a player has to stay in sight before a drone comes down on them. Without the
+ * pause, clipping the edge of the range on the way past is a bolt with no warning; with it
+ * there is a moment to walk back out or to shoot first.
+ */
+export const DRONE_SIGHT_MS = 2000
 /** How long a drone stays angry at the player who shot it before it looks around again. */
 const DRONE_ANGER_MS = 6000
 /** A drone chases the player who shot it out to the range that player can shoot back from. */
 const DRONE_CHASE_RANGE = 60
 const DRONE_CIRCLE_RADIUS = 12
+/**
+ * How high an engaged drone orbits. The camera tilts to 34 degrees, so a fight at the patrol
+ * height happened off the top of the screen. At this height the drone is in the picture from
+ * about 5 m out, which is well inside the orbit.
+ */
+export const DRONE_ENGAGE_Y = 3.5
 const DRONE_FIRE_MS = 2000
 const DRONE_WAYPOINT_REACHED = 1.5
 const DRONE_WRECK_MS = 2000
@@ -176,6 +193,24 @@ function clearOfTheBoard(map: WorldMap, at: Place): Place {
   }
 }
 
+/**
+ * A drone's own bookkeeping, carried on the drone record but kept out of the shape the
+ * client is sent: telling a phone that a drone is a second away from noticing it would give
+ * away the only warning the game has to offer. Both fields are optional, so a drone posed by
+ * a test or restored from an older room simply reads as seeing nobody.
+ */
+type Watching = {
+  readonly sighted?: string | null
+  readonly sightedAt?: number
+}
+
+type WatchedDrone = DroneState & Watching
+
+function watching(drone: DroneState): Watching {
+  const seen: WatchedDrone = drone
+  return { sighted: seen.sighted ?? null, sightedAt: seen.sightedAt ?? 0 }
+}
+
 function isLive(drone: DroneState): boolean {
   return drone.state !== 'dead' && drone.hp > 0
 }
@@ -202,7 +237,7 @@ function spawnDrone(
   const rng = seeded(`${room.seed}:drone:${count}`)
   // The loops are handed out in turn rather than drawn at random, so no loop is ever left
   // empty by a run of unlucky draws. The first drones take the centre loop, which is the
-  // last one, because a room is born with two and a player standing at the spawn has to
+  // last one, because a room is born with six and a player standing at the spawn has to
   // have something to shoot long before the spawn clock has filled the sky.
   const loopIndex =
     count <= INITIAL_DRONES ? map.patrols.length - 1 : (count - 1) % map.patrols.length
@@ -235,9 +270,9 @@ function spawnDrone(
 }
 
 /**
- * A new room with a couple of drones over the centre of the city. The rest arrive on the
- * spawn clock: a room handed its full dozen at birth would let a player leave and rejoin
- * for a fresh batch whenever the sky went quiet.
+ * A new room with six drones over the centre of the city. The rest arrive on the spawn
+ * clock: a room handed its full dozen at birth would let a player leave and rejoin for a
+ * fresh batch whenever the sky went quiet.
  */
 export function createRoom(map: WorldMap, seed: string, initial: number = INITIAL_DRONES): RoomState {
   let room: RoomState = {
@@ -450,6 +485,34 @@ export function applyFire(
   return damageDrone(fired, drone, id, 1, now)
 }
 
+/**
+ * How far a respawn is held from the board. Crossings are 24 m apart, so this puts a downed
+ * player on the street they fell on and never on the office door: dying used to be a three
+ * second ride to the claim desk from the far side of the block.
+ */
+export const RESPAWN_OFFICE_CLEARANCE = 20
+
+/**
+ * Where a downed player comes back: the street crossing nearest to where they fell that is
+ * far enough from the board. Crossings are the one place in the city that is always clear of
+ * buildings. A map with no crossing that qualifies, and a fall with no finite position to
+ * measure from, both fall back to the map's own spawn.
+ */
+export function respawnPoint(map: WorldMap, fellAt: Place): Place {
+  if (!Number.isFinite(fellAt.x) || !Number.isFinite(fellAt.z)) return map.spawn
+
+  let best: Place | null = null
+  let bestRange = Number.POSITIVE_INFINITY
+  for (const place of crossings(map)) {
+    if (horizontal(place, map.office) < RESPAWN_OFFICE_CLEARANCE) continue
+    const range = horizontal(place, fellAt)
+    if (!(range < bestRange)) continue
+    best = place
+    bestRange = range
+  }
+  return best ?? map.spawn
+}
+
 function stepPlayers(
   room: RoomState,
   map: WorldMap,
@@ -466,10 +529,11 @@ function stepPlayers(
   for (const player of room.players.values()) {
     if (player.downedUntil > 0) {
       if (now < player.downedUntil) continue
+      const back = respawnPoint(map, { x: player.x, z: player.z })
       players.set(player.id, {
         ...player,
-        x: map.spawn.x,
-        z: map.spawn.z,
+        x: back.x,
+        z: back.z,
         vx: 0,
         vz: 0,
         shield: MAX_SHIELD,
@@ -477,7 +541,7 @@ function stepPlayers(
         nextShieldAt: now + SHIELD_REGEN_MS,
         intent: { ...player.intent, dx: 0, dz: 0 },
       })
-      events.push({ kind: 'respawn', player: player.id, x: map.spawn.x, y: 0, z: map.spawn.z })
+      events.push({ kind: 'respawn', player: player.id, x: back.x, y: 0, z: back.z })
       changed = true
       continue
     }
@@ -514,65 +578,78 @@ function stepPlayers(
 
 /**
  * Who a drone is after: the player who shot it while its anger lasts, otherwise the nearest
- * player inside the engage range. A held target is dropped early if they go down, step into
- * the board's circle, or get further away than a player could shoot from.
+ * player it has watched stand in the open for two seconds. A held target is dropped early if
+ * they go down, step into the board's circle, or get further away than a player could shoot
+ * from, and a watched one is dropped the moment any of those is true, which restarts the two
+ * seconds. The sighting it hands back belongs to this tick and is stored by the caller.
  */
 function pickTarget(
   drone: DroneState,
   players: ReadonlyMap<string, PlayerState>,
   now: number,
   map: WorldMap,
-): PlayerState | null {
-  if (drone.target !== null && now < drone.targetUntil) {
-    const held = players.get(drone.target)
-    if (
-      held &&
-      held.downedUntil === 0 &&
-      !inSafeZone(map, held) &&
-      horizontal(drone, held) <= DRONE_CHASE_RANGE
-    ) {
-      return held
-    }
-  }
-
-  let best: PlayerState | null = null
-  let bestRange = DRONE_ENGAGE_RANGE
+): { target: PlayerState | null; seen: Watching } {
+  let closest: PlayerState | null = null
+  let closestRange = DRONE_ENGAGE_RANGE
   for (const player of players.values()) {
     if (player.downedUntil > 0) continue
     if (inSafeZone(map, player)) continue
     const range = horizontal(drone, player)
-    if (range > bestRange) continue
-    best = player
-    bestRange = range
+    if (!(range <= closestRange)) continue
+    closest = player
+    closestRange = range
   }
-  return best
+
+  const before = watching(drone)
+  const held = closest !== null && before.sighted === closest.id ? (before.sightedAt ?? now) : now
+  const seen: Watching = closest
+    ? { sighted: closest.id, sightedAt: held }
+    : { sighted: null, sightedAt: 0 }
+
+  if (drone.target !== null && now < drone.targetUntil) {
+    const angry = players.get(drone.target)
+    if (
+      angry &&
+      angry.downedUntil === 0 &&
+      !inSafeZone(map, angry) &&
+      horizontal(drone, angry) <= DRONE_CHASE_RANGE
+    ) {
+      return { target: angry, seen }
+    }
+  }
+
+  if (closest && now - held >= DRONE_SIGHT_MS) return { target: closest, seen }
+  return { target: null, seen }
 }
 
 /**
- * Where a drone wants to be next: on its loop, or orbiting its target at 12 m. The orbit
- * point is one tick of arc ahead, because aiming a whole second ahead would cut the corner
- * and spiral the drone into the player. An orbit that would cross the board is pushed back
- * out of the circle, so a player on the edge cannot walk a drone over the safe zone.
+ * Where a drone wants to be next, height included: on its loop at the patrol height, or
+ * orbiting its target at 12 m and low enough to be on screen. The orbit point is one tick of
+ * arc ahead, because aiming a whole second ahead would cut the corner and spiral the drone
+ * into the player. An orbit that would cross the board is pushed back out of the circle, so
+ * a player on the edge cannot walk a drone over the safe zone.
  */
 function droneGoal(
   drone: DroneState,
   map: WorldMap,
   target: PlayerState | null,
   dt: number,
-): Place | null {
+): Vec3 | null {
   if (target) {
     const away = { x: drone.x - target.x, z: drone.z - target.z }
     const range = Math.hypot(away.x, away.z)
     const angle = range > 1e-6 ? Math.atan2(away.z, away.x) : drone.yaw
     const turned = angle + (DRONE_SPEED / DRONE_CIRCLE_RADIUS) * dt
-    return clearOfTheBoard(map, {
+    const orbit = clearOfTheBoard(map, {
       x: target.x + Math.cos(turned) * DRONE_CIRCLE_RADIUS,
       z: target.z + Math.sin(turned) * DRONE_CIRCLE_RADIUS,
     })
+    return { x: orbit.x, y: DRONE_ENGAGE_Y, z: orbit.z }
   }
   const loop = map.patrols[drone.loop]
   if (!loop || loop.length === 0) return null
-  return loop[drone.waypoint % loop.length] ?? null
+  const waypoint = loop[drone.waypoint % loop.length]
+  return waypoint ? { x: waypoint.x, y: PATROL_Y, z: waypoint.z } : null
 }
 
 function stepDrones(
@@ -591,13 +668,20 @@ function stepDrones(
       continue
     }
 
-    const target = pickTarget(drone, room.players, now, map)
+    const { target, seen } = pickTarget(drone, room.players, now, map)
     const goal = droneGoal(drone, map, target, dt)
     let x = drone.x
+    let y = drone.y
     let z = drone.z
     let yaw = drone.yaw
     let waypoint = drone.waypoint
     if (goal) {
+      // Height is climbed at the same speed as ground is covered, so dropping to the fight
+      // and going back up to the loop both take under a second and neither reads as a jump.
+      const climb = DRONE_SPEED * dt
+      const rise = goal.y - drone.y
+      y = Math.abs(rise) <= climb ? goal.y : drone.y + Math.sign(rise) * climb
+
       const gap = horizontal(drone, goal)
       let stalled = false
       if (gap > 1e-6) {
@@ -639,22 +723,22 @@ function stepDrones(
         // Aim where the player will be, not where they are. The flight time is measured to
         // where they stand now, which is close enough at these ranges and leaves a player
         // who changes direction after the shot with a clean dodge.
-        const flight = Math.hypot(target.x - x, TORSO_HEIGHT - PATROL_Y, target.z - z) / BOLT_SPEED
+        const flight = Math.hypot(target.x - x, TORSO_HEIGHT - y, target.z - z) / BOLT_SPEED
         const aim = {
           x: target.x + target.vx * flight,
           y: TORSO_HEIGHT,
           z: target.z + target.vz * flight,
         }
-        const range = Math.hypot(aim.x - x, aim.y - PATROL_Y, aim.z - z)
+        const range = Math.hypot(aim.x - x, aim.y - y, aim.z - z)
         if (range > 1e-6) {
           boltCount += 1
           born.push({
             id: `b${boltCount}`,
             x,
-            y: PATROL_Y,
+            y,
             z,
             vx: ((aim.x - x) / range) * BOLT_SPEED,
-            vy: ((aim.y - PATROL_Y) / range) * BOLT_SPEED,
+            vy: ((aim.y - y) / range) * BOLT_SPEED,
             vz: ((aim.z - z) / range) * BOLT_SPEED,
             ownerDrone: drone.id,
             bornAt: now,
@@ -664,16 +748,19 @@ function stepDrones(
       }
     }
 
-    drones.set(drone.id, {
+    const flown: WatchedDrone = {
       ...drone,
       x,
+      y,
       z,
       yaw,
       waypoint,
       nextFireAt,
       target: target ? target.id : null,
       state: target ? 'engage' : 'patrol',
-    })
+      ...seen,
+    }
+    drones.set(drone.id, flown)
   }
 
   if (born.length === 0) return { room: { ...room, drones }, events: [] }

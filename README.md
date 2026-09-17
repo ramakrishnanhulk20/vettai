@@ -60,14 +60,15 @@ happened.
   grows the daily reward the longer you keep coming back.
 - Claiming is one signature at the quest board. The payout carries the quest id in its
   memo, and the HUD shows the transaction hash and the block number it landed in.
-- Going down costs three seconds at the office, never the quest progress you had.
+- Going down costs three seconds and the walk back from the crossing you fell at, never
+  the quest progress you had.
 - The landlord quest asks for a real stake with a validator, which the treasury reads back
   off the chain once a day. The stake stays the player's throughout. It is off by default
   (`LANDLORD_ENABLED=false`) until the operator turns it on.
 
 **For the shop**
 
-- Blaster mk2 for 1 NIM, sprint boots for 0.8 NIM, three skins at 0.5 NIM each. The price
+- Blaster mk2 for 0.6 NIM, sprint boots for 0.3 NIM, three skins at 0.4 NIM each. The price
   is the server's, and the client is told it rather than choosing it.
 - Buying is one ordinary Nimiq Pay payment with a memo. The treasury watcher matches the
   memo to the order, checks that the sender is the wallet that opened it and that the
@@ -418,8 +419,8 @@ Nimiq charges no network fee, so the numbers here are the whole story.
   courier, 0.2 for the landmarks. Nothing is added on top, which the prove run shows
   directly: the treasury fell by 0.4 NIM in a pass that confirmed exactly 0.4 NIM of
   payouts.
-- A shop purchase is one ordinary wallet transaction: 1 NIM for the blaster mk2, 0.8 for
-  sprint boots, 0.5 for a skin, and nothing else.
+- A shop purchase is one ordinary wallet transaction: 0.6 NIM for the blaster mk2, 0.3 for
+  sprint boots, 0.4 for a skin, and nothing else.
 - The landlord quest stakes the player's own NIM with a validator. The stake stays theirs
   and Vettai never touches it; the server only reads it.
 

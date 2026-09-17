@@ -39,7 +39,7 @@ async function gearOf(address: string) {
 describe('the shop', () => {
   it('prices the five items in luna and opens an order with a memo of its own', async () => {
     expect(items['blaster-mk2'].priceLuna).toBe(nimToLuna('0.6'))
-    expect(items.sprint.priceLuna).toBe(nimToLuna('0.8'))
+    expect(items.sprint.priceLuna).toBe(nimToLuna('0.3'))
     expect(items['skin-neon'].priceLuna).toBe(nimToLuna('0.4'))
     expect(Object.keys(items)).toHaveLength(5)
 
