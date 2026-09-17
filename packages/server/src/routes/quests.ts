@@ -42,8 +42,14 @@ export function registerQuestRoutes(
     const { address } = currentPlayer(request)
     const now = new Date()
     const rows = await todaysQuests(deps.db, address, world.map, now)
+    const views = rows.map(questView)
 
-    return reply.send({ day: utcDay(now), quests: rows.map(questView) })
+    // A board opened after midnight is where the new day's quests are born. The room is
+    // told at the same moment, or the socket would go on judging today's walk against
+    // yesterday's route and refuse every interact until the player reconnects.
+    world.rooms?.noteQuests(address, views)
+
+    return reply.send({ day: utcDay(now), quests: views })
   })
 
   app.post(

@@ -236,6 +236,8 @@ export type RoomHandle = {
 }
 
 export type Rooms = {
+  /** The city these rooms run on, so the recorder can build a day's quests on it. */
+  map: WorldMap
   join: (
     address: string,
     gear: PlayerGear,
@@ -249,7 +251,10 @@ export type Rooms = {
   stop: () => void
   snapshot: () => { rooms: number; online: number }
   send: (address: string, event: Record<string, unknown>) => boolean
-  /** Today's quests as this player's socket should now see them, merged by kind. */
+  /**
+   * Today's quests as this player's socket should now see them, merged by kind. A parcel
+   * that was in this player's hands and is not in the answer is reported to them.
+   */
   noteQuests: (address: string, quests: readonly QuestView[]) => void
   /** The socket answered a ping. */
   pong: (address: string) => void
@@ -354,6 +359,17 @@ function courierWants(quest: QuestView | undefined, kind: 'pickup' | 'deliver', 
   if (!quest || quest.state !== 'open' || !quest.route) return false
   if (kind === 'pickup') return quest.route.from === point
   return quest.route.to === point && quest.carrying === true
+}
+
+/**
+ * Why a parcel this player was carrying is no longer in their hands, or null when nothing
+ * was dropped. A delivery leaves the quest done, so only a quest still open counts here:
+ * the same day means the parcel went cold, a later day means the UTC day turned under them.
+ */
+function parcelDropped(before: QuestView | undefined, after: QuestView): 'cold' | 'day' | null {
+  if (after.kind !== 'courier' || after.state !== 'open') return null
+  if (before?.carrying !== true || after.carrying === true) return null
+  return after.day === before.day ? 'cold' : 'day'
 }
 
 /** True when this landmark is one the player's open landmarks quest has not counted yet. */
@@ -755,6 +771,9 @@ export function createRooms(options: RoomsOptions): Rooms {
    */
   function onWire(room: Room, event: TickEvent): TickEvent | null {
     if (event.kind === 'spawn') return event
+    // An assist is a private line to the one player who fired the finishing shot. It goes
+    // to them alone in the tick below, so it never rides the frame the whole room reads.
+    if (event.kind === 'assist') return null
 
     const handle = handleOf(room, event.player)
     if (!handle) return null
@@ -851,6 +870,10 @@ export function createRooms(options: RoomsOptions): Rooms {
 
       for (const event of events) {
         if (event.kind === 'kill') batch.push({ address: event.player, kind: 'kill' })
+        if (event.kind === 'assist') {
+          const connection = connections.get(event.player)
+          if (connection) deliver(connection, { t: 'event', kind: 'assist', drone: event.drone })
+        }
       }
       batch.push(...room.questEvents)
       room.questEvents = []
@@ -862,6 +885,7 @@ export function createRooms(options: RoomsOptions): Rooms {
   }
 
   return {
+    map,
     join,
     leave,
     handle,
@@ -908,7 +932,13 @@ export function createRooms(options: RoomsOptions): Rooms {
     noteQuests(address: string, quests: readonly QuestView[]): void {
       const connection = connections.get(address)
       if (!connection) return
-      for (const quest of quests) connection.quests.set(quest.kind, quest)
+      for (const quest of quests) {
+        const before = connection.quests.get(quest.kind)
+        connection.quests.set(quest.kind, quest)
+
+        const reason = parcelDropped(before, quest)
+        if (reason) deliver(connection, { t: 'event', kind: 'courier-reset', reason })
+      }
     },
 
     pong(address: string): void {
@@ -964,6 +994,7 @@ export type WorldEventWriter = (
   db: Db,
   events: readonly PlayerQuestEvent[],
   now: Date,
+  map: WorldMap,
 ) => Promise<Awaited<ReturnType<typeof applyWorldEvents>>>
 
 export type RecorderOptions = {
@@ -987,6 +1018,10 @@ export type RecorderOptions = {
  * Kills are never dropped. A kill is the one event a player earned by playing, and losing
  * one silently is a quest that never finishes. They are held instead and ride out with the
  * first batch the chain has room for, still in the order they happened.
+ *
+ * A batch that lands after the UTC day has turned builds that player a fresh set of quests
+ * and sends them the whole thing, because the alternative is a kill written into a day that
+ * does not exist and a player who loses everything they do until they reconnect.
  */
 export function recordWorldEvents(
   db: Db,
@@ -1022,12 +1057,15 @@ export function recordWorldEvents(
 
     tail = tail.then(async () => {
       try {
-        const changed = await write(db, batch, now)
+        const changed = await write(db, batch, now, rooms.map)
         for (const row of changed) {
-          const views = row.quests.map(questView)
+          // A rolled day replaces the whole set, so the fresh rows are what goes out: they
+          // already carry whatever this batch changed.
+          const views = (row.rolled ?? row.quests).map(questView)
           // The room keeps its own copy, so the next interact is judged against what this
           // player's quests actually say rather than against what the client claims.
           rooms.noteQuests(row.address, views)
+          if (row.rolled) rooms.send(row.address, { t: 'event', kind: 'quests-rolled' })
           for (const view of views) {
             rooms.send(row.address, { t: 'event', kind: 'quest', quest: view })
           }

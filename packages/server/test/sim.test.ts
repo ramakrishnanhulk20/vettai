@@ -413,6 +413,28 @@ describe('shooting', () => {
     expect(mustDrone(last.room, 'd1').state).toBe('dead')
   })
 
+  it('tells the player who fired the last shot that the kill went to somebody else', () => {
+    let room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    room = addPlayer(room, 'p2', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    const drone = droneNear(mustPlayer(room, 'p1'), 0)
+    room = withDrone(room, { ...drone, x: OPEN_GROUND.x, z: OPEN_GROUND.z + 10 })
+
+    const aim = aimAt(10, 6)
+    room = applyFire(room, 'p1', aim, START, map).room
+    room = applyFire(room, 'p1', aim, START + 300, map).room
+    const last = applyFire(room, 'p2', aim, START + 600, map)
+
+    expect(last.events.find((event) => event.kind === 'assist')).toMatchObject({
+      player: 'p2',
+      drone: 'd1',
+    })
+
+    // The player who earned the kill is told about the kill, and nothing else.
+    const own = applyFire(room, 'p1', aim, START + 900, map)
+    expect(own.events.find((event) => event.kind === 'kill')?.player).toBe('p1')
+    expect(own.events.some((event) => event.kind === 'assist')).toBe(false)
+  })
+
   it('holds the mk1 to four shots a second and the mk2 to six', () => {
     let room = addPlayer(quietRoom(), 'mk1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
     room = addPlayer(room, 'mk2', { blaster: 'mk2', skin: 'default' }, OPEN_GROUND)

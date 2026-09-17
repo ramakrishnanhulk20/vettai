@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from 'drizzle-orm'
+import { and, eq, gt, inArray, sql } from 'drizzle-orm'
 import type { Db } from '../db/client.js'
 import { claims, ladderPeriods, quests } from '../db/schema.js'
 import { DAY_MS } from '../lib/day.js'
@@ -169,11 +169,39 @@ export function weeksFrom(first: string, last: string): string[] {
   return weeks
 }
 
-/** The week the oldest claim was made in, which is as far back as a ladder can owe anything. */
+function asDate(value: string | null | undefined): Date | null {
+  if (!value) return null
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+/**
+ * The week the oldest play or the oldest claim happened in, which is as far back as a
+ * ladder can owe anything.
+ *
+ * The kills are what the ladder pays on, so they are what the floor is read from. A first
+ * week where everybody hunted and nobody claimed leaves the claims table empty, and a floor
+ * read off claims alone would land on this week and never pay that one.
+ */
 export async function firstPlayedWeek(db: Db, now: Date): Promise<string> {
-  const [row] = await db.select({ oldest: sql<string | null>`min(${claims.createdAt})` }).from(claims)
-  const oldest = row?.oldest ? new Date(row.oldest) : null
-  return oldest && !Number.isNaN(oldest.getTime()) ? weekOf(oldest) : weekOf(now)
+  const [claimed] = await db
+    .select({ oldest: sql<string | null>`min(${claims.createdAt})` })
+    .from(claims)
+
+  // The oldest day is read as the column itself rather than as min(), so the driver hands
+  // back the YYYY-MM-DD the rest of the server files quests under and not a local midnight.
+  const [played] = await db
+    .select({ oldest: quests.day })
+    .from(quests)
+    .where(and(eq(quests.kind, 'hunt'), gt(quests.progress, 0)))
+    .orderBy(quests.day)
+    .limit(1)
+
+  const oldest = [asDate(claimed?.oldest), asDate(played ? `${played.oldest}T00:00:00Z` : null)]
+    .filter((date): date is Date => date !== null)
+    .sort((a, b) => a.getTime() - b.getTime())[0]
+
+  return oldest ? weekOf(oldest) : weekOf(now)
 }
 
 export type LadderCatchUp = {

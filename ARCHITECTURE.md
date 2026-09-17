@@ -183,6 +183,12 @@ Tick: 50 ms. Units: metres, seconds, radians.
   - `{ t: 'event', kind, ... }` only for the per-player and roster kinds: `quest`
     (progress or done, sent to that player only), `gear` (a shop order was paid, that
     player only), `join`, `leave`. `join` and `leave` name a handle.
+  - `{ t: 'event', kind: 'assist', drone }` to the player who fired the finishing shot on a
+    drone the kill was credited to somebody else for, that player only.
+  - `{ t: 'event', kind: 'courier-reset', reason: 'cold' | 'day' }` when a parcel in hand is
+    dropped: `cold` is the two minute window running out, `day` is the UTC day turning.
+  - `{ t: 'event', kind: 'quests-rolled' }` once to a player whose quest set was rebuilt for
+    a new UTC day while they were still connected; the new set follows as `quest` events.
   - `{ t: 'pong', ts, serverTs }`, `{ t: 'error', code }`.
 - Per-connection rate limits by message type, counted server side, never trusted from
   the client. A connection sending malformed JSON three times is closed.

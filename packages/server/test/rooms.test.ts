@@ -25,6 +25,7 @@ import { generateMap } from '../src/world/map.js'
 import { INITIAL_DRONES } from '../src/world/sim.js'
 import { STARTING_GEAR } from '../src/db/schema.js'
 import type { PlayerQuestEvent, QuestView } from '../src/domain/quests.js'
+import type { DroneState } from '../src/world/types.js'
 
 const map = generateMap('vettai-test')
 const ADDRESS = 'NQ66KBKYVKLD6J8HN23BY7MVPCT27X2DK54R'
@@ -517,6 +518,40 @@ describe('interacting with a place', () => {
     expect(events).toEqual([{ address: ADDRESS, kind: 'deliver', point: 5 }])
   })
 
+  it('tells the player why a parcel that went cold is no longer in hand', () => {
+    const socket = fakeSocket()
+    rooms.join(ADDRESS, STARTING_GEAR, socket, [courierQuest({ from: 3, to: 5 }, true)])
+
+    // What the quest engine writes on a delivery that missed the two minute window: the
+    // same open quest, with nothing in hand.
+    rooms.noteQuests(ADDRESS, [courierQuest({ from: 3, to: 5 })])
+
+    expect(socket.of('event').filter((frame) => frame['kind'] === 'courier-reset')).toEqual([
+      { v: PROTOCOL_VERSION, t: 'event', kind: 'courier-reset', reason: 'cold' },
+    ])
+  })
+
+  it('tells the player the day turned when the new route arrives with the parcel gone', () => {
+    const socket = fakeSocket()
+    rooms.join(ADDRESS, STARTING_GEAR, socket, [courierQuest({ from: 3, to: 5 }, true)])
+
+    rooms.noteQuests(ADDRESS, [{ ...courierQuest({ from: 1, to: 4 }), day: '2026-09-16' }])
+
+    expect(socket.of('event').filter((frame) => frame['kind'] === 'courier-reset')).toEqual([
+      { v: PROTOCOL_VERSION, t: 'event', kind: 'courier-reset', reason: 'day' },
+    ])
+  })
+
+  it('says nothing about a parcel that was delivered rather than dropped', () => {
+    const socket = fakeSocket()
+    rooms.join(ADDRESS, STARTING_GEAR, socket, [courierQuest({ from: 3, to: 5 }, true)])
+
+    const delivered: QuestView = { ...courierQuest({ from: 3, to: 5 }), state: 'done', progress: 1 }
+    rooms.noteQuests(ADDRESS, [delivered])
+
+    expect(socket.of('event').some((frame) => frame['kind'] === 'courier-reset')).toBe(false)
+  })
+
   it('takes a landmark visit only at that landmark', () => {
     const socket = fakeSocket()
     const joined = rooms.join(ADDRESS, STARTING_GEAR, socket, [landmarksQuest()])
@@ -738,6 +773,49 @@ describe('reaching one player', () => {
 
     expect(mine.of('event').some((frame) => frame['kind'] === 'gear')).toBe(true)
     expect(theirs.of('event').some((frame) => frame['kind'] === 'gear')).toBe(false)
+  })
+
+  it('sends an assist to the shooter alone, never to the room', () => {
+    const mine = fakeSocket()
+    const theirs = fakeSocket()
+    rooms.join(ADDRESS, STARTING_GEAR, mine)
+    rooms.join(OTHER, STARTING_GEAR, theirs)
+
+    const room = rooms.roomFor(ADDRESS)
+    if (!room) throw new Error('no room')
+
+    // Both players twenty metres clear of the board, with a drone the other one has almost
+    // finished. This shot lands last, and the kill still belongs to the other player.
+    const at = { x: map.office.x, z: map.office.z - 20 }
+    const players = new Map(room.state.players)
+    for (const [id, player] of players) players.set(id, { ...player, x: at.x, z: at.z })
+    const drone: DroneState = {
+      id: 'd1',
+      x: at.x,
+      y: 1.6,
+      z: at.z + 3,
+      yaw: 0,
+      hp: 1,
+      state: 'patrol',
+      loop: 0,
+      waypoint: 0,
+      target: null,
+      targetUntil: 0,
+      nextFireAt: Date.now() + 60_000,
+      deadUntil: 0,
+      damage: new Map([[OTHER, 5]]),
+    }
+    room.write({ ...room.state, players, drones: new Map([[drone.id, drone]]), bolts: [] })
+
+    rooms.handle(ADDRESS, message({ t: 'fire', yaw: 0, pitch: 0 }))
+    ticks(1)
+
+    expect(mine.of('event').filter((frame) => frame['kind'] === 'assist')).toEqual([
+      { v: PROTOCOL_VERSION, t: 'event', kind: 'assist', drone: 'd1' },
+    ])
+    expect(theirs.of('event').some((frame) => frame['kind'] === 'assist')).toBe(false)
+    // The assist is nobody else's business, so it never rides the frame the room reads.
+    expect(tickEvents(mine).some((event) => event.kind === 'assist')).toBe(false)
   })
 
   it('puts bought gear on the live player', () => {

@@ -69,6 +69,13 @@ export const INITIAL_DRONES = 6
 /** How close an engaged drone is allowed to fly to a tower it is circling. */
 const DRONE_CLEARANCE = 1
 
+/**
+ * How far an engaged drone's orbit point is held from the board. Inside the circle a drone
+ * cannot shoot back, so a player standing at the edge could otherwise pull one over the
+ * board and take it apart from the one spot in the city that cannot answer.
+ */
+const DRONE_BOARD_CLEARANCE = OFFICE_SAFE_RADIUS + 2
+
 /** Aim assist looks past this many blocked drones before the shot counts as a miss. */
 const AIM_CANDIDATES = 3
 
@@ -153,6 +160,20 @@ function aimVector(intent: FireIntent): Vec3 {
 /** True for anything standing inside the no-fire circle around the quest board. */
 function inSafeZone(map: WorldMap, at: Place): boolean {
   return horizontal(at, map.office) <= OFFICE_SAFE_RADIUS
+}
+
+/** The same point, moved straight out from the office until it is clear of the circle. */
+function clearOfTheBoard(map: WorldMap, at: Place): Place {
+  const away = { x: at.x - map.office.x, z: at.z - map.office.z }
+  const range = Math.hypot(away.x, away.z)
+  if (range >= DRONE_BOARD_CLEARANCE) return at
+
+  // A point sitting exactly on the office has no bearing of its own, so it is pushed east.
+  const unit = range > 1e-6 ? { x: away.x / range, z: away.z / range } : { x: 1, z: 0 }
+  return {
+    x: map.office.x + unit.x * DRONE_BOARD_CLEARANCE,
+    z: map.office.z + unit.z * DRONE_BOARD_CLEARANCE,
+  }
 }
 
 function isLive(drone: DroneState): boolean {
@@ -363,6 +384,9 @@ function damageDrone(
         y: drone.y,
         z: drone.z,
       })
+      // The kill goes to the most damage, which is the right rule and a silent one: the
+      // player who fired the finishing shot watched a drone burst and heard nothing back.
+      if (credit !== player) events.push({ kind: 'assist', player, drone: drone.id })
     }
   }
   const drones = new Map(room.drones)
@@ -380,9 +404,9 @@ function damageDrone(
  * building between it and the player is skipped, and the next one in the cone is tried, so
  * aim assist can never shoot somebody through a wall.
  *
- * A player standing in the board's circle cannot fire at all. The circle cuts both ways:
- * nothing may shoot into it, so anybody allowed to shoot out of it would be taking drones
- * apart from the one place in the city that cannot answer.
+ * The board's circle cuts both ways. A player standing inside it cannot fire, and a shot at
+ * a drone inside it is refused wherever it was fired from, because a drone over the board
+ * cannot answer: either half on its own is a farm rather than a fight.
  */
 export function applyFire(
   room: RoomState,
@@ -422,6 +446,7 @@ export function applyFire(
 
   const drone = fired.drones.get(found.target.id)
   if (!drone) return { room: fired, events: [] }
+  if (inSafeZone(map, drone)) return { room: fired, events: [] }
   return damageDrone(fired, drone, id, 1, now)
 }
 
@@ -526,7 +551,8 @@ function pickTarget(
 /**
  * Where a drone wants to be next: on its loop, or orbiting its target at 12 m. The orbit
  * point is one tick of arc ahead, because aiming a whole second ahead would cut the corner
- * and spiral the drone into the player.
+ * and spiral the drone into the player. An orbit that would cross the board is pushed back
+ * out of the circle, so a player on the edge cannot walk a drone over the safe zone.
  */
 function droneGoal(
   drone: DroneState,
@@ -539,10 +565,10 @@ function droneGoal(
     const range = Math.hypot(away.x, away.z)
     const angle = range > 1e-6 ? Math.atan2(away.z, away.x) : drone.yaw
     const turned = angle + (DRONE_SPEED / DRONE_CIRCLE_RADIUS) * dt
-    return {
+    return clearOfTheBoard(map, {
       x: target.x + Math.cos(turned) * DRONE_CIRCLE_RADIUS,
       z: target.z + Math.sin(turned) * DRONE_CIRCLE_RADIUS,
-    }
+    })
   }
   const loop = map.patrols[drone.loop]
   if (!loop || loop.length === 0) return null

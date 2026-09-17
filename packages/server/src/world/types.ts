@@ -125,3 +125,8 @@ export type SimEvent =
   | { kind: 'downed'; player: string; x: number; y: number; z: number }
   | { kind: 'respawn'; player: string; x: number; y: number; z: number }
   | { kind: 'spawn'; drone: string; x: number; y: number; z: number }
+  /**
+   * The player who fired the finishing shot on a drone credited to somebody else. It goes
+   * to that one player, never to the room, so nobody learns who else was shooting what.
+   */
+  | { kind: 'assist'; player: string; drone: string }

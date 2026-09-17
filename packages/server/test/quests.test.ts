@@ -94,8 +94,8 @@ async function streakRun(days: number): Promise<void> {
   }
 }
 
-/** Money this wallet has already been granted today, which is what the clamp reads. */
-async function grantedToday(amountLuna: bigint): Promise<void> {
+/** Money this wallet has already been granted on a day, which is what the clamp reads. */
+async function grantedToday(amountLuna: bigint, when: Date = DAY_ONE): Promise<void> {
   await db.insert(claims).values({
     address,
     questId: null,
@@ -103,7 +103,7 @@ async function grantedToday(amountLuna: bigint): Promise<void> {
     amountLuna,
     state: 'queued',
     memo: `vettai:${randomHash().slice(0, 8)}`,
-    createdAt: DAY_ONE,
+    createdAt: when,
   })
 }
 
@@ -349,10 +349,29 @@ describe('the streak', () => {
     expect(afterAGap.rewardLuna).toBe(20_000n)
   })
 
-  it('does not count a day the player never claimed', async () => {
+  it('counts a day the player turned up for even if they never claimed it', async () => {
     await todaysQuests(db, address, map, new Date('2026-09-15T08:00:00Z'))
 
-    expect(await streakDay(db, address, '2026-09-16')).toBe(1)
+    expect(await streakDay(db, address, '2026-09-16')).toBe(2)
+  })
+
+  it('keeps the run going through a day the cap left worth nothing', async () => {
+    const dayTwo = new Date('2026-09-16T08:00:00Z')
+    await todaysQuests(db, address, map, new Date('2026-09-15T08:00:00Z'))
+    await claimStreak('2026-09-15')
+
+    // This wallet has already had its whole day when day two is built, so day two's streak
+    // is written at nothing and there is no claim to make on it.
+    await grantedToday(dailyCapLuna, dayTwo)
+    expect(byKind(await todaysQuests(db, address, map, dayTwo), 'streak').rewardLuna).toBe(0n)
+
+    const dayThree = byKind(
+      await todaysQuests(db, address, map, new Date('2026-09-17T08:00:00Z')),
+      'streak',
+    )
+
+    expect(await streakDay(db, address, '2026-09-17')).toBe(3)
+    expect(dayThree.rewardLuna).toBe(streakReward(3))
   })
 
   it('pays only what the daily cap still allows on a long run', async () => {

@@ -24,9 +24,10 @@ const HALF = MAP_SIZE / 2
 export const PATROL_Y = 6
 
 /**
- * The quest board stands in a no-fire circle this wide. Nothing may shoot into it and
- * nobody may shoot out of it, so it is a place to read the board from and come back at,
- * never a place to camp from.
+ * The quest board stands in a no-fire circle this wide. A shot fired from inside it is
+ * refused, a shot at a drone inside it is refused, a drone's bolt dies at the edge, and an
+ * engaged drone is held outside it. So the board is a place to read from and come back at,
+ * never a place to camp from and never a place to farm a drone over.
  */
 export const OFFICE_SAFE_RADIUS = 10
 

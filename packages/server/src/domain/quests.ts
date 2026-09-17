@@ -1,4 +1,4 @@
-import { and, desc, eq, lt } from 'drizzle-orm'
+import { and, desc, eq, inArray, lt } from 'drizzle-orm'
 import { config, dailyCapLuna } from '../config.js'
 import type { Db } from '../db/client.js'
 import { quests, type Quest } from '../db/schema.js'
@@ -129,8 +129,15 @@ export function questView(quest: Quest): QuestView {
   return base
 }
 
-function readDay(db: Db, address: string, day: string): Promise<Quest[]> {
-  return db
+/**
+ * Reads and writes that run either on the database or inside a transaction the caller
+ * already owns. The day's set is created from both doors: a socket opening, and a write
+ * from the world that lands on a day nobody has opened yet.
+ */
+type Store = Db | Tx
+
+function readDay(db: Store, address: string, day: string): Promise<Quest[]> {
+  return (db as Db)
     .select()
     .from(quests)
     .where(and(eq(quests.address, address), eq(quests.day, day)))
@@ -138,8 +145,8 @@ function readDay(db: Db, address: string, day: string): Promise<Quest[]> {
 }
 
 /** True when this wallet already has a quest set for that UTC day. */
-export async function hasQuestsForDay(db: Db, address: string, day: string): Promise<boolean> {
-  const [row] = await db
+export async function hasQuestsForDay(db: Store, address: string, day: string): Promise<boolean> {
+  const [row] = await (db as Db)
     .select({ id: quests.id })
     .from(quests)
     .where(and(eq(quests.address, address), eq(quests.day, day)))
@@ -156,8 +163,8 @@ function pickRoute(address: string, day: string, points: number): { from: number
   return { from, to }
 }
 
-async function seenLandmarksBefore(db: Db, address: string, day: string): Promise<boolean> {
-  const [row] = await db
+async function seenLandmarksBefore(db: Store, address: string, day: string): Promise<boolean> {
+  const [row] = await (db as Db)
     .select({ id: quests.id })
     .from(quests)
     .where(and(eq(quests.address, address), eq(quests.kind, 'landmarks'), lt(quests.day, day)))
@@ -167,20 +174,21 @@ async function seenLandmarksBefore(db: Db, address: string, day: string): Promis
 }
 
 /**
- * Which day of the streak today is: the run of UTC days directly before today on which
- * this wallet actually claimed its streak quest, plus today. A day where the quest was
- * created but never claimed breaks the run, because the streak pays for showing up and
- * taking it, not for the row existing.
+ * Which day of the streak today is: the run of UTC days directly before today on which this
+ * wallet had a streak quest standing, plus today. Done counts as well as claimed, because a
+ * day whose reward the daily cap cut to nothing cannot be claimed at all, and a cap is meant
+ * to delay money rather than to destroy a run the player turned up for. A day the player
+ * never played has no row, and that still ends the run.
  */
-export async function streakDay(db: Db, address: string, day: string): Promise<number> {
-  const rows = await db
+export async function streakDay(db: Store, address: string, day: string): Promise<number> {
+  const rows = await (db as Db)
     .select({ day: quests.day })
     .from(quests)
     .where(
       and(
         eq(quests.address, address),
         eq(quests.kind, 'streak'),
-        eq(quests.state, 'claimed'),
+        inArray(quests.state, ['done', 'claimed']),
         lt(quests.day, day),
       ),
     )
@@ -211,7 +219,7 @@ export async function streakDay(db: Db, address: string, day: string): Promise<n
  * wallet that has already had its day gets a streak worth nothing, marked as clamped.
  */
 export async function todaysQuests(
-  db: Db,
+  db: Store,
   address: string,
   map: WorldMap,
   now: Date = new Date(),
@@ -263,7 +271,7 @@ export async function todaysQuests(
     rows.push({ address, day, kind: 'landlord', target: 1, rewardLuna: rewards.landlord })
   }
 
-  await db.insert(quests).values(rows).onConflictDoNothing()
+  await (db as Db).insert(quests).values(rows).onConflictDoNothing()
 
   return readDay(db, address, day)
 }
@@ -350,64 +358,84 @@ async function save(tx: Tx, id: string, values: QuestUpdate): Promise<Quest[]> {
   return row ? [row] : []
 }
 
+/** What one event did: the rows it changed, and the day's set if it had to be created. */
+type Applied = { rows: Quest[]; rolled: Quest[] | null }
+
 /**
  * Moves one quest along inside a transaction the caller already owns, and answers with the
  * rows that actually changed so the room can push them to that player alone.
  *
  * A quest that is already done or claimed is left alone, with one exception: the hunt keeps
  * counting kills after its fifth, because the weekly ladder is read off that number.
+ *
+ * A player who was already in the world when the UTC day turned writes into a day nobody
+ * has opened yet. With a map in hand this creates that day's set first and then applies the
+ * event to it, so midnight costs nobody the kill they were in the middle of.
  */
 async function applyEventIn(
   tx: Tx,
   address: string,
   event: QuestEvent,
   now: Date,
-): Promise<Quest[]> {
+  map?: WorldMap,
+): Promise<Applied> {
   const day = utcDay(now)
   const kind = questFor(event)
 
-  const seen = await peekQuest(tx, address, day, kind)
-  if (!canChange(seen, event)) return []
+  let rolled: Quest[] | null = null
+  let seen = await peekQuest(tx, address, day, kind)
+  if (!seen && map && !(await hasQuestsForDay(tx, address, day))) {
+    rolled = await todaysQuests(tx, address, map, now)
+    seen = await peekQuest(tx, address, day, kind)
+  }
+
+  if (!canChange(seen, event)) return { rows: [], rolled }
 
   const quest = await lockQuest(tx, address, day, kind)
-  if (!quest || !canChange(quest, event)) return []
+  if (!quest || !canChange(quest, event)) return { rows: [], rolled }
 
   if (event.kind === 'kill') {
     const progress = quest.progress + 1
     const finishes = quest.state === 'open' && progress >= quest.target
-    return save(tx, quest.id, { progress, ...(finishes ? markDone(now) : {}) })
+    const rows = await save(tx, quest.id, { progress, ...(finishes ? markDone(now) : {}) })
+    return { rows, rolled }
   }
 
   if (event.kind === 'pickup') {
     const detail = courierDetail(quest)
-    if (!detail) return []
+    if (!detail) return { rows: [], rolled }
 
-    return save(tx, quest.id, {
+    const rows = await save(tx, quest.id, {
       detail: { ...detail, pickedUpAt: Math.floor(now.getTime() / 1000) },
     })
+    return { rows, rolled }
   }
 
   if (event.kind === 'deliver') {
     const detail = courierDetail(quest)
-    if (!detail || detail.pickedUpAt === null) return []
+    if (!detail || detail.pickedUpAt === null) return { rows: [], rolled }
 
     const carriedFor = now.getTime() - detail.pickedUpAt * 1000
     if (carriedFor > COURIER_WINDOW_MS) {
-      // The parcel went cold on the way. The player keeps the quest and starts again
-      // from the pickup point rather than being handed a failure they cannot undo.
-      return save(tx, quest.id, { detail: { ...detail, pickedUpAt: null } })
+      // The parcel went cold on the way. The player keeps the quest and starts again from
+      // the pickup point rather than being handed a failure they cannot undo. The row comes
+      // back open with nothing in hand, which is what the room reads to say so.
+      const rows = await save(tx, quest.id, { detail: { ...detail, pickedUpAt: null } })
+      return { rows, rolled }
     }
 
-    return save(tx, quest.id, { progress: COURIER_TARGET, ...markDone(now) })
+    const rows = await save(tx, quest.id, { progress: COURIER_TARGET, ...markDone(now) })
+    return { rows, rolled }
   }
 
   const reached = [...visitedLandmarks(quest), event.index]
   const finishes = reached.length >= quest.target
-  return save(tx, quest.id, {
+  const rows = await save(tx, quest.id, {
     progress: reached.length,
     detail: { visited: reached },
     ...(finishes ? markDone(now) : {}),
   })
+  return { rows, rolled }
 }
 
 /** One event from the world, written down on its own. */
@@ -416,8 +444,10 @@ export async function applySimEvent(
   address: string,
   event: QuestEvent,
   now: Date = new Date(),
+  map?: WorldMap,
 ): Promise<Quest[]> {
-  return db.transaction((tx) => applyEventIn(tx, address, event, now))
+  const applied = await db.transaction((tx) => applyEventIn(tx, address, event, now, map))
+  return applied.rows
 }
 
 function withoutAddress(event: PlayerQuestEvent): QuestEvent {
@@ -426,7 +456,16 @@ function withoutAddress(event: PlayerQuestEvent): QuestEvent {
   return { kind: event.kind, point: event.point }
 }
 
-export type QuestChange = { address: string; quests: Quest[] }
+export type QuestChange = {
+  address: string
+  /** The rows this batch changed, which are the ones the player's socket is sent. */
+  quests: Quest[]
+  /**
+   * The whole day's set when the UTC day turned under a player who was still online, so
+   * the room can throw away yesterday's copy rather than judging today's walk against it.
+   */
+  rolled?: Quest[]
+}
 
 /**
  * One tick's worth of events from the world, written down in the order they happened.
@@ -435,23 +474,39 @@ export type QuestChange = { address: string; quests: Quest[] }
  * same tick land in that order and the database never shows a half written tick. An event
  * that fails takes the batch down with it and the error goes back to the caller, which
  * logs it, rather than leaving some of the tick saved and some of it lost.
+ *
+ * The map is what lets a write create the day it belongs to. Without one an event for a day
+ * that has no rows is dropped, which is what a caller replaying a day that is over wants.
  */
 export async function applyWorldEvents(
   db: Db,
   events: readonly PlayerQuestEvent[],
   now: Date = new Date(),
+  map?: WorldMap,
 ): Promise<QuestChange[]> {
   return db.transaction(async (tx) => {
     const changed = new Map<string, Quest[]>()
+    const rolled = new Set<string>()
 
     for (const event of events) {
-      const rows = await applyEventIn(tx, event.address, withoutAddress(event), now)
-      if (rows.length === 0) continue
+      const applied = await applyEventIn(tx, event.address, withoutAddress(event), now, map)
+      if (applied.rolled) rolled.add(event.address)
+      if (applied.rows.length === 0) continue
 
       const already = changed.get(event.address) ?? []
-      changed.set(event.address, [...already, ...rows])
+      changed.set(event.address, [...already, ...applied.rows])
     }
 
-    return [...changed].map(([address, rows]) => ({ address, quests: rows }))
+    const day = utcDay(now)
+    const changes: QuestChange[] = []
+    for (const address of new Set([...changed.keys(), ...rolled])) {
+      changes.push({
+        address,
+        quests: changed.get(address) ?? [],
+        ...(rolled.has(address) ? { rolled: await readDay(tx, address, day) } : {}),
+      })
+    }
+
+    return changes
   })
 }
