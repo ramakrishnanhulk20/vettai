@@ -1,0 +1,21 @@
+vettai prove-it against a deployment, 2026-09-17T06:56:21.468Z
+origin https://world-production-4620.up.railway.app
+nothing runs in this process: every check is made over the network
+
+ 1/12  PASS  the deployment answers, names its network, and sees the caller it should: MainAlbatross at block 61823168 through https://rpc.nimiqwatch.com, 0 room(s) and 0 online, it reads this caller as 106.205.47.53, which is this machine's own address, map 3-1hrrxku
+ 2/12  PASS  a wallet signs in and the deployment reads its address off the key: NQ5292FT501Y3F0QQA5KLX473P4NS5VRTJX1 signed in, /api/me agrees, nothing named an address but the key
+ 3/12  PASS  a forged signature and a replayed challenge are both refused: forged signature 401 "signature does not match message", replayed challenge 401 "nonce used"
+ 4/12  PASS  a scripted wallet plays the deployed world until the hunt quest is done: 5 kills in 93s through the socket, reward 0.5 NIM
+ 5/12  PASS  the hunt claim is signed once, and a replay or another wallet is refused: queued with memo vettai:2f1249a3, replay 409 "already claimed", another wallet 404
+     claim a99d598a-0c51-4e6c-8249-7ec9e555992f is sent
+     claim a99d598a-0c51-4e6c-8249-7ec9e555992f is paid
+ 6/12  PASS  the deployed treasury pays it on chain and the payment carries the quest id: 0.5 NIM to NQ5292FT501Y3F0QQA5KLX473P4NS5VRTJX1, memo "vettai:2f1249a3", hash 002b9f0bdc3fcceedb0767714eb900d83b6a44abb31384d27ac71250567b693c, block 61823272 on MainAlbatross, read back from https://rpc.nimiqwatch.com
+ 7/12  SKIP  the deployment runs the daily cap Ram set: remote: pass --expect-daily-cap to hold it to a number. The deployment says 5
+ 8/12  SKIP  the third wallet claiming from one address is held: remote: caps are configured on the host
+ 9/12  SKIP  the pool stops the claim that would spend past it: remote: caps are configured on the host
+10/12  SKIP  a real shop payment grants the gear and a short one from another wallet does not: remote: funding a fresh wallet needs the treasury key, so this one only runs with --fund
+11/12  PASS  the socket refuses a flood, a long move vector and nonsense frames: 40 moves in a second carried the player 4.22 m, inside the 6 m/s walk; a move vector of length 50 carried it 6.32 m, so the server normalised it; 20 fire frames gave 4 landed shot(s) on an mk1; three bad frames closed the socket with 1008
+12/12  SKIP  a payout that already has a hash is looked up, never sent again: remote: the outbox is proven against its own database, which only the host can read
+
+7/12 passed, 5 skipped, 0 failed
+finished in 201s

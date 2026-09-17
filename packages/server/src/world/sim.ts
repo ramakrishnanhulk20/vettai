@@ -64,7 +64,7 @@ export const MAX_DRONES = 12
 export const DRONE_SPAWN_MS = 15000
 
 /** How many drones a room is born with. The rest arrive on the spawn clock, like any other. */
-export const INITIAL_DRONES = 2
+export const INITIAL_DRONES = 6
 
 /** How close an engaged drone is allowed to fly to a tower it is circling. */
 const DRONE_CLEARANCE = 1
