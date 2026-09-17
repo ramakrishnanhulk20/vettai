@@ -6,7 +6,7 @@ import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import CityCanvas from "./CityCanvas";
 
-const META = ["Nimiq Pay", "Open city", "Daily bounties", "Cycle III"];
+const META = ["Nimiq Pay", "Open city", "Daily bounties", "Mainnet"];
 
 const EASE = [0.16, 1, 0.3, 1] as const;
 

@@ -67,7 +67,7 @@ export default function Closing() {
 
       <div className="relative z-10 flex flex-1 flex-col justify-between px-6 pb-8 pt-24 md:px-12 md:pb-10 md:pt-32">
         <Reveal className="max-w-[46rem]">
-          <p className="label-type text-paper/40">Nimiq Mini Apps, Cycle III</p>
+          <p className="label-type text-paper/40">Nimiq Mini Apps, Cycle II</p>
           <h2
             className="display-type mt-6 uppercase text-paper"
             style={{
