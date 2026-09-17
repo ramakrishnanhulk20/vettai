@@ -228,8 +228,10 @@ describe('the ways a claim is refused', () => {
 
     const replay = await claim(quest, body)
 
-    expect(replay.statusCode).toBe(401)
-    expect(replay.json()).toEqual({ error: 'nonce used' })
+    // A spent nonce is a refusal about this claim, not about the session, so it is a 403
+    // with a code. A 401 here would make a phone sign its player out over a stale message.
+    expect(replay.statusCode).toBe(403)
+    expect(replay.json()).toEqual({ error: 'nonce used', code: 'nonce' })
     expect(await db.select().from(claims)).toHaveLength(1)
   })
 
@@ -239,8 +241,11 @@ describe('the ways a claim is refused', () => {
 
     const impostor = await claim(quest, signed(message, KeyPair.generate()))
 
-    expect(impostor.statusCode).toBe(401)
-    expect(impostor.json()).toEqual({ error: 'that signature is from another wallet' })
+    expect(impostor.statusCode).toBe(403)
+    expect(impostor.json()).toEqual({
+      error: 'that signature is from another wallet',
+      code: 'other_wallet',
+    })
     expect(await db.select().from(claims)).toHaveLength(0)
   })
 
@@ -252,8 +257,11 @@ describe('the ways a claim is refused', () => {
     const flipped = proof.signature.startsWith('a') ? 'b' : 'a'
     const mangled = await claim(quest, { ...proof, signature: flipped + proof.signature.slice(1) })
 
-    expect(mangled.statusCode).toBe(401)
-    expect(mangled.json()).toEqual({ error: 'signature does not match message' })
+    expect(mangled.statusCode).toBe(403)
+    expect(mangled.json()).toEqual({
+      error: 'signature does not match message',
+      code: 'bad_signature',
+    })
   })
 
   it('refuses a claim on somebody else the player does not hold', async () => {
@@ -286,8 +294,15 @@ describe('the ways a claim is refused', () => {
       payload: {},
     })
 
+    // A quest that is not done has no challenge to sign, so the claim is sent with a
+    // message signed for another one and is refused on the quest, not on the message.
+    const done = await finishedQuest()
+    const attempt = await claim(open, signed(await challengeFor(done)))
+
     expect(challenge.statusCode).toBe(409)
     expect(challenge.json()).toEqual({ error: 'that quest is not done yet' })
+    expect(attempt.statusCode).toBe(403)
+    expect(attempt.json()).toEqual({ error: 'that quest is not done yet', code: 'not_claimable' })
   })
 
   it('refuses a challenge signed for a different quest', async () => {

@@ -45,9 +45,9 @@ export function claimMemo(questId: string): string {
 
 /**
  * When a held claim is worth looking at again. The two day caps are a delay and nothing
- * more, so they wait for the next UTC midnight and the money is not forfeited. A fresh
- * pool hold waits for nothing, because room in the pool comes back the moment a committed
- * claim fails rather than at a time anybody can name.
+ * more, so they wait for the next UTC midnight and the money is not forfeited. A pool hold
+ * waits for nothing and is measured again on every pass, because room in the pool comes back
+ * when a payout is cancelled by hand, which happens at a moment nobody can name in advance.
  */
 function heldUntilFor(reason: HoldReason, now: Date): Date | null {
   return reason === 'pool' ? null : nextUtcMidnight(now)
@@ -110,11 +110,19 @@ async function walletsFromIpToday(tx: Tx, ipHash: string, address: string, now: 
   return Number(row?.wallets ?? 0)
 }
 
+/**
+ * Everything the pool has promised and not got back, in luna.
+ *
+ * A failed payout counts. The money is still owed to the player who earned it, and Ram can
+ * put it back in the queue with `npm run treasury:requeue`, so treating the row as free room
+ * would let the pool promise the same luna to somebody else. Only `held`, which was never
+ * granted, and `cancelled`, which Ram has written off on purpose, are outside this.
+ */
 async function committedEver(tx: Tx): Promise<bigint> {
   const [row] = await tx
     .select({ total: sql<string>`coalesce(sum(${claims.amountLuna}), 0)` })
     .from(claims)
-    .where(sql`${claims.state} in ('queued', 'sending', 'sent', 'paid')`)
+    .where(sql`${claims.state} in ('queued', 'sending', 'sent', 'paid', 'failed')`)
 
   return toBigInt(row?.total)
 }
@@ -253,9 +261,12 @@ export async function releaseHeld(db: Db, now: Date = new Date(), limits?: Limit
       )
 
       if (reason) {
+        // The same rule a fresh hold uses, so a pool hold keeps its null and is looked at
+        // again on the next pass. Stamping it with midnight would have parked money that the
+        // very next failed payout could have freed.
         await tx
           .update(claims)
-          .set({ heldUntil: nextUtcMidnight(now), error: reason })
+          .set({ heldUntil: heldUntilFor(reason, now), error: reason })
           .where(and(eq(claims.id, claim.id), eq(claims.state, 'held')))
         return false
       }
@@ -296,7 +307,7 @@ export async function claimTotals(db: Db): Promise<ClaimTotals> {
     .select({
       paid: sql<string>`coalesce(sum(${claims.amountLuna}) filter (where ${claims.state} = 'paid'), 0)`,
       paidCount: sql<string>`count(*) filter (where ${claims.state} = 'paid')`,
-      committed: sql<string>`coalesce(sum(${claims.amountLuna}) filter (where ${claims.state} in ('queued', 'sending', 'sent', 'paid')), 0)`,
+      committed: sql<string>`coalesce(sum(${claims.amountLuna}) filter (where ${claims.state} in ('queued', 'sending', 'sent', 'paid', 'failed')), 0)`,
       queuedCount: sql<string>`count(*) filter (where ${claims.state} in ('queued', 'sending', 'sent'))`,
       heldCount: sql<string>`count(*) filter (where ${claims.state} = 'held')`,
     })

@@ -213,6 +213,46 @@ describe('queueClaim', () => {
     expect(over).toMatchObject({ state: 'held', reason: 'pool' })
   })
 
+  it('keeps a failed payout inside the pool, because it is still owed', async () => {
+    const limits = { poolTotalLuna: nimToLuna('1') }
+
+    const first = await queueClaim(db, {
+      address: player,
+      questId: await newQuest(player, 'hunt'),
+      kind: 'hunt',
+      amountLuna: nimToLuna('0.9'),
+      now: NOW,
+      limits,
+    })
+    await db.update(claims).set({ state: 'failed' }).where(eq(claims.id, first.claimId))
+
+    const next = await queueClaim(db, {
+      address: player,
+      questId: await newQuest(player, 'courier'),
+      kind: 'courier',
+      amountLuna: nimToLuna('0.3'),
+      now: NOW,
+      limits,
+    })
+
+    expect(next).toMatchObject({ state: 'held', reason: 'pool' })
+    expect((await claimTotals(db)).committedLuna).toBe(nimToLuna('0.9'))
+
+    // Cancelling is the one thing that gives the room back, and it is a person's decision.
+    await db.update(claims).set({ state: 'cancelled' }).where(eq(claims.id, first.claimId))
+    expect((await claimTotals(db)).committedLuna).toBe(0n)
+
+    const after = await queueClaim(db, {
+      address: player,
+      questId: await newQuest(player, 'landmarks'),
+      kind: 'landmarks',
+      amountLuna: nimToLuna('0.3'),
+      now: NOW,
+      limits,
+    })
+    expect(after.state).toBe('queued')
+  })
+
   it('pays one quest once, however many times it is claimed', async () => {
     const questId = await newQuest(player)
     const input = {

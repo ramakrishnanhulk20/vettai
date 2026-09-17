@@ -1,12 +1,15 @@
-// Covers the reads a phone makes before it plays: the map, the socket ticket and today's
-// quests. It does NOT cover claiming a finished quest (claims.api.test.ts) and it does NOT
-// open a socket (ws.test.ts).
+// Covers the reads a phone makes before it plays: the map, the world constants, the socket
+// ticket and today's quests. It does NOT cover claiming a finished quest
+// (claims.api.test.ts) and it does NOT open a socket (ws.test.ts).
 
 import { KeyPair } from '@nimiq/core'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { Db, DbHandle } from '../src/db/client.js'
 import { courierDetail, todaysQuests } from '../src/domain/quests.js'
+import { OFFICE_SAFE_RADIUS, PATROL_Y } from '../src/world/map.js'
+import { INTERACT_RANGE } from '../src/world/rooms.js'
+import { MAX_DRONES } from '../src/world/sim.js'
 import { redeemTicket } from '../src/world/tickets.js'
 import { worldMap } from '../src/routes/world.js'
 import { signIn, testApp } from './support/api.js'
@@ -54,6 +57,26 @@ describe('GET /api/world/map', () => {
     const second = await app.inject({ method: 'GET', url: '/api/world/map' })
 
     expect(first.body).toBe(second.body)
+  })
+})
+
+describe('GET /api/world/constants', () => {
+  it('publishes the numbers the client has to agree with the server about', async () => {
+    const response = await app.inject({ method: 'GET', url: '/api/world/constants' })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.headers['cache-control']).toBe('public, max-age=3600')
+    expect(response.json()).toEqual({
+      walkSpeed: 6,
+      sprintSpeed: 7,
+      interactRange: INTERACT_RANGE,
+      patrolY: PATROL_Y,
+      boltRadius: 0.15,
+      hitscanRange: 60,
+      aimConeDegrees: 12,
+      officeSafeRadius: OFFICE_SAFE_RADIUS,
+      maxDrones: MAX_DRONES,
+    })
   })
 })
 

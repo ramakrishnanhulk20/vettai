@@ -14,6 +14,10 @@ Two processes from one Docker image, one Postgres database.
   the treasury address for shop payments, reads stakes for the landlord quest, pays the
   weekly ladder. The only process with `TREASURY_PRIVATE_KEY`.
 
+The world runs as exactly one replica. Rooms and socket tickets live in that process's
+memory, so a second replica would hand a player a ticket the machine that took the upgrade
+has never heard of, and would split one room across two worlds.
+
 The host picks which process runs by setting `VETTAI_PROCESS=src/treasury/index.ts`.
 Unset, the image runs `world`. Locally the treasury reads its key from
 `packages/server/.env.treasury` on top of `.env`; the world refuses to boot if it sees
@@ -26,10 +30,13 @@ Unset, the image runs `world`. Locally the treasury reads its key from
 | PORT | world | HTTP and WebSocket port, default 8788 |
 | DATABASE_URL | both | Postgres URL; unset means PGlite under `.data/vettai` (local and tests) |
 | NIMIQ_RPC_URL | both | `https://rpc.nimiqwatch.com` mainnet, `https://rpc.testnet.nimiqwatch.com` testnet |
+| NIMIQ_RPC_FALLBACK_URL | both | Optional second node on the same network, tried only after the first has failed to answer twice in a row |
+| TREASURY_PORT | treasury | Port for the treasury's own `/health`, default 8789. Never given a public domain |
+| LADDER_FLOOR_WEEK | treasury | Optional ISO week (`2026-W38`) the ladder catch-up starts from; unset means the week of the oldest claim |
 | NIMIQ_NETWORK | both | `MainAlbatross` or `TestAlbatross`, must match the URL |
 | TREASURY_ADDRESS | both | The address that pays players and receives shop payments |
 | TREASURY_PRIVATE_KEY | treasury | 64 hex, never set on `world` |
-| POOL_TOTAL_NIM | both | Hard stop: sum of queued, sent and paid claims never exceeds this |
+| POOL_TOTAL_NIM | both | Hard stop: sum of queued, sending, sent, paid and failed claims never exceeds this. The treasury refuses to start when the wallet holds less than the unpaid part of it |
 | DAILY_CAP_NIM | both | Per wallet per UTC day, across every reward kind |
 | IP_WALLETS_PER_DAY | world | Distinct wallets that may claim from one IP per UTC day, default 2 |
 | ALLOWED_ORIGINS | world | Comma list for CORS; blank means same-origin only through the web rewrite |
@@ -37,7 +44,8 @@ Unset, the image runs `world`. Locally the treasury reads its key from
 | LANDLORD_MIN_NIM | both | Stake that completes the landlord quest, default 10 |
 | LANDLORD_ENABLED | both | `true` to generate landlord quests; default `false` until Ram decides |
 | IP_SALT | world | Salt for hashing client IPs; a fixed dev string when unset |
-| TRUST_PROXY | world | Blank locally. Otherwise a comma list of trusted proxy peers: named presets (`loopback`, `linklocal`, `uniquelocal`) or CIDRs. Fastify 5 ignores a plain hop count on purpose, and `true` would let any direct caller forge the client IP. Verify after deploy with `GET /api/echo-ip` |
+| TRUST_PROXY | world | Blank locally. Otherwise a comma list of the peers allowed to speak for a caller, meaning the machine that opens the socket to us: named presets (`loopback`, `linklocal`, `uniquelocal`) or CIDRs. `true` is never used: it would let any direct caller forge the client IP. On Railway the peer is private, so `100.64.0.0/10`. Verify after deploy with `GET /api/echo-ip` |
+| TRUST_PROXY_EDGE_HOPS | world | How many hops past that peer are still the platform's own edge, default 0, `1` on Railway. The edge appends the true client to `X-Forwarded-For` and sits one hop beyond the private peer, so with 0 every request resolves to the edge and the per-IP caps count the whole internet as one household. Anything past the edge is the client and is never trusted, so junk a caller prepends to the header is ignored |
 | PUBLIC_WS_URL | world | The `wss://<world domain>/ws` address handed to the browser with its ticket. Blank means same origin. Needed whenever the web app fronts the API with a rewrite, since rewrites do not carry WebSocket upgrades |
 | VETTAI_PROCESS | both | Entry script; `src/treasury/index.ts` makes the image run the treasury, unset runs the world |
 | REWARD_HUNT, REWARD_COURIER, REWARD_LANDMARKS, REWARD_LANDMARKS_REPEAT, REWARD_LANDLORD | both | Quest rewards in NIM; defaults in the "Quests" table below |
@@ -110,7 +118,10 @@ Tick: 50 ms. Units: metres, seconds, radians.
   within 25 m, or when a player shoots it from anywhere inside 60 m: circle the player at
   12 m radius and fire a bolt every 2 s. A drone that has been shot holds that target for
   6 s and answers within its 2 s fire interval. Max 12 alive per room, one respawn every
-  15 s, loops handed out in turn so the centre of the city is always patrolled.
+  15 s, loops handed out in turn so the centre of the city is always patrolled. A room opens
+  with two, on the centre loop, and fills up on the same 15 s clock: a full dozen at birth
+  would let a player leave and rejoin for a fresh batch whenever the sky went quiet. No
+  patrol waypoint comes within 14 m of the board, so no loop flies into the safe zone.
 - Bolt: `{ id, x, y, z, vx, vy, vz, ownerDrone, bornAt }`. Speed 18 m/s, straight line
   toward where the target will be after the bolt's flight time (current velocity, one
   step of lead), dies after 3 s or on impact. Impact is a
@@ -118,8 +129,10 @@ Tick: 50 ms. Units: metres, seconds, radians.
   one shield. Shield regenerates one bar every 8 s without a hit.
 - Safe zone: a 10 m circle around `office`. Drones do not engage, target or fire at a
   player inside it, an engaged drone drops a target who walks in, and a bolt that crosses
-  the edge dies. Firing out of the circle is allowed and provokes nothing, so it is a place
-  to read the board from, not a place to camp from.
+  the edge dies. The circle cuts both ways: a shot fired from inside it is refused, because
+  anybody allowed to shoot out would be taking drones apart from the one place in the city
+  that cannot answer. It is a place to read the board from and come back at, never a place
+  to fight from.
 - Downed at shield 0: 3 s, then respawn at the office with full shield, inside the safe
   zone. Quest progress is kept.
 - Fire intent `{ yaw, pitch }`: at most 4 per second (mk1) or 6 (mk2). Hitscan from the
@@ -145,11 +158,19 @@ Tick: 50 ms. Units: metres, seconds, radians.
     send 15 a second, so timer jitter never reaches the budget.
   - `{ t: 'fire', seq, yaw, pitch }`.
   - `{ t: 'interact', target: 'office' | 'shop' | 'pickup' | 'deliver' | 'landmark:<n>' }`
-    requires the player within 2.5 m of that place.
+    requires the player within 2.5 m of that place. One target is taken at most twice a
+    second per connection, and the room drops an interact its copy of that player's quests
+    says cannot change anything (quest not open, wrong courier point, landmark already
+    counted) rather than turning it into a row lock in the database.
   - `{ t: 'ping', ts }`.
+- Every player is named on the wire by a `handle`: eight hex characters drawn fresh for
+  each connection to a room. Wallet addresses never ride out to the room. The only address
+  on the socket is the caller's own, in the welcome.
 - Server to client:
-  - `{ t: 'welcome', you, youSeq, room, tick, mapVersion, players, drones, quests }` on
-    join. `youSeq` is 0, the move number the server has applied for this connection, so a
+  - `{ t: 'welcome', you: { handle, address }, youSeq, room, tick, mapVersion, players,
+    drones, quests }` on join. `you.handle` is what this client is called in `players` and
+    in every event; `you.address` is the caller's own wallet and appears nowhere else.
+    `youSeq` is 0, the move number the server has applied for this connection, so a
     reconnecting client resets its counter without searching the players list.
   - `{ t: 'state', tick, players: [changed only], drones: [all live], bolts: [all] }`
     every tick, players only when moved, a full players list every 40 ticks. Each player
@@ -157,18 +178,25 @@ Tick: 50 ms. Units: metres, seconds, radians.
     that player (0 before any), so the client can rewind to the server's position and
     replay only the inputs the server has not seen yet.
   - sim events (`hit`, `kill`, `downed`, `respawn`, `spawn`, `pickup`, `deliver`,
-    `landmark`) ride on the `state` frame as `events: [{ kind, ... }]`.
+    `landmark`) ride on the `state` frame as `events: [{ kind, ... }]`, with `player` as a
+    handle.
   - `{ t: 'event', kind, ... }` only for the per-player and roster kinds: `quest`
     (progress or done, sent to that player only), `gear` (a shop order was paid, that
-    player only), `join`, `leave`.
+    player only), `join`, `leave`. `join` and `leave` name a handle.
   - `{ t: 'pong', ts, serverTs }`, `{ t: 'error', code }`.
 - Per-connection rate limits by message type, counted server side, never trusted from
   the client. A connection sending malformed JSON three times is closed.
 - Every connection carries an id. A late `close` from a replaced socket only removes the
   connection with its own id, never the one that replaced it.
+- A player who drops keeps what they had for 90 s: still down if they were down, the same
+  spent shield, the same spent fire budget. Dropping the socket is not a way to heal.
+- The server pings every socket every 15 s and terminates one that has missed two pings. A
+  socket whose send buffer passes 64 KB is closed with 1013, and a connection that has sent
+  no move, shot or interact for ten minutes is closed with 1000 `idle`.
 - Tick events are recorded in order: one promise chain in the world process, one
-  transaction per batch, and a batch is dropped with a log line when the chain is more
-  than 20 deep.
+  transaction per batch. When the chain is more than 20 deep the interacts of a tick are
+  dropped with a log line, and its kills are held and ride out with the next batch that
+  fits: a kill is the one event a player earned by playing.
 - The state frame is serialised once per room per tick and the tick's events ride on
   it as an `events` array, not as separate frames.
 
@@ -196,6 +224,10 @@ the top three from LADDER_PRIZES_NIM (default `2,1,0.5`) once per period.
 2. Client signs it. `POST /api/quests/:id/claim` with `{ publicKey, signature }`.
 3. Server verifies the signature, derives the address, checks it equals the session's,
    consumes the nonce, then inside one transaction: quest to `claimed`, insert the claim
+   (a refusal at any of those three steps, or on a quest that is not done, is a 403 with
+   `{ error, code }` where code is `bad_signature`, `other_wallet`, `nonce` or
+   `not_claimable`; 401 means the session itself is missing or no longer good, and nothing
+   else, so a phone never signs its player out over a stale message)
    as `queued` with memo `vettai:<questId first 8>` (under 64 bytes), unless a cap fails:
    - daily cap: paid plus queued plus sent for this wallet today, plus this amount,
      over DAILY_CAP_NIM: claim inserted as `held` with `error: 'daily cap'`.
@@ -204,8 +236,9 @@ the top three from LADDER_PRIZES_NIM (default `2,1,0.5`) once per period.
    - pool: total queued, sent and paid ever, plus this amount, over POOL_TOTAL_NIM:
      `held`, `error: 'pool'`.
    A hold is a delay, never a forfeiture: `held_until` is the next UTC midnight for the
-   daily and IP caps, null for the pool. The treasury re-runs the cap check on held
-   claims every minute (`releaseHeld`) and flips the ones that now pass to `queued`,
+   daily and IP caps, and null for the pool on the first hold and on every later one, so a
+   pool hold is measured again on the very next pass. The treasury re-runs the cap check on
+   held claims every minute (`releaseHeld`) and flips the ones that now pass to `queued`,
    which is also how a ladder prize held on Monday is paid later. The player sees
    "held until tomorrow" or "pool exhausted".
    The three cap checks run under two advisory transaction locks, the wallet's then a
@@ -217,38 +250,52 @@ the top three from LADDER_PRIZES_NIM (default `2,1,0.5`) once per period.
 
 ## Treasury (`src/treasury/*`)
 
-- `outbox.ts`: every 2 s, take up to 5 `queued` claims oldest first, mark each `sending`
-  (save first), then send one at a time with 1.5 s between sends and no wait for
-  inclusion between them. A `sending` row older than 10 minutes without a hash is
-  retried once, then `failed`. Delivery is idempotent by claim id; a process restart
-  never sends a claim twice because the state row is the lock. `attempts` is an
-  integer column, never parsed from the error text.
+- `outbox.ts`: every 2 s, read the wallet balance from the chain, and send nothing while it
+  is below queued plus sending plus the next payout ("wallet below committed", said once a
+  minute). Otherwise take up to 5 `queued` claims oldest first, mark each `sending` (save
+  first), then send one at a time with 1.5 s between sends and no wait for inclusion between
+  them. A failure before the transaction is signed costs no `attempt`: the claim goes back to
+  `queued` with `next_attempt_at` two minutes out, doubling to thirty. Delivery is idempotent
+  by claim id; a process restart never sends a claim twice because the state row is the lock.
+  `attempts` is an integer column, never parsed from the error text.
 - `sender.ts`: builds a basic transaction with the memo, signs with the treasury key
-  (@nimiq/core), stores the hash, pushes over RPC. `settleInFlight` polls
-  `getTransactionByHash` on later passes and marks `paid` with the block number. A
-  lookup error is "still pending", never a resend. A hash the node still does not know
-  after 15 minutes was never accepted: the claim goes back to `queued` with `attempts`
-  incremented and is rebuilt with a fresh validity height; after three attempts it is
-  `failed`.
-- `watcher.ts` (Vango's watcher): scans the treasury address for incoming transactions,
-  matches `vettai:shop:<orderId first 8>` memos against `pending` orders, checks sender
-  equals the order's address and value at or above the price, marks `paid` with the
-  hash and block. Orders expire 30 minutes after creation, judged against the block
-  time of the payment, not the moment the watcher looked. Every inspected transaction
-  is written to `received_payments` with its outcome.
+  (@nimiq/core), stores the hash and the height it was built at, pushes over RPC.
+  `settleInFlight` polls `getTransactionByHash` on later passes, records the block, and only
+  marks `paid` once 60 blocks (one Albatross batch) sit on top of it. A lookup error is
+  "still pending", never a resend. A hash the node does not know is rebuilt only when all
+  four hold: it has held the hash for three hours, the head is past its validity window
+  (7200 blocks) plus a batch, the node's mempool does not hold it, and the treasury's own
+  outgoing history since that height carries no payment with the claim's memo. If that
+  history does carry it, the claim is closed against the transaction that really happened.
+  After three rebuilds it is `failed`, which still counts against the pool because the money
+  is still owed; `npm run treasury:requeue` is how a person queues it again or cancels it.
+- `health.ts`: a listener on TREASURY_PORT with one route, `GET /health`, reporting the
+  network, the address, the balance, what is committed, when each loop last ran, how long the
+  oldest payout has waited, and whether the node is answering.
+- `watcher.ts` (Vango's watcher): scans the treasury address for incoming transactions up to
+  60 blocks behind the head, matches `vettai:shop:<orderId first 8>` memos against orders,
+  checks sender equals the order's address and value at or above the price, marks `paid` with
+  the hash and block, and only then expires the orders nobody paid. Orders expire 30 minutes
+  after creation, judged against the block time of the payment, not the moment the watcher
+  looked, so a payment mined in time is honoured however late it is read. Every inspected
+  transaction is written to `received_payments` with its outcome.
 - `stakes.ts`: once per UTC day (and once at boot) reads the stake of every player with
   an open landlord quest for that day and marks that day's quest done when at or above
   LANDLORD_MIN_NIM. Only the current day's quest can complete.
-- `ladder.ts`: at Monday 00:05 UTC, pays the previous week if `ladder_periods` has no
-  row for it, inside a transaction that inserts the row first.
+- `ladder.ts`: every 10 minutes, pays every closed week since LADDER_FLOOR_WEEK that has no
+  `ladder_periods` row, oldest first, each inside a transaction that inserts the row first.
+  There is no Monday gate, so an outage over a Monday costs nobody their prize.
 - `refuse.ts`: the treasury refuses to start if TREASURY_PRIVATE_KEY does not derive
-  TREASURY_ADDRESS, or if NIMIQ_NETWORK does not match the RPC's reported network.
+  TREASURY_ADDRESS. A node that is down, or on the wrong network, is not a refusal but a
+  wait: it retries from 5 s up to 2 minutes, forever, with the health page up throughout.
 
 ## Shop (`src/domain/shop.ts`)
 
 Items: `blaster-mk2` (faster fire), `sprint` (7 m/s), skins. `POST /api/shop/orders`
 creates a `pending` order with memo `vettai:shop:<id first 8>` and returns
-`{ orderId, to: TREASURY_ADDRESS, luna, memo }`. The client pays with
+`{ orderId, to: TREASURY_ADDRESS, luna, memo }`. A wallet that already has a live order for
+that item gets the same order and the same memo back, held by a partial unique index on
+(address, item) where the state is `pending`, so tapping buy twice can never be paid twice. The client pays with
 `sendBasicTransactionWithData`. `GET /api/shop/orders/:id` reports the state. The world
 sweeps `paid` orders with no `announced_at` every 5 s, applies the gear to the live room
 state, pushes a `gear` event to the player's socket, and only then stamps
@@ -263,6 +310,11 @@ row.
 - `GET /api/ladder/week`: top 10 this week by kills with addresses shortened.
 - `GET /health`: `{ ok, network, rooms, online, dailyCapNim }`; the client reads the cap to
   show what is still payable today.
+- `GET /api/world/constants`: `{ walkSpeed, sprintSpeed, interactRange, patrolY, boltRadius,
+  hitscanRange, aimConeDegrees, officeSafeRadius, maxDrones }`, read off the simulation's own
+  constants. The client asserts its copy against these at boot instead of drifting quietly.
+- `GET /api/echo-ip`: `{ ip, chain, peer }`, for checking TRUST_PROXY and
+  TRUST_PROXY_EDGE_HOPS against a real deployment by eye.
 
 ## Trust rules
 

@@ -5,6 +5,7 @@ import { receivedPayments, watchCursor } from '../db/schema.js'
 import { expireOrders, markPaid, type MarkPaidRefusal } from '../domain/shop.js'
 import { sleep } from '../lib/sleep.js'
 import type { ChainTransaction } from '../nimiq/rpc.js'
+import { FINALITY_BLOCKS } from './sender.js'
 
 /** The memo every shop payment carries. Anything else into the treasury is not an order. */
 export const SHOP_PREFIX = 'vettai:shop:'
@@ -39,6 +40,8 @@ export type WatchSummary = {
   skipped: number
   expired: number
   cursor: number
+  /** Payments seen but left for a later pass, because their block is too young to trust. */
+  young: number
 }
 
 export type WatchOptions = {
@@ -114,14 +117,26 @@ export async function tick(db: Db, rpc: WatcherRpc, options: WatchOptions = {}):
   const summary: WatchSummary = {
     paid: 0,
     skipped: 0,
-    expired: await expireOrders(db, now),
+    expired: 0,
+    young: 0,
     cursor: await cursorFor(db, address, rpc, options.lookbackBlocks ?? LOOKBACK_BLOCKS),
   }
+
+  // Gear is handed over for good, so a payment is only acted on once its block is buried
+  // under a full batch. A shallower block can still be dropped by the chain, and a player
+  // who was given a blaster for a payment that then vanished is a payment we made ourselves.
+  const head = await rpc.getBlockNumber()
+  const settled = head - FINALITY_BLOCKS
 
   const incoming = await rpc.listIncoming(address, summary.cursor)
   let furthest = summary.cursor
 
   for (const tx of incoming) {
+    if (tx.blockNumber > settled) {
+      summary.young += 1
+      continue
+    }
+
     furthest = Math.max(furthest, tx.blockNumber)
 
     if (!tx.memo?.startsWith(SHOP_PREFIX)) {
@@ -162,10 +177,20 @@ export async function tick(db: Db, rpc: WatcherRpc, options: WatchOptions = {}):
     summary.cursor = furthest
   }
 
+  // Expiry runs after the payments, never before. A payment mined inside the half hour and
+  // read a minute late has to be settled against the order it paid for, not against a row
+  // this same pass has just closed.
+  summary.expired = await expireOrders(db, now)
+
   return summary
 }
 
-export type RunWatcherOptions = WatchOptions & { intervalMs?: number; signal?: AbortSignal }
+export type RunWatcherOptions = WatchOptions & {
+  intervalMs?: number
+  signal?: AbortSignal
+  /** Called after every pass, so the treasury health page can show when it last ran. */
+  onPass?: (info: { at: Date; nodeOk: boolean }) => void
+}
 
 /** Watches the treasury address until the process is stopped. One node failure is a log line. */
 export async function runWatcher(db: Db, rpc: WatcherRpc, options: RunWatcherOptions = {}): Promise<void> {
@@ -178,10 +203,12 @@ export async function runWatcher(db: Db, rpc: WatcherRpc, options: RunWatcherOpt
       if (summary.paid + summary.expired > 0) {
         log(`watcher paid ${summary.paid} order(s), expired ${summary.expired}, at block ${summary.cursor}`)
       }
+      options.onPass?.({ at: new Date(), nodeOk: true })
     } catch (error) {
       log(`watcher pass failed: ${error instanceof Error ? error.message : String(error)}`)
+      options.onPass?.({ at: new Date(), nodeOk: false })
     }
 
-    await sleep(intervalMs)
+    await sleep(intervalMs, options.signal)
   }
 }

@@ -32,6 +32,8 @@ function node(rpc: FakeRpc, balance: bigint): SweepRpc {
     fetchTransaction: (hash) => rpc.fetchTransaction(hash),
     pushTransaction: (rawHex) => rpc.pushTransaction(rawHex),
     getAccountByAddress: async () => ({ balance: Number(balance) }),
+    mempoolHas: (hash) => rpc.mempoolHas(hash),
+    listOutgoing: (address, sinceBlock) => rpc.listOutgoing(address, sinceBlock),
   }
 }
 

@@ -221,6 +221,50 @@ describe('the auth routes', () => {
     }
   })
 
+  it('gives two wallets behind one address a budget each', async () => {
+    const app = await testApp(handle.db, { rateLimit: { global: 100, session: 3 } })
+    try {
+      const mine = await signIn(app, wallet)
+      const theirs = await signIn(app, KeyPair.generate())
+
+      const codes: number[] = []
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const response = await app.inject({ method: 'GET', url: '/api/me', headers: mine.auth })
+        codes.push(response.statusCode)
+      }
+
+      // The fourth call on the first session is over its ceiling, and the second session,
+      // which came from the same machine, has not spent anything yet.
+      const other = await app.inject({ method: 'GET', url: '/api/me', headers: theirs.auth })
+
+      expect(codes).toEqual([200, 200, 200, 429])
+      expect(other.statusCode).toBe(200)
+    } finally {
+      await app.close()
+    }
+  })
+
+  it('counts a made-up bearer token against the address it came from', async () => {
+    const app = await testApp(handle.db, { rateLimit: { global: 3, session: 1000 } })
+    try {
+      const codes: number[] = []
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const response = await app.inject({
+          method: 'GET',
+          url: '/api/me',
+          // A different invented token every time. If the limiter believed it, the caller
+          // would have a fresh budget on demand.
+          headers: { authorization: `Bearer vt1.${String(attempt).repeat(64).slice(0, 64)}` },
+        })
+        codes.push(response.statusCode)
+      }
+
+      expect(codes).toEqual([401, 401, 401, 429])
+    } finally {
+      await app.close()
+    }
+  })
+
   it('answers /health without a session', async () => {
     const app = await testApp(handle.db)
     try {
@@ -284,5 +328,70 @@ describe('which address a caller is counted as', () => {
       vi.unstubAllEnvs()
       vi.resetModules()
     }
+  })
+
+  /**
+   * What a platform like Railway actually sends: the container's peer is a private address,
+   * the edge that appends the true client sits one hop further out, and the caller has put
+   * junk of its own at the front of the header.
+   */
+  const railway = {
+    peer: '100.64.0.4',
+    client: '106.205.47.53',
+    edge: '152.233.68.97',
+    headers: { 'x-forwarded-for': '9.9.9.9, 106.205.47.53, 152.233.68.97' },
+  }
+
+  async function echoThrough(
+    env: Record<string, string>,
+    remoteAddress: string,
+  ): Promise<{ ip: string; chain: string | null; peer: string | null }> {
+    for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value)
+    vi.resetModules()
+
+    try {
+      const { buildApp } = await import('../src/app.js')
+      const app = await buildApp({ db: handle.db, logger: false })
+      try {
+        const response = await app.inject({
+          method: 'GET',
+          url: '/api/echo-ip',
+          headers: railway.headers,
+          remoteAddress,
+        })
+        return response.json<{ ip: string; chain: string | null; peer: string | null }>()
+      } finally {
+        await app.close()
+      }
+    } finally {
+      vi.unstubAllEnvs()
+      vi.resetModules()
+    }
+  }
+
+  it('sees past the platform edge to the real client when it is told how many hops it is', async () => {
+    const answer = await echoThrough(
+      { TRUST_PROXY: '100.64.0.0/10', TRUST_PROXY_EDGE_HOPS: '1' },
+      railway.peer,
+    )
+
+    expect(answer.ip).toBe(railway.client)
+    expect(answer.chain).toBe(railway.headers['x-forwarded-for'])
+    expect(answer.peer).toBe(railway.peer)
+  })
+
+  it('stops at the edge when it is not told about the extra hop', async () => {
+    const answer = await echoThrough({ TRUST_PROXY: '100.64.0.0/10' }, railway.peer)
+
+    expect(answer.ip).toBe(railway.edge)
+  })
+
+  it('believes nothing from a peer that is not on the list, however many hops are allowed', async () => {
+    const answer = await echoThrough(
+      { TRUST_PROXY: '100.64.0.0/10', TRUST_PROXY_EDGE_HOPS: '1' },
+      '203.0.113.9',
+    )
+
+    expect(answer.ip).toBe('203.0.113.9')
   })
 })

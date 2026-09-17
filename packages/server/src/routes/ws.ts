@@ -59,6 +59,12 @@ export function registerWorldSocket(
         world.rooms.handle(address, data.toString())
       })
 
+      // The rooms ping every member on the tick and cut off the ones that stop answering,
+      // which is the only way to tell a phone in a tunnel from a socket that is already gone.
+      socket.on('pong', () => {
+        world.rooms.pong(address)
+      })
+
       socket.on('close', () => {
         gone = true
         // Before the join there is nothing to leave, and after a reconnect the id is what
@@ -93,20 +99,25 @@ export function registerWorldSocket(
 
           // Nothing may be awaited between the join and the welcome, or a tick would
           // describe a world to a client that has not been told what it is looking at.
-          const joined = world.rooms.join(address, player.gear, socket)
+          // The quests go in with the join, so the room can judge an interact that arrives
+          // in the same breath as the welcome.
+          const views = quests.map(questView)
+          const joined = world.rooms.join(address, player.gear, socket, views)
           connectionId = joined.connectionId
           socket.send(
             JSON.stringify({
               v: PROTOCOL_VERSION,
               t: 'welcome',
-              you: address,
+              // The handle is what this player is called on the wire. The address is here
+              // because it is the caller's own, and it goes nowhere else in the room.
+              you: { handle: joined.handle, address },
               youSeq: joined.youSeq,
               room: joined.room,
               tick: joined.tick,
               mapVersion: world.map.version,
               players: joined.players,
               drones: joined.drones,
-              quests: quests.map(questView),
+              quests: views,
             }),
           )
         } catch (error) {

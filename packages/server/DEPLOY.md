@@ -13,8 +13,10 @@ Fly.io works the same way with `fly.toml`.
    world. Expose port 8788 and generate a public domain. That domain is what the web app
    and Nimiq Pay talk to. The world refuses to start if `VETTAI_PROCESS` points at the
    treasury, so an extra variable here is a failed deploy, not a silent mistake.
-3. Service `treasury`: variable `VETTAI_PROCESS=src/treasury/index.ts`. No public domain.
-   Deploy it after the world is healthy, so the two do not race the first migration.
+3. Service `treasury`: variable `VETTAI_PROCESS=src/treasury/index.ts`. No public domain,
+   ever: it answers its own health page on `TREASURY_PORT` (8789 by default) inside the
+   private network, and that page is the only thing it serves. Deploy it after the world is
+   healthy, so the two do not race the first migration.
 4. Variables. Both services read the same database and the same money limits, so the
    shared rows go on both. The key column says where each one belongs.
 
@@ -25,6 +27,9 @@ Fly.io works the same way with `fly.toml`.
 | PORT | world | `8788`, and generate the public domain on this port |
 | DATABASE_URL | both | `${{Postgres.DATABASE_URL}}`, the reference to the Railway Postgres service |
 | NIMIQ_RPC_URL | both | `https://rpc.nimiqwatch.com` for mainnet, `https://rpc.testnet.nimiqwatch.com` for testnet |
+| NIMIQ_RPC_FALLBACK_URL | both | Optional. A second node on the same network, tried only when the first one has failed to answer twice in a row |
+| TREASURY_PORT | treasury | Optional, `8789` by default. Where the treasury answers `/health`. Never generate a domain for it |
+| LADDER_FLOOR_WEEK | treasury | Optional, an ISO week like `2026-W38`. The first week the ladder will ever pay. Left off, the treasury starts at the week of the oldest claim |
 | NIMIQ_NETWORK | both | `MainAlbatross` or `TestAlbatross`, matching the URL above |
 | TREASURY_ADDRESS | both | The address that pays players and receives shop payments |
 | TREASURY_PRIVATE_KEY | treasury | 64 hex characters. Never set this on the world service |
@@ -36,11 +41,67 @@ Fly.io works the same way with `fly.toml`.
 | LANDLORD_MIN_NIM | both | `10` |
 | LANDLORD_ENABLED | both | `false` until Ram turns the landlord quest on |
 | IP_SALT | world | A long random string, fresh per deployment. It only ever hashes IPs |
-| TRUST_PROXY | world | Blank until the first deploy answers `GET /api/echo-ip`; then the proxy peer it shows, as a preset (`uniquelocal`, `loopback`) or a CIDR, so the world reads the real client IP from X-Forwarded-For. Never `true` |
+| TRUST_PROXY | world | On Railway, `100.64.0.0/10`: the peer that opens the socket to the container sits in that range. Anywhere else, the peer `GET /api/echo-ip` shows, as a preset (`uniquelocal`, `loopback`) or a CIDR. Never `true` |
+| TRUST_PROXY_EDGE_HOPS | world | On Railway, `1`: the address that appends the real caller sits one hop further out than the peer. `0` anywhere the edge is the peer itself |
 | PUBLIC_WS_URL | world | The `wss://<world domain>/ws` address handed to the browser with its ticket. Blank means same origin. Needed whenever the web app fronts the API with a rewrite, since rewrites do not carry WebSocket upgrades |
 
-5. Migrations run at boot of either process, so the first world deploy creates the schema.
-6. Check: `curl https://<world domain>/health` returns ok.
+5. The world runs exactly one replica. Scaling it to two would split the rooms across
+   processes, so two players in one city would never see each other, and the per-IP cap would
+   count each replica's own view.
+6. Migrations run at boot of either process, so the first world deploy creates the schema.
+7. Check: `curl https://<world domain>/health` returns ok.
+8. Backups, one click and worth doing on the first day: open the Postgres service, the
+   **Backups** tab, and turn on the daily backup. Everything a player earned lives in that
+   database and nowhere else.
+
+## Watching the treasury
+
+The treasury has no domain, so this is how you see it. Both processes carry a Docker
+`HEALTHCHECK` that calls their own `/health`, so the host restarts either one when it stops
+answering. From a shell on the treasury service (`railway ssh`, then inside the container):
+
+```sh
+curl -s http://127.0.0.1:8789/health
+```
+
+| Field | What it tells you |
+|---|---|
+| `ok` | True only when the node is answering and the wallet covers what has been promised |
+| `network` / `address` | Which chain and which wallet this process is paying from |
+| `balanceNim` | What the wallet held when the last pass read it, off the chain |
+| `committedNim` | Queued plus sending: what is owed and has not reached the chain yet |
+| `lastOutboxPassAt` | When a payout pass last finished. More than a minute old means the loop is stuck |
+| `lastWatcherPassAt` | When the shop watcher last finished |
+| `oldestQueuedAgeSeconds` | How long the oldest payout has been waiting. Minutes are normal, hours are not |
+| `nodeOk` | False when the last pass could not reach the Nimiq node at all |
+
+A treasury that cannot reach its node does not exit. It keeps the health page up, says why
+it cannot start yet, and tries again with a growing wait, so the host shows a process that
+is up and unhealthy rather than a crash loop with no explanation.
+
+## Two commands for when a payout goes wrong
+
+A payout only reaches `failed` after the treasury built it three times and the node took
+none of them. It still counts against the pool, because it is still owed. These move it:
+
+```sh
+npm run treasury:requeue -- --claim <claim id>            # put it back in the queue
+npm run treasury:requeue -- --claim <claim id> --cancel    # write it off, freeing the pool
+```
+
+Both print the claim first: the wallet, the amount, the state, the attempts and the last
+error. Only a `failed` claim is moved by hand; anything else is refused.
+
+The money history can be copied off the host at any time:
+
+```sh
+npm run treasury:export -- --out vettai-money.json
+```
+
+It writes `claims`, `shop_orders` and `received_payments` as JSON, and nothing else. Run it
+through `railway ssh` on either service, or locally with `DATABASE_URL` pointing at the same
+database. Railway's own daily backup covers the database; this is the copy that leaves the
+platform.
 
 ## Fly.io
 
@@ -49,9 +110,12 @@ a second process group in `fly.toml`:
 
 ```toml
 [processes]
-  world = "npx tsx src/index.ts"
-  treasury = "npx tsx src/treasury/index.ts"
+  world = "node --import tsx src/start.ts"
+  treasury = "node --import tsx src/start.ts"
 ```
+
+The treasury process group also needs `VETTAI_PROCESS=src/treasury/index.ts`, which is what
+`src/start.ts` reads to decide which of the two it is starting.
 
 Same variables via `fly secrets set`. Only the `world` process needs a public service on
 8788, and `TREASURY_PRIVATE_KEY` goes on the `treasury` process only.
@@ -93,8 +157,8 @@ npm run prove -- --url https://<world domain>
 line per check and writes the whole thing to `docs/proofs/prove-remote-<date>-<time>.txt`,
 with the origin in the header. It exits 1 only when a check fails.
 
-Seven of the twelve checks run remotely and five are skipped, because they need something
-only the host has:
+Seven of the twelve checks always run remotely, an eighth runs when you name the daily cap,
+and the rest are skipped because they need something only the host has:
 
 | Check | Remote |
 |---|---|
@@ -104,15 +168,27 @@ only the host has:
 | 4 a scripted wallet plays until the hunt quest is done | runs, up to 300 seconds |
 | 5 claim queued once, replay and another wallet refused | runs |
 | 6 the deployed treasury pays on chain, read back through the public node | runs, waits up to 240 seconds |
-| 7, 8, 9 daily cap, per-IP cap, pool | skipped: the caps are configured on the host and a local run turns them down to something one pass can cross |
+| 7 the deployment runs the daily cap Ram set | runs with `--expect-daily-cap 5`, otherwise skipped with the number the deployment reports |
+| 8, 9 per-IP cap, pool | skipped: these caps are configured on the host and a local run turns them down to something one pass can cross |
 | 10 the shop | skipped unless `--fund` is passed, because funding a fresh wallet needs the treasury key |
 | 11 socket flood, long move vector, nonsense frames | runs, measured from the frames the server sends |
 | 12 outbox idempotency | skipped: it is proven against the database, which only the host can read |
 
-Check 1 is the one that catches a wrong `TRUST_PROXY`. If `/api/echo-ip` answers with a
-10.x or 100.64.x address, the world is reading its own hosting edge rather than the player,
-the per-IP cap is counting the whole internet as one household, and the check fails with
-that address printed.
+Check 1 is the one that catches a wrong `TRUST_PROXY`, and it does it by comparison rather
+than by guesswork: it asks `https://api.ipify.org` what this machine's own address is and
+holds `/api/echo-ip` to the same answer. A hosting edge is not always a private address, so
+"does it look private" is only printed as a label next to the two addresses. If they differ,
+the world is naming a machine on its own side, the per-IP cap is counting the whole internet
+as one household, and the check fails with both addresses printed.
+
+Check 7 reads `dailyCapNim` off `/health` and holds it to what you pass:
+
+```sh
+npm run prove -- --url https://<world domain> --expect-daily-cap 5
+```
+
+A cap that quietly went up is the same loss as a cap that is not there, and this is the one
+thing about the host's configuration a run from outside can hold it to.
 
 Check 6 needs a real reward to leave the deployed treasury, so run it against a testnet
 deployment, or accept that a mainnet run spends the reward for real.

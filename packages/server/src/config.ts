@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
+import proxyAddr from '@fastify/proxy-addr'
 import { config as loadEnv, parse as parseEnv } from 'dotenv'
 import { z } from 'zod'
 import { nimToLuna } from './lib/luna.js'
@@ -63,7 +64,18 @@ const schema = z.object({
   PORT: blankIsMissing(z.coerce.number().int().min(1).max(65535).default(8788)),
   DATABASE_URL: blankIsMissing(z.string().min(1).optional()),
   NIMIQ_RPC_URL: z.url(),
+  /** A second node, tried only after the first one has failed to answer twice in a row. */
+  NIMIQ_RPC_FALLBACK_URL: blankIsMissing(z.url().optional()),
   NIMIQ_NETWORK: z.enum(['TestAlbatross', 'MainAlbatross']),
+  /** Where the treasury answers GET /health. It is never given a public domain. */
+  TREASURY_PORT: blankIsMissing(z.coerce.number().int().min(1).max(65535).default(8789)),
+  /**
+   * The first week the ladder pays, written 2026-W38. Left out, the treasury starts at the
+   * week of the oldest claim, so a fresh database does not walk back through empty years.
+   */
+  LADDER_FLOOR_WEEK: blankIsMissing(
+    z.string().regex(/^\d{4}-W\d{2}$/, 'must be an ISO week like 2026-W38').optional(),
+  ),
   TREASURY_ADDRESS: z
     .string()
     .transform((value) => value.replace(/\s+/g, '').toUpperCase())
@@ -78,6 +90,12 @@ const schema = z.object({
   MAP_SEED: blankIsMissing(z.string().min(1).default('vettai-1')),
   IP_SALT: blankIsMissing(z.string().min(1).optional()),
   TRUST_PROXY: blankIsMissing(z.string().min(1).optional()),
+  /**
+   * How many hops past a trusted peer are still the platform's own edge. Railway hands the
+   * container a private peer and the address that appends the real client sits one hop
+   * further out, so 1 there and 0 anywhere the edge is the peer itself.
+   */
+  TRUST_PROXY_EDGE_HOPS: blankIsMissing(z.coerce.number().int().min(0).max(8).default(0)),
   PUBLIC_WS_URL: blankIsMissing(z.string().url().optional()),
   VETTAI_PROCESS: blankIsMissing(z.string().min(1).optional()),
   REWARD_HUNT: blankIsMissing(nimAmount().optional()),
@@ -147,6 +165,55 @@ export function trustedProxies(value: string | undefined = config.TRUST_PROXY): 
     .filter((hop) => hop.length > 0)
 
   return hops.length > 0 ? hops : false
+}
+
+/**
+ * Who Fastify believes about where a caller came from, as the predicate proxy-addr walks:
+ * hop 0 is the machine that opened the socket, hop 1 is the rightmost name in
+ * X-Forwarded-For, and so on leftwards. The walk stops at the first hop that answers false,
+ * and the address after it is the client.
+ *
+ * Hop 0 has to be in TRUST_PROXY, matched by the same library Fastify would have used for
+ * the plain list, so the peer check and the list are one parser rather than two. Hops 1 to
+ * TRUST_PROXY_EDGE_HOPS are the platform's own edge, which is not reachable directly and
+ * cannot be named by a caller. Everything past that is the client and is never trusted.
+ *
+ * This is what a platform like Railway needs: the container's peer is a private address and
+ * the edge that appends the true client sits one hop out, so without the extra hop every
+ * request resolves to the edge and the per-IP caps count the whole world as one household.
+ * Junk a caller prepends to X-Forwarded-For lands further left than the edge, past where the
+ * walk stops, so it is ignored.
+ */
+export function trustProxy(
+  value: string | undefined = config.TRUST_PROXY,
+  edgeHops: number = config.TRUST_PROXY_EDGE_HOPS,
+): ((address: string, hop: number) => boolean) | false {
+  const hops = trustedProxies(value)
+  if (hops === false) return false
+
+  const isKnownPeer = proxyAddr.compile(hops)
+  return (address: string, hop: number): boolean =>
+    hop === 0 ? isKnownPeer(address, hop) : hop <= edgeHops
+}
+
+/**
+ * The loud line at boot when the world is on mainnet with nobody named in TRUST_PROXY, or
+ * null when the setting makes sense. Every caller then looks like the edge, so the per-IP
+ * wallet cap and the rate limiter count the whole internet as one household.
+ */
+export function proxyWarning(
+  cfg: Pick<Config, 'NIMIQ_NETWORK' | 'TRUST_PROXY'> = config,
+): string | null {
+  if (cfg.NIMIQ_NETWORK !== 'MainAlbatross') return null
+  if (trustedProxies(cfg.TRUST_PROXY) !== false) return null
+
+  return (
+    'TRUST_PROXY is blank on mainnet. Every request will be counted as coming from the ' +
+    'edge, so IP_WALLETS_PER_DAY and the rate limiter will treat every player in the world ' +
+    'as one household. Set TRUST_PROXY to the peer the platform connects from, set ' +
+    'TRUST_PROXY_EDGE_HOPS to the number of its own hops beyond that, and check the answer ' +
+    'with GET /api/echo-ip.'
+  )
 }
 
 /**

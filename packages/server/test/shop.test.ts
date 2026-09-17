@@ -63,6 +63,63 @@ describe('the shop', () => {
     expect(row?.state).toBe('expired')
   })
 
+  it('gives a wallet the order it already has when it asks for the same item twice', async () => {
+    const first = await createOrder(db, { address: player, item: 'sprint', now: NOW })
+    const again = await createOrder(db, { address: player, item: 'sprint', now: new Date(NOW.getTime() + 5000) })
+
+    expect(again.id).toBe(first.id)
+    expect(again.memo).toBe(first.memo)
+    expect(await db.select().from(shopOrders)).toHaveLength(1)
+
+    const other = await createOrder(db, { address: player, item: 'skin-neon', now: NOW })
+    expect(other.memo).not.toBe(first.memo)
+
+    // Once the first one has run out, the next ask is a fresh order rather than a dead memo.
+    const fresh = await createOrder(db, { address: player, item: 'sprint', now: LATER })
+    expect(fresh.id).not.toBe(first.id)
+    expect((await getOrder(db, first.id, LATER))?.order.state).toBe('expired')
+  })
+
+  it('lets the database refuse a second live order for one item', async () => {
+    const order = await createOrder(db, { address: player, item: 'sprint', now: NOW })
+
+    await expect(
+      db.insert(shopOrders).values({
+        address: player,
+        item: 'sprint',
+        priceLuna: items.sprint.priceLuna,
+        memo: 'vettai:shop:deadbeef',
+        createdAt: NOW,
+      }),
+    ).rejects.toThrow()
+
+    const rows = await db.select().from(shopOrders)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.memo).toBe(order.memo)
+  })
+
+  it('pays an order the expiry sweep had already closed, when the money was mined in time', async () => {
+    const order = await createOrder(db, { address: player, item: 'blaster-mk2', now: NOW })
+
+    expect(await expireOrders(db, LATER)).toBe(1)
+
+    const paid = await markPaid(db, {
+      memo: order.memo,
+      txHash: randomHash(),
+      sender: player,
+      valueLuna: order.priceLuna,
+      blockNumber: 11_500_003,
+      blockTime: new Date(NOW.getTime() + 10 * 60 * 1000),
+      now: new Date(LATER.getTime() + 60 * 60 * 1000),
+    })
+
+    expect(paid).toMatchObject({ ok: true, item: 'blaster-mk2' })
+    expect(await gearOf(player)).toMatchObject({ blaster: 'mk2' })
+
+    const [row] = await db.select().from(shopOrders).where(eq(shopOrders.id, order.id))
+    expect(row?.state).toBe('paid')
+  })
+
   it('refuses a payment from a wallet that did not open the order', async () => {
     const order = await createOrder(db, { address: player, item: 'blaster-mk2', now: NOW })
 

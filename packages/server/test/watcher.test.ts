@@ -9,6 +9,7 @@ import { eq } from 'drizzle-orm'
 import type { Db, DbHandle } from '../src/db/client.js'
 import { players, receivedPayments, shopOrders, watchCursor } from '../src/db/schema.js'
 import { createOrder, ORDER_TTL_MS } from '../src/domain/shop.js'
+import { FINALITY_BLOCKS } from '../src/treasury/sender.js'
 import { LOOKBACK_BLOCKS, tick } from '../src/treasury/watcher.js'
 import { nimToLuna } from '../src/lib/luna.js'
 import { clearTables, freshDb, insertPlayer, randomAddress, randomHash } from './support/db.js'
@@ -39,6 +40,14 @@ beforeEach(async () => {
   player = (await insertPlayer(db)).address
 })
 
+/**
+ * A block the watcher will act on: old enough that a full batch sits on top of it, and still
+ * newer than the cursor the first pass writes a hundred blocks back.
+ */
+function settled(offset = 0): number {
+  return rpc.head - FINALITY_BLOCKS - 5 + offset
+}
+
 function options(now: Date = NOW) {
   return { address: TREASURY, now, log: (line: string) => lines.push(line) }
 }
@@ -67,7 +76,7 @@ describe('the treasury watcher', () => {
 
     rpc.receive({
       hash: randomHash(),
-      blockNumber: rpc.head + 3,
+      blockNumber: settled(3),
       sender: randomAddress(),
       recipient: TREASURY,
       valueLuna: nimToLuna('1'),
@@ -77,7 +86,7 @@ describe('the treasury watcher', () => {
     const second = await tick(db, rpc, options())
 
     expect(second).toMatchObject({ paid: 0, skipped: 1 })
-    expect(second.cursor).toBe(rpc.head + 3)
+    expect(second.cursor).toBe(settled(3))
     expect(lines.at(-1)).toMatch(/not a shop payment/)
   })
 
@@ -87,7 +96,7 @@ describe('the treasury watcher', () => {
 
     rpc.receive({
       hash,
-      blockNumber: rpc.head + 1,
+      blockNumber: settled(1),
       sender: player,
       recipient: TREASURY,
       valueLuna: order.priceLuna,
@@ -110,7 +119,7 @@ describe('the treasury watcher', () => {
 
     rpc.receive({
       hash: randomHash(),
-      blockNumber: rpc.head + 1,
+      blockNumber: settled(1),
       sender: randomAddress(),
       recipient: TREASURY,
       valueLuna: order.priceLuna,
@@ -130,7 +139,7 @@ describe('the treasury watcher', () => {
 
     rpc.receive({
       hash,
-      blockNumber: rpc.head + 1,
+      blockNumber: settled(1),
       sender: player,
       recipient: TREASURY,
       valueLuna: order.priceLuna,
@@ -139,7 +148,7 @@ describe('the treasury watcher', () => {
 
     expect((await tick(db, rpc, options())).paid).toBe(1)
 
-    await db.update(watchCursor).set({ lastBlockNumber: rpc.head }).where(eq(watchCursor.address, TREASURY))
+    await db.update(watchCursor).set({ lastBlockNumber: settled() }).where(eq(watchCursor.address, TREASURY))
 
     const replay = await tick(db, rpc, options())
 
@@ -156,7 +165,7 @@ describe('the treasury watcher', () => {
     const paidHash = randomHash()
     rpc.receive({
       hash: paidHash,
-      blockNumber: rpc.head + 1,
+      blockNumber: settled(1),
       blockTime: NOW,
       sender: player,
       recipient: TREASURY,
@@ -167,7 +176,7 @@ describe('the treasury watcher', () => {
     const strayHash = randomHash()
     rpc.receive({
       hash: strayHash,
-      blockNumber: rpc.head + 2,
+      blockNumber: settled(2),
       sender: randomAddress(),
       recipient: TREASURY,
       valueLuna: nimToLuna('2'),
@@ -180,7 +189,7 @@ describe('the treasury watcher', () => {
     expect(paid?.outcome).toBe('paid')
     expect(paid?.orderId).toBe(order.id)
     expect(paid?.valueLuna).toBe(order.priceLuna)
-    expect(paid?.blockNumber).toBe(rpc.head + 1)
+    expect(paid?.blockNumber).toBe(settled(1))
     expect(paid?.blockTime?.toISOString()).toBe(NOW.toISOString())
 
     const stray = await paymentRow(strayHash)
@@ -189,7 +198,7 @@ describe('the treasury watcher', () => {
     expect(stray?.valueLuna).toBe(nimToLuna('2'))
 
     const [row] = await db.select().from(shopOrders).where(eq(shopOrders.id, order.id))
-    expect(row?.blockNumber).toBe(rpc.head + 1)
+    expect(row?.blockNumber).toBe(settled(1))
   })
 
   it('keeps the reason a payment was refused, for every kind of refusal', async () => {
@@ -199,7 +208,7 @@ describe('the treasury watcher', () => {
     const mismatchHash = randomHash()
     rpc.receive({
       hash: mismatchHash,
-      blockNumber: rpc.head + 1,
+      blockNumber: settled(1),
       sender: randomAddress(),
       recipient: TREASURY,
       valueLuna: wrongWallet.priceLuna,
@@ -209,7 +218,7 @@ describe('the treasury watcher', () => {
     const shortHash = randomHash()
     rpc.receive({
       hash: shortHash,
-      blockNumber: rpc.head + 2,
+      blockNumber: settled(2),
       sender: player,
       recipient: TREASURY,
       valueLuna: shortPay.priceLuna - 1n,
@@ -231,7 +240,7 @@ describe('the treasury watcher', () => {
 
     rpc.receive({
       hash,
-      blockNumber: rpc.head + 1,
+      blockNumber: settled(1),
       sender: player,
       recipient: TREASURY,
       valueLuna: order.priceLuna,
@@ -239,7 +248,7 @@ describe('the treasury watcher', () => {
     })
 
     await tick(db, rpc, options())
-    await db.update(watchCursor).set({ lastBlockNumber: rpc.head }).where(eq(watchCursor.address, TREASURY))
+    await db.update(watchCursor).set({ lastBlockNumber: settled() }).where(eq(watchCursor.address, TREASURY))
     await tick(db, rpc, options())
 
     const rows = await db.select().from(receivedPayments).where(eq(receivedPayments.txHash, hash))
@@ -256,5 +265,57 @@ describe('the treasury watcher', () => {
 
     const [row] = await db.select().from(shopOrders)
     expect(row?.state).toBe('expired')
+  })
+
+  it('leaves a payment in the last blocks alone and takes it on a later pass', async () => {
+    const order = await createOrder(db, { address: player, item: 'blaster-mk2', now: NOW })
+    const hash = randomHash()
+
+    rpc.receive({
+      hash,
+      blockNumber: rpc.head - 10,
+      sender: player,
+      recipient: TREASURY,
+      valueLuna: order.priceLuna,
+      memo: order.memo,
+    })
+
+    const early = await tick(db, rpc, options())
+
+    expect(early).toMatchObject({ paid: 0, skipped: 0, young: 1 })
+    expect(await paymentRow(hash)).toBeUndefined()
+    expect(await gearOf(player)).not.toMatchObject({ blaster: 'mk2' })
+
+    rpc.mine(FINALITY_BLOCKS)
+    const later = await tick(db, rpc, options())
+
+    expect(later).toMatchObject({ paid: 1, young: 0 })
+    expect(await gearOf(player)).toMatchObject({ blaster: 'mk2' })
+  })
+
+  it('pays an order whose payment was mined in time but read long after it ran out', async () => {
+    const order = await createOrder(db, { address: player, item: 'sprint', now: NOW })
+    const hash = randomHash()
+
+    // The payment reached the chain nine minutes in. The treasury only gets to read it an
+    // hour later, by which point the order would have been closed by the clock.
+    rpc.receive({
+      hash,
+      blockNumber: settled(1),
+      blockTime: new Date(NOW.getTime() + 9 * 60 * 1000),
+      sender: player,
+      recipient: TREASURY,
+      valueLuna: order.priceLuna,
+      memo: order.memo,
+    })
+
+    const summary = await tick(db, rpc, options(new Date(NOW.getTime() + ORDER_TTL_MS + 30 * 60 * 1000)))
+
+    expect(summary.paid).toBe(1)
+    expect(await gearOf(player)).toMatchObject({ sprint: true })
+
+    const [row] = await db.select().from(shopOrders).where(eq(shopOrders.id, order.id))
+    expect(row?.state).toBe('paid')
+    expect((await paymentRow(hash))?.outcome).toBe('paid')
   })
 })

@@ -1,14 +1,25 @@
+import { randomBytes } from 'node:crypto'
 import { z } from 'zod'
 import type { Db } from '../db/client.js'
 import {
   applyWorldEvents,
   questView,
   type PlayerQuestEvent,
+  type QuestKind,
   type QuestView,
 } from '../domain/quests.js'
 import { bumpDaily } from '../domain/stats.js'
 import { utcDay } from '../lib/day.js'
-import { addPlayer, applyFire, applyMove, createRoom, removePlayer, step } from './sim.js'
+import {
+  addPlayer,
+  applyFire,
+  applyMove,
+  createRoom,
+  DRONE_SPAWN_MS,
+  removePlayer,
+  step,
+  type PlayerCarry,
+} from './sim.js'
 import type {
   BoltState,
   DroneState,
@@ -46,6 +57,32 @@ export const MALFORMED_LIMIT = 3
 
 /** How close a player stands to a place before the server accepts an interact there. */
 export const INTERACT_RANGE = 2.5
+
+/**
+ * How long one target stays shut after an interact the server took. A place is worth
+ * touching twice a second at most, and the database write behind it is worth far less.
+ */
+export const INTERACT_COOLDOWN_MS = 500
+
+/**
+ * What a player who drops keeps for this long: being down, a spent shield, a spent fire
+ * budget. Without it, leaving and coming back is a free heal and a way to stand up early.
+ */
+export const CARRY_MS = 90_000
+
+/** How often a socket is pinged, and how many unanswered pings end it. */
+export const PING_EVERY_MS = 15_000
+export const MISSED_PONGS_ALLOWED = 2
+
+/**
+ * A client this far behind on its own socket is not reading. The tick is a few hundred
+ * bytes, so 64 KB is a couple of hundred frames of backlog: a phone in a tunnel, not a
+ * phone on a slow link.
+ */
+export const MAX_BUFFERED_BYTES = 64 * 1024
+
+/** Ten minutes without a move, a shot or an interact and the seat goes back to the room. */
+export const IDLE_CONNECTION_MS = 600_000
 
 /**
  * Messages per second per connection. The fire budget sits above the simulation's own
@@ -102,13 +139,21 @@ const clientMessage = z.discriminatedUnion('t', [
   pingMessage,
 ])
 
-/** Only the two calls the rooms makes, so a test can hand in a plain object. */
+/**
+ * The little of a WebSocket the rooms use, so a test can hand in a plain object. `ping`,
+ * `terminate` and `bufferedAmount` are what the ws library gives us; they are optional
+ * because a test socket that leaves them out simply never gets pinged or cut off.
+ */
 export type RoomSocket = {
   send: (data: string) => void
   close: (code?: number, reason?: string) => void
+  ping?: () => void
+  terminate?: () => void
+  bufferedAmount?: number
 }
 
 export type PlayerWire = {
+  /** The player's handle in this room, never their wallet address. */
   id: string
   x: number
   z: number
@@ -154,6 +199,11 @@ export type JoinResult = {
   players: PlayerWire[]
   drones: DroneWire[]
   /**
+   * This connection's name on the wire. Everything the room says about this player uses it,
+   * so a wallet address never rides out to the other two dozen people in the room.
+   */
+  handle: string
+  /**
    * This connection's own number. A socket hands it back when it closes, so a close that
    * arrives late, after the same wallet has already reconnected, removes nothing.
    */
@@ -186,7 +236,12 @@ export type RoomHandle = {
 }
 
 export type Rooms = {
-  join: (address: string, gear: PlayerGear, socket: RoomSocket) => JoinResult
+  join: (
+    address: string,
+    gear: PlayerGear,
+    socket: RoomSocket,
+    quests?: readonly QuestView[],
+  ) => JoinResult
   /** Without an id this removes whoever is connected. With one it removes only that connection. */
   leave: (address: string, connectionId?: number) => void
   handle: (address: string, message: string) => void
@@ -194,6 +249,10 @@ export type Rooms = {
   stop: () => void
   snapshot: () => { rooms: number; online: number }
   send: (address: string, event: Record<string, unknown>) => boolean
+  /** Today's quests as this player's socket should now see them, merged by kind. */
+  noteQuests: (address: string, quests: readonly QuestView[]) => void
+  /** The socket answered a ping. */
+  pong: (address: string) => void
   setGear: (address: string, gear: PlayerGear) => void
   /** Messages this connection has had refused for coming in too fast. */
   dropped: (address: string) => number | null
@@ -204,6 +263,8 @@ type Room = {
   id: string
   state: RoomState
   members: Set<string>
+  /** The name each member goes by on the wire, by wallet. */
+  handles: Map<string, string>
   lastTickAt: number
   emptyAt: number | null
   ticksSinceFull: number
@@ -215,6 +276,7 @@ type Room = {
 type Connection = {
   id: number
   address: string
+  handle: string
   socket: RoomSocket
   roomId: string
   counters: Map<MessageKind, { from: number; count: number }>
@@ -222,6 +284,14 @@ type Connection = {
   dropped: number
   /** The highest move number applied on this connection. A new socket starts again at 0. */
   lastSeq: number
+  /** Today's quests as this socket last saw them, so a useless interact never reaches the db. */
+  quests: Map<QuestKind, QuestView>
+  /** When the last interact the server took on each target was taken. */
+  interacts: Map<string, number>
+  /** The last move, shot or interact. A ping is not a sign of life. */
+  lastIntentAt: number
+  nextPingAt: number
+  missedPongs: number
 }
 
 /** Two decimals is a centimetre, which is finer than anything a player can see. */
@@ -229,9 +299,9 @@ function round(value: number): number {
   return Math.round(value * 100) / 100
 }
 
-function playerWire(player: PlayerState, seq: number): PlayerWire {
+function playerWire(player: PlayerState, seq: number, handle: string): PlayerWire {
   return {
-    id: player.id,
+    id: handle,
     x: round(player.x),
     z: round(player.z),
     yaw: round(player.yaw),
@@ -275,6 +345,23 @@ function courierPointAt(map: WorldMap, player: PlayerState): number | null {
   return null
 }
 
+/**
+ * True when this pickup or delivery could still move the courier quest along, read off the
+ * quests this socket was last told about. A parcel taken at the wrong point, a drop with
+ * nothing in hand or a finished quest cannot change a row, so it never becomes a write.
+ */
+function courierWants(quest: QuestView | undefined, kind: 'pickup' | 'deliver', point: number): boolean {
+  if (!quest || quest.state !== 'open' || !quest.route) return false
+  if (kind === 'pickup') return quest.route.from === point
+  return quest.route.to === point && quest.carrying === true
+}
+
+/** True when this landmark is one the player's open landmarks quest has not counted yet. */
+function landmarkWants(quest: QuestView | undefined, index: number): boolean {
+  if (!quest || quest.state !== 'open' || !quest.visited) return false
+  return quest.visited[index] === false
+}
+
 export function createRooms(options: RoomsOptions): Rooms {
   const { map, seed } = options
   const capacity = options.capacity ?? ROOM_CAPACITY
@@ -284,6 +371,7 @@ export function createRooms(options: RoomsOptions): Rooms {
 
   const rooms = new Map<string, Room>()
   const connections = new Map<string, Connection>()
+  const carries = new Map<string, { at: number; carry: PlayerCarry }>()
   let nextRoom = 0
   let nextConnection = 0
   let timer: ReturnType<typeof setInterval> | null = null
@@ -292,7 +380,28 @@ export function createRooms(options: RoomsOptions): Rooms {
     return JSON.stringify({ v: PROTOCOL_VERSION, ...payload })
   }
 
+  /** Takes a connection out of the world and shuts its socket with a reason. */
+  function evict(connection: Connection, code: number, reason: string): void {
+    leave(connection.address, connection.id)
+    try {
+      connection.socket.close(code, reason)
+    } catch {
+      log('an evicted socket would not close', { address: connection.address, reason })
+    }
+  }
+
   function deliverText(connection: Connection, text: string): void {
+    // A socket whose buffer has run away is not reading. Writing more only grows the
+    // server's own memory, so the connection goes and the client is told to come back.
+    if ((connection.socket.bufferedAmount ?? 0) > MAX_BUFFERED_BYTES) {
+      log('closing a socket that cannot keep up', {
+        address: connection.address,
+        buffered: connection.socket.bufferedAmount,
+      })
+      evict(connection, 1013, 'too slow')
+      return
+    }
+
     try {
       connection.socket.send(text)
     } catch (error) {
@@ -316,10 +425,14 @@ export function createRooms(options: RoomsOptions): Rooms {
     nextRoom += 1
     const id = `r${nextRoom}`
     const now = clock()
+    const state = createRoom(map, `${seed}:${id}`)
     const room: Room = {
       id,
-      state: createRoom(map, `${seed}:${id}`),
+      // The spawn clock starts when the room opens, so the third drone is a spawn interval
+      // away rather than one tick away.
+      state: { ...state, nextDroneSpawnAt: now + DRONE_SPAWN_MS },
       members: new Set(),
+      handles: new Map(),
       lastTickAt: now,
       emptyAt: now,
       ticksSinceFull: 0,
@@ -346,8 +459,32 @@ export function createRooms(options: RoomsOptions): Rooms {
     return connections.get(address)?.lastSeq ?? 0
   }
 
+  /**
+   * A name for this player inside this room, drawn fresh for every connection. Four random
+   * bytes in a room of two dozen will not collide, and the retry means a draw that somehow
+   * did is thrown away rather than shared.
+   */
+  function drawHandle(room: Room): string {
+    const taken = new Set(room.handles.values())
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const handle = randomBytes(4).toString('hex')
+      if (!taken.has(handle)) return handle
+    }
+    throw new Error('could not draw a free handle for this room')
+  }
+
+  /** The wire name of a player in this room, or null for somebody who has already left. */
+  function handleOf(room: Room, address: string): string | null {
+    return room.handles.get(address) ?? null
+  }
+
   function livePlayers(room: Room): PlayerWire[] {
-    return [...room.state.players.values()].map((player) => playerWire(player, seqOf(player.id)))
+    const wires: PlayerWire[] = []
+    for (const player of room.state.players.values()) {
+      const handle = handleOf(room, player.id)
+      if (handle) wires.push(playerWire(player, seqOf(player.id), handle))
+    }
+    return wires
   }
 
   function liveDrones(room: Room): DroneWire[] {
@@ -356,7 +493,21 @@ export function createRooms(options: RoomsOptions): Rooms {
       .map(droneWire)
   }
 
-  function join(address: string, gear: PlayerGear, socket: RoomSocket): JoinResult {
+  /** What this wallet left behind a moment ago, or nothing once the carry window has passed. */
+  function carryFor(address: string, now: number): PlayerCarry | undefined {
+    const kept = carries.get(address)
+    if (!kept) return undefined
+
+    carries.delete(address)
+    return now - kept.at <= CARRY_MS ? kept.carry : undefined
+  }
+
+  function join(
+    address: string,
+    gear: PlayerGear,
+    socket: RoomSocket,
+    quests: readonly QuestView[] = [],
+  ): JoinResult {
     const previous = connections.get(address)
     if (previous) {
       // One wallet, one body in the world. A reconnect from a phone that dropped its
@@ -369,28 +520,38 @@ export function createRooms(options: RoomsOptions): Rooms {
       }
     }
 
+    const now = clock()
     const room = roomForJoin()
-    room.state = addPlayer(room.state, address, gear, map.spawn)
+    room.state = addPlayer(room.state, address, gear, map.spawn, carryFor(address, now))
     room.members.add(address)
     room.emptyAt = null
+
+    const handle = drawHandle(room)
+    room.handles.set(address, handle)
 
     nextConnection += 1
     const connectionId = nextConnection
     connections.set(address, {
       id: connectionId,
       address,
+      handle,
       socket,
       roomId: room.id,
       counters: new Map(),
       malformed: 0,
       dropped: 0,
       lastSeq: 0,
+      quests: new Map(quests.map((quest) => [quest.kind, quest])),
+      interacts: new Map(),
+      lastIntentAt: now,
+      nextPingAt: now + PING_EVERY_MS,
+      missedPongs: 0,
     })
 
     const player = room.state.players.get(address)
-    if (player) room.sent.set(address, signature(playerWire(player, 0)))
+    if (player) room.sent.set(address, signature(playerWire(player, 0, handle)))
 
-    broadcast(room, { t: 'event', kind: 'join', player: address }, address)
+    broadcast(room, { t: 'event', kind: 'join', player: handle }, address)
     log('a player joined', { address, room: room.id })
 
     return {
@@ -398,6 +559,7 @@ export function createRooms(options: RoomsOptions): Rooms {
       tick: room.state.tick,
       players: livePlayers(room),
       drones: liveDrones(room),
+      handle,
       connectionId,
       youSeq: 0,
     }
@@ -418,12 +580,32 @@ export function createRooms(options: RoomsOptions): Rooms {
     const room = rooms.get(connection.roomId)
     if (!room) return
 
+    const now = clock()
+    const player = room.state.players.get(address)
+    if (player) {
+      // Dropping the socket is not a way to stand up, refill the shield or clear the fire
+      // budget: whoever comes back on this wallet inside the window gets it all back.
+      carries.set(address, {
+        at: now,
+        carry: {
+          downedUntil: player.downedUntil,
+          shield: player.shield,
+          recentFires: [...player.recentFires],
+          nextShieldAt: player.nextShieldAt,
+        },
+      })
+    }
+    for (const [kept, record] of carries) {
+      if (now - record.at > CARRY_MS) carries.delete(kept)
+    }
+
     room.state = removePlayer(room.state, address)
     room.members.delete(address)
     room.sent.delete(address)
-    if (room.members.size === 0) room.emptyAt = clock()
+    if (room.members.size === 0) room.emptyAt = now
 
-    broadcast(room, { t: 'event', kind: 'leave', player: address })
+    broadcast(room, { t: 'event', kind: 'leave', player: connection.handle })
+    room.handles.delete(address)
     log('a player left', { address, room: room.id, dropped: connection.dropped })
   }
 
@@ -461,17 +643,41 @@ export function createRooms(options: RoomsOptions): Rooms {
     }
   }
 
-  function interact(connection: Connection, room: Room, player: PlayerState, target: string): void {
+  /**
+   * Walking up to a place and pressing the button.
+   *
+   * Two gates stand before the database. The first is the cooldown: one target may only be
+   * taken twice a second, however fast the frames arrive. The second is the player's own
+   * quest set as this socket was last told it, so a parcel taken at the wrong point, a
+   * landmark already counted or a finished quest is refused here and never becomes a row
+   * lock. The quest engine still checks all of it: this only stops the asking.
+   */
+  function interact(
+    connection: Connection,
+    room: Room,
+    player: PlayerState,
+    target: string,
+    now: number,
+  ): void {
+    const taken = connection.interacts.get(target)
+    if (taken !== undefined && now - taken < INTERACT_COOLDOWN_MS) return
+
     if (target === 'office' || target === 'shop') {
       const place = target === 'office' ? map.office : map.shop
       if (distance(player, place) > INTERACT_RANGE) return refuse(connection, 'too far')
+
+      connection.interacts.set(target, now)
       return deliver(connection, { t: 'event', kind: 'interact', target })
     }
 
     if (target === 'pickup' || target === 'deliver') {
       const point = courierPointAt(map, player)
       if (point === null) return refuse(connection, 'too far')
+      if (!courierWants(connection.quests.get('courier'), target, point)) {
+        return refuse(connection, 'nothing to do')
+      }
 
+      connection.interacts.set(target, now)
       room.questEvents.push({ address: player.id, kind: target, point })
       room.pending.push({ kind: target, player: player.id, point })
       return
@@ -481,7 +687,11 @@ export function createRooms(options: RoomsOptions): Rooms {
     const landmark = map.landmarks[index]
     if (!landmark) return refuse(connection, 'unknown place')
     if (distance(player, landmark) > INTERACT_RANGE) return refuse(connection, 'too far')
+    if (!landmarkWants(connection.quests.get('landmarks'), index)) {
+      return refuse(connection, 'nothing to do')
+    }
 
+    connection.interacts.set(target, now)
     room.questEvents.push({ address: player.id, kind: 'landmark', index })
     room.pending.push({ kind: 'landmark', player: player.id, index })
   }
@@ -514,6 +724,8 @@ export function createRooms(options: RoomsOptions): Rooms {
     const player = room.state.players.get(address)
     if (!player) return
 
+    connection.lastIntentAt = now
+
     if (body.t === 'move') {
       // A client that has not been told its move landed sends it again, so the same input can
       // arrive twice and out of order. Anything not newer than the last applied move is an
@@ -533,7 +745,57 @@ export function createRooms(options: RoomsOptions): Rooms {
       return
     }
 
-    interact(connection, room, player, body.target)
+    interact(connection, room, player, body.target, now)
+  }
+
+  /**
+   * The same event with the player named the way the room names them. An event about
+   * somebody who has already left has no handle left to use, and it is dropped rather than
+   * carrying a wallet address out to everyone in the room.
+   */
+  function onWire(room: Room, event: TickEvent): TickEvent | null {
+    if (event.kind === 'spawn') return event
+
+    const handle = handleOf(room, event.player)
+    if (!handle) return null
+    return { ...event, player: handle }
+  }
+
+  /**
+   * The health check on every live socket: ping it, cut it off when it has stopped
+   * answering, and take back the seat of somebody who has not touched the game in ten
+   * minutes. A phone that went into a pocket looks exactly like a script holding a slot.
+   */
+  function sweepConnections(now: number): void {
+    for (const connection of [...connections.values()]) {
+      if (now - connection.lastIntentAt >= IDLE_CONNECTION_MS) {
+        log('closing an idle connection', { address: connection.address })
+        evict(connection, 1000, 'idle')
+        continue
+      }
+
+      if (now < connection.nextPingAt) continue
+
+      if (connection.missedPongs >= MISSED_PONGS_ALLOWED) {
+        log('terminating a socket that stopped answering', { address: connection.address })
+        leave(connection.address, connection.id)
+        try {
+          if (connection.socket.terminate) connection.socket.terminate()
+          else connection.socket.close(1001, 'no answer')
+        } catch {
+          log('a dead socket would not terminate', { address: connection.address })
+        }
+        continue
+      }
+
+      connection.missedPongs += 1
+      connection.nextPingAt = now + PING_EVERY_MS
+      try {
+        connection.socket.ping?.()
+      } catch (error) {
+        log('could not ping a socket', { address: connection.address, error: String(error) })
+      }
+    }
   }
 
   function tick(now: number): void {
@@ -561,7 +823,9 @@ export function createRooms(options: RoomsOptions): Rooms {
 
         const players: PlayerWire[] = []
         for (const player of room.state.players.values()) {
-          const wire = playerWire(player, seqOf(player.id))
+          const handle = handleOf(room, player.id)
+          if (!handle) continue
+          const wire = playerWire(player, seqOf(player.id), handle)
           const mark = signature(wire)
           if (full || room.sent.get(player.id) !== mark) players.push(wire)
           room.sent.set(player.id, mark)
@@ -576,10 +840,10 @@ export function createRooms(options: RoomsOptions): Rooms {
           players,
           drones: liveDrones(room),
           bolts: room.state.bolts.map(boltWire),
-          events,
+          events: events.map((event) => onWire(room, event)).filter((event) => event !== null),
         })
 
-        for (const address of room.members) {
+        for (const address of [...room.members]) {
           const connection = connections.get(address)
           if (connection) deliverText(connection, state)
         }
@@ -591,6 +855,8 @@ export function createRooms(options: RoomsOptions): Rooms {
       batch.push(...room.questEvents)
       room.questEvents = []
     }
+
+    sweepConnections(now)
 
     if (batch.length > 0) options.onEvents?.(batch)
   }
@@ -625,6 +891,7 @@ export function createRooms(options: RoomsOptions): Rooms {
       }
       connections.clear()
       rooms.clear()
+      carries.clear()
     },
 
     snapshot(): { rooms: number; online: number } {
@@ -636,6 +903,18 @@ export function createRooms(options: RoomsOptions): Rooms {
       if (!connection) return false
       deliver(connection, event)
       return true
+    },
+
+    noteQuests(address: string, quests: readonly QuestView[]): void {
+      const connection = connections.get(address)
+      if (!connection) return
+      for (const quest of quests) connection.quests.set(quest.kind, quest)
+    },
+
+    pong(address: string): void {
+      const connection = connections.get(address)
+      if (!connection) return
+      connection.missedPongs = 0
     },
 
     setGear(address: string, gear: PlayerGear): void {
@@ -674,6 +953,13 @@ export function createRooms(options: RoomsOptions): Rooms {
 /** How many batches may be waiting on the database before the next one is thrown away. */
 export const MAX_PENDING_BATCHES = 20
 
+/**
+ * How many kills may wait for a database that is behind. A room of 24 players cannot earn
+ * this many in the time a healthy database takes to catch up, so reaching it means the
+ * database is gone rather than slow, and holding more would only cost memory.
+ */
+export const MAX_HELD_KILLS = 500
+
 export type WorldEventWriter = (
   db: Db,
   events: readonly PlayerQuestEvent[],
@@ -696,7 +982,11 @@ export type RecorderOptions = {
  * apart and a write is not, so without the chain the fifth kill of a hunt could be counted
  * before the fourth and a quest would finish on the wrong event. A database that falls far
  * enough behind is a lost cause rather than a queue worth growing, so once MAX_PENDING_BATCHES
- * are waiting the next batch is dropped with a line in the log instead.
+ * are waiting the interacts of the next batch are dropped with a line in the log.
+ *
+ * Kills are never dropped. A kill is the one event a player earned by playing, and losing
+ * one silently is a quest that never finishes. They are held instead and ride out with the
+ * first batch the chain has room for, still in the order they happened.
  */
 export function recordWorldEvents(
   db: Db,
@@ -708,27 +998,42 @@ export function recordWorldEvents(
 
   let tail: Promise<void> = Promise.resolve()
   let pending = 0
+  let held: PlayerQuestEvent[] = []
 
   return (events) => {
     if (pending >= MAX_PENDING_BATCHES) {
-      log('dropped a tick of world events, the recorder is too far behind', { pending })
+      const kills = events.filter((event) => event.kind === 'kill')
+      const room = Math.max(0, MAX_HELD_KILLS - held.length)
+      held = [...held, ...kills.slice(0, room)]
+      log('dropped a tick of interacts, the recorder is too far behind', {
+        pending,
+        dropped: events.length - kills.length,
+        heldKills: held.length,
+        lostKills: kills.length - room > 0 ? kills.length - room : 0,
+      })
       return
     }
+
+    const batch = held.length > 0 ? [...held, ...events] : events
+    held = []
 
     pending += 1
     const now = new Date()
 
     tail = tail.then(async () => {
       try {
-        const changed = await write(db, events, now)
+        const changed = await write(db, batch, now)
         for (const row of changed) {
-          for (const quest of row.quests) {
-            const view: QuestView = questView(quest)
+          const views = row.quests.map(questView)
+          // The room keeps its own copy, so the next interact is judged against what this
+          // player's quests actually say rather than against what the client claims.
+          rooms.noteQuests(row.address, views)
+          for (const view of views) {
             rooms.send(row.address, { t: 'event', kind: 'quest', quest: view })
           }
         }
 
-        const kills = events.filter((event) => event.kind === 'kill').length
+        const kills = batch.filter((event) => event.kind === 'kill').length
         if (kills > 0) await bumpDaily(db, utcDay(now), { kills })
       } catch (error) {
         log('could not write down a tick of events', { error: String(error) })

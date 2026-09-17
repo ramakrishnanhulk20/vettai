@@ -74,6 +74,11 @@ export function registerQuestRoutes(
   /**
    * The one door to a payout.
    *
+   * A refusal here is about the claim, never about the session: the caller is signed in or
+   * this code would not be running. So every refusal below is a 403 with a `code` the client
+   * can branch on, and 401 is left to mean one thing only, that the session is missing or
+   * no longer good. A phone that saw 401 for a spent nonce would sign its player out.
+   *
    * The signature is checked first and the address is read off the public key, so a caller
    * cannot claim for a wallet it does not hold. The nonce is spent next, which is what
    * stops the same signed message being sent twice. The claim row and the quest going to
@@ -93,7 +98,9 @@ export function registerQuestRoutes(
     const quest = await ownedQuest(deps, params.data.id, address)
     if (!quest) return reply.code(404).send({ error: 'no such quest' })
     if (quest.state === 'claimed') return reply.code(409).send({ error: 'already claimed' })
-    if (quest.state !== 'done') return reply.code(409).send({ error: 'that quest is not done yet' })
+    if (quest.state !== 'done') {
+      return reply.code(403).send({ error: 'that quest is not done yet', code: 'not_claimable' })
+    }
 
     const parsed = parseChallengeMessage(body.data.message)
     if (!parsed || parsed.kind !== 'claim' || parsed.subject !== quest.id) {
@@ -107,11 +114,13 @@ export function registerQuestRoutes(
     })
     if (!verified.ok) {
       request.log.warn({ ip: request.ip, reason: verified.reason }, 'claim refused')
-      return reply.code(401).send({ error: verified.reason })
+      return reply.code(403).send({ error: verified.reason, code: 'bad_signature' })
     }
     if (verified.address !== address) {
       request.log.warn({ ip: request.ip, address }, 'claim refused: signed by another wallet')
-      return reply.code(401).send({ error: 'that signature is from another wallet' })
+      return reply
+        .code(403)
+        .send({ error: 'that signature is from another wallet', code: 'other_wallet' })
     }
 
     // A quest worth nothing has nothing to claim. Saying so before the nonce is spent
@@ -123,7 +132,7 @@ export function registerQuestRoutes(
     const spent = await consumeChallenge(deps.db, body.data.message)
     if (!spent.ok) {
       request.log.warn({ ip: request.ip, reason: spent.reason }, 'claim refused')
-      return reply.code(401).send({ error: spent.reason })
+      return reply.code(403).send({ error: spent.reason, code: 'nonce' })
     }
 
     const result = await deps.db.transaction(async (tx) => {

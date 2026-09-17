@@ -19,6 +19,12 @@ const MK2 = { blaster: 'mk2', skin: 'default' } as const
 
 const starts: Place[] = [map.spawn, map.office, map.shop, ...map.landmarks, ...map.courier]
 
+/**
+ * A street crossing well outside the board's no-fire circle. Nobody may shoot from inside
+ * it, so a test about the blaster that stood on the spawn would prove nothing at all.
+ */
+const FIRING_POINT: Place = map.landmarks[1]
+
 /** Street crossings only: a drone parked north of one of these starts over the road. */
 const crossings: Place[] = [map.spawn, map.office, map.shop, ...map.landmarks]
 const DRONE_Y = 6
@@ -105,7 +111,14 @@ describe('nobody outruns the speed cap', () => {
         (moves, sprint, where) => {
           const gear = sprint ? { ...MK1, sprint: true } : MK1
           const cap = (sprint ? 7 : 6) + 0.01
-          const quiet: RoomState = { ...createRoom(map, 'speed'), drones: new Map() }
+          // Empty and kept empty: the spawn clock would otherwise put a drone back in the
+          // sky on the first tick, and being downed by it is a teleport to the office that
+          // reads as a player outrunning the cap.
+          const quiet: RoomState = {
+            ...createRoom(map, 'speed'),
+            drones: new Map(),
+            nextDroneSpawnAt: Number.MAX_SAFE_INTEGER,
+          }
           let room = addPlayer(quiet, 'p1', gear, startAt(where))
           let now = START
           let ticks = 0
@@ -140,7 +153,7 @@ describe('the blaster holds its fire rate', () => {
         fc.boolean(),
         (gaps, mk2) => {
           const cap = mk2 ? 6 : 4
-          let room = addPlayer(createRoom(map, 'rate'), 'p1', mk2 ? MK2 : MK1, map.spawn)
+          let room = addPlayer(createRoom(map, 'rate'), 'p1', mk2 ? MK2 : MK1, FIRING_POINT)
           let now = START
           const accepted: number[] = []
 
@@ -229,9 +242,9 @@ describe('kill credit', () => {
       fc.property(fc.array(fc.boolean(), { minLength: 3, maxLength: 12, size: 'max' }), (shooters) => {
         const ahead: DroneState = {
           id: 'd1',
-          x: map.spawn.x,
+          x: FIRING_POINT.x,
           y: 6,
-          z: map.spawn.z + 10,
+          z: FIRING_POINT.z + 10,
           yaw: 0,
           hp: 3,
           state: 'patrol',
@@ -243,8 +256,8 @@ describe('kill credit', () => {
           deadUntil: 0,
           damage: new Map(),
         }
-        let room = addPlayer(createRoom(map, 'credit'), 'p1', MK1, map.spawn)
-        room = addPlayer(room, 'p2', MK1, map.spawn)
+        let room = addPlayer(createRoom(map, 'credit'), 'p1', MK1, FIRING_POINT)
+        room = addPlayer(room, 'p2', MK1, FIRING_POINT)
         room = { ...room, drones: new Map([[ahead.id, ahead]]) }
 
         const aim = { yaw: 0, pitch: Math.atan2(6 - 1.6, 10) }

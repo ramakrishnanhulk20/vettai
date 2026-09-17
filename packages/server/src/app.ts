@@ -1,9 +1,11 @@
 import fastifyCors from '@fastify/cors'
 import fastifyRateLimit from '@fastify/rate-limit'
 import fastifyWebsocket from '@fastify/websocket'
-import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
-import { allowedOrigins, config, trustedProxies } from './config.js'
+import Fastify, { type FastifyError, type FastifyInstance, type FastifyRequest } from 'fastify'
+import { allowedOrigins, config, trustProxy } from './config.js'
 import type { Db } from './db/client.js'
+import { resolveSession } from './domain/auth.js'
+import { bearerToken, hashToken } from './lib/tokens.js'
 import { registerAuthRoutes } from './routes/auth.js'
 import { requireSession, type RouteDeps } from './routes/context.js'
 import { registerLadderRoutes } from './routes/ladder.js'
@@ -14,10 +16,31 @@ import { registerWorldSocket } from './routes/ws.js'
 import { registerWorldRoutes, worldMap, type WorldDeps } from './routes/world.js'
 
 /**
- * Per minute, per IP. Signing in is tighter than the rest because it ends in a
- * signature check, which is the expensive thing an attacker would grind at.
+ * Per minute. `global` and `auth` are counted per IP, `session` per signed-in wallet.
+ * Signing in is tighter than the rest because it ends in a signature check, which is the
+ * expensive thing an attacker would grind at. A session gets more than an anonymous caller
+ * because a house with two phones on one router is two players, not one.
  */
-export const RATE_LIMITS = { global: 120, auth: 10 }
+export const RATE_LIMITS = { global: 120, auth: 10, session: 240 }
+
+/**
+ * What the limiter counts a request against. A made-up bearer token would be a fresh budget
+ * on demand, so the session has to be a real one; anything else falls back to the address
+ * the packet came from, which is the one thing a caller cannot choose.
+ */
+async function limiterKey(db: Db, request: FastifyRequest): Promise<string> {
+  const token = bearerToken(request.headers.authorization)
+  if (!token) return `ip:${request.ip}`
+
+  try {
+    const player = await resolveSession(db, token)
+    if (player) return `session:${hashToken(token)}`
+  } catch (error) {
+    request.log.warn({ err: error }, 'could not read a session for the rate limit key')
+  }
+
+  return `ip:${request.ip}`
+}
 
 /** A frame is a few hundred bytes; anything near this is not a client we want to read. */
 const MAX_SOCKET_FRAME = 8 * 1024
@@ -37,11 +60,15 @@ export type BuildOptions = {
 export async function buildApp(options: BuildOptions): Promise<FastifyInstance> {
   const app = Fastify({
     logger: options.logger === false ? false : { level: 'info' },
-    // Only the hops named in TRUST_PROXY may say where a caller came from. Blank, the
-    // local default, means the header is ignored and the socket's own address wins.
-    trustProxy: trustedProxies(),
+    // Only the peer named in TRUST_PROXY, and the platform's own hops behind it, may say
+    // where a caller came from. Blank, the local default, means the header is ignored and
+    // the socket's own address wins.
+    trustProxy: trustProxy(),
   })
   const limits = { ...RATE_LIMITS, ...options.rateLimit }
+  // A test that lifts the anonymous ceiling means "do not measure me here", so the session
+  // ceiling follows it up rather than staying at the production number and failing the test.
+  const perSession = options.rateLimit?.session ?? Math.max(limits.session, limits.global)
   const origins = allowedOrigins()
   const world: WorldDeps = options.world ?? { map: worldMap(), rooms: null }
 
@@ -52,10 +79,11 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
 
   await app.register(fastifyRateLimit, {
     global: true,
-    max: limits.global,
+    // The ceiling is read off the key the request was given, so the two can never disagree
+    // about whether this is a session or an address.
+    max: (_request, key) => (String(key).startsWith('session:') ? perSession : limits.global),
     timeWindow: '1 minute',
-    // Keyed on the address the packet came from, never on anything the caller can set.
-    keyGenerator: (request) => request.ip,
+    keyGenerator: (request) => limiterKey(options.db, request),
     onExceeded: (request) => {
       request.log.warn({ ip: request.ip, route: request.url }, 'rate limit hit')
     },
@@ -93,9 +121,16 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     limits: { auth: { max: limits.auth, timeWindow: '1 minute' } },
   }
 
-  // Point this at a deployment to see which address the world thinks a caller has. A
-  // wrong TRUST_PROXY shows up here as the edge's address, or as a header a caller chose.
-  app.get('/api/echo-ip', async (request, reply) => reply.send({ ip: request.ip }))
+  // Point this at a deployment to see which address the world thinks a caller has, and why.
+  // A wrong TRUST_PROXY or TRUST_PROXY_EDGE_HOPS shows up here as the edge's own address:
+  // compare `ip` against the chain and the peer and the setting is right or it is not.
+  app.get('/api/echo-ip', async (request, reply) =>
+    reply.send({
+      ip: request.ip,
+      chain: request.headers['x-forwarded-for'] ?? null,
+      peer: request.socket.remoteAddress ?? null,
+    }),
+  )
 
   app.get('/health', () => {
     const live = world.rooms?.snapshot() ?? { rooms: 0, online: 0 }

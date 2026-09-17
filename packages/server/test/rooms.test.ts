@@ -1,15 +1,20 @@
 // Covers the socket passes and the live rooms against a fake socket: where a joining
-// player lands, what goes out every tick, and what a badly behaved client is allowed to
-// do. It does NOT open a real WebSocket (ws.test.ts does that), and it does NOT touch the
-// database, so nothing here proves quest progress; quests.test.ts does.
+// player lands, what goes out every tick, what a badly behaved client is allowed to do,
+// what a player keeps when they drop and come back, and how a socket that stops reading is
+// cut off. It does NOT open a real WebSocket (ws.test.ts does that), and it does NOT touch
+// the database, so nothing here proves quest progress; quests.test.ts does.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   createRooms,
+  CARRY_MS,
   FULL_STATE_EVERY,
+  IDLE_CONNECTION_MS,
   IDLE_ROOM_MS,
+  MAX_BUFFERED_BYTES,
   MAX_PENDING_BATCHES,
   MESSAGE_LIMITS,
+  PING_EVERY_MS,
   PROTOCOL_VERSION,
   recordWorldEvents,
   type Rooms,
@@ -17,8 +22,9 @@ import {
 import type { Db } from '../src/db/client.js'
 import { issueTicket, redeemTicket, TICKET_TTL_MS } from '../src/world/tickets.js'
 import { generateMap } from '../src/world/map.js'
+import { INITIAL_DRONES } from '../src/world/sim.js'
 import { STARTING_GEAR } from '../src/db/schema.js'
-import type { PlayerQuestEvent } from '../src/domain/quests.js'
+import type { PlayerQuestEvent, QuestView } from '../src/domain/quests.js'
 
 const map = generateMap('vettai-test')
 const ADDRESS = 'NQ66KBKYVKLD6J8HN23BY7MVPCT27X2DK54R'
@@ -29,10 +35,16 @@ type Frame = Record<string, unknown> & { t: string }
 type FakeSocket = {
   send: (data: string) => void
   close: (code?: number, reason?: string) => void
+  ping: () => void
+  terminate: () => void
   frames: Frame[]
   /** The bytes as they went out, for proving the room was serialised once. */
   raw: string[]
   closes: { code?: number | undefined; reason?: string | undefined }[]
+  /** What a real socket reports when the far end has stopped reading. */
+  bufferedAmount: number
+  pings: number
+  terminated: boolean
   of: (kind: string) => Frame[]
 }
 
@@ -44,10 +56,13 @@ function fakeSocket(onClose?: () => void): FakeSocket {
   const frames: Frame[] = []
   const raw: string[] = []
   const closes: { code?: number | undefined; reason?: string | undefined }[] = []
-  return {
+  const socket: FakeSocket = {
     frames,
     raw,
     closes,
+    bufferedAmount: 0,
+    pings: 0,
+    terminated: false,
     send: (data) => {
       raw.push(data)
       frames.push(JSON.parse(data) as Frame)
@@ -56,7 +71,44 @@ function fakeSocket(onClose?: () => void): FakeSocket {
       closes.push({ code, reason })
       if (onClose) setTimeout(onClose, 0)
     },
+    ping: () => {
+      socket.pings += 1
+    },
+    terminate: () => {
+      socket.terminated = true
+    },
     of: (kind) => frames.filter((frame) => frame.t === kind),
+  }
+  return socket
+}
+
+/** Today's courier quest as the socket would have been told it at join. */
+function courierQuest(route: { from: number; to: number }, carrying = false): QuestView {
+  return {
+    id: 'quest-courier',
+    kind: 'courier',
+    day: '2026-09-15',
+    target: 1,
+    progress: 0,
+    state: 'open',
+    rewardLuna: '30000',
+    rewardNim: '0.3',
+    route,
+    carrying,
+  }
+}
+
+function landmarksQuest(visited: boolean[] = [false, false, false, false]): QuestView {
+  return {
+    id: 'quest-landmarks',
+    kind: 'landmarks',
+    day: '2026-09-15',
+    target: 4,
+    progress: 0,
+    state: 'open',
+    rewardLuna: '20000',
+    rewardNim: '0.2',
+    visited,
   }
 }
 
@@ -122,8 +174,24 @@ describe('joining', () => {
 
     expect(joined.room).toBe('r1')
     expect(joined.players).toHaveLength(1)
-    expect(joined.drones).toHaveLength(12)
+    expect(joined.drones).toHaveLength(INITIAL_DRONES)
     expect(rooms.snapshot()).toEqual({ rooms: 1, online: 1 })
+  })
+
+  it('names the player by a handle, never by the wallet, in everything it sends', () => {
+    const socket = fakeSocket()
+
+    const joined = rooms.join(ADDRESS, STARTING_GEAR, socket)
+    ticks(1)
+
+    expect(joined.handle).toMatch(/^[0-9a-f]{8}$/)
+    expect(joined.players.map((player) => player.id)).toEqual([joined.handle])
+
+    const state = socket.of('state')[0]
+    expect(JSON.stringify(state)).not.toContain(ADDRESS)
+
+    const second = rooms.join(OTHER, STARTING_GEAR, fakeSocket())
+    expect(second.handle).not.toBe(joined.handle)
   })
 
   it('fills one room to capacity and opens a second for the player after that', () => {
@@ -140,10 +208,10 @@ describe('joining', () => {
     const first = fakeSocket()
     const second = fakeSocket()
     rooms.join(ADDRESS, STARTING_GEAR, first)
-    rooms.join(OTHER, STARTING_GEAR, second)
+    const theirs = rooms.join(OTHER, STARTING_GEAR, second)
 
     expect(first.of('event').map((frame) => frame['kind'])).toEqual(['join'])
-    expect(first.of('event')[0]?.['player']).toBe(OTHER)
+    expect(first.of('event')[0]?.['player']).toBe(theirs.handle)
     expect(second.of('event')).toHaveLength(0)
 
     rooms.leave(OTHER)
@@ -206,7 +274,7 @@ describe('the tick', () => {
     const states = socket.of('state')
     expect(states).toHaveLength(3)
     expect(states[0]?.['v']).toBe(PROTOCOL_VERSION)
-    expect(states[0]?.['drones']).toHaveLength(12)
+    expect(states[0]?.['drones']).toHaveLength(INITIAL_DRONES)
     expect(Array.isArray(states[0]?.['bolts'])).toBe(true)
   })
 
@@ -277,17 +345,17 @@ describe('the move number the server has applied', () => {
 
   it('names the move it applied for the player who sent it', () => {
     const socket = fakeSocket()
-    rooms.join(ADDRESS, STARTING_GEAR, socket)
+    const joined = rooms.join(ADDRESS, STARTING_GEAR, socket)
 
     rooms.handle(ADDRESS, message({ t: 'move', seq: 7, dx: 0, dz: 1, yaw: 0 }))
     ticks(1)
 
-    expect(seqIn(socket.of('state')[0])).toEqual({ [ADDRESS]: 7 })
+    expect(seqIn(socket.of('state')[0])).toEqual({ [joined.handle]: 7 })
   })
 
   it('ignores a move that is not newer than the last one it applied', () => {
     const socket = fakeSocket()
-    rooms.join(ADDRESS, STARTING_GEAR, socket)
+    const joined = rooms.join(ADDRESS, STARTING_GEAR, socket)
 
     rooms.handle(ADDRESS, message({ t: 'move', seq: 5, dx: 0, dz: 1, yaw: 0 }))
     rooms.handle(ADDRESS, message({ t: 'move', seq: 5, dx: 1, dz: 0, yaw: 2 }))
@@ -297,20 +365,20 @@ describe('the move number the server has applied', () => {
     const player = rooms.roomFor(ADDRESS)?.state.players.get(ADDRESS)
     expect(player?.intent).toEqual({ dx: 0, dz: 1, yaw: 0 })
     expect(player?.x).toBeCloseTo(map.spawn.x, 6)
-    expect(seqIn(socket.of('state')[0])).toEqual({ [ADDRESS]: 5 })
+    expect(seqIn(socket.of('state')[0])).toEqual({ [joined.handle]: 5 })
   })
 
   it('reports the seq of a move that went nowhere, and keeps it through the full list', () => {
     const mine = fakeSocket()
     const theirs = fakeSocket()
-    rooms.join(ADDRESS, STARTING_GEAR, mine)
-    rooms.join(OTHER, STARTING_GEAR, theirs)
+    const joined = rooms.join(ADDRESS, STARTING_GEAR, mine)
+    const second = rooms.join(OTHER, STARTING_GEAR, theirs)
 
     rooms.handle(ADDRESS, message({ t: 'move', seq: 9, dx: 0, dz: 0, yaw: 0 }))
     ticks(FULL_STATE_EVERY)
 
-    expect(seqIn(mine.of('state')[0])).toEqual({ [ADDRESS]: 9 })
-    expect(seqIn(mine.of('state').at(-1))).toEqual({ [ADDRESS]: 9, [OTHER]: 0 })
+    expect(seqIn(mine.of('state')[0])).toEqual({ [joined.handle]: 9 })
+    expect(seqIn(mine.of('state').at(-1))).toEqual({ [joined.handle]: 9, [second.handle]: 0 })
   })
 })
 
@@ -396,7 +464,7 @@ describe('interacting with a place', () => {
 
   it('refuses a pickup from across the map and takes one at the point', () => {
     const socket = fakeSocket()
-    rooms.join(ADDRESS, STARTING_GEAR, socket)
+    const joined = rooms.join(ADDRESS, STARTING_GEAR, socket, [courierQuest({ from: 3, to: 5 })])
 
     rooms.handle(ADDRESS, message({ t: 'interact', target: 'pickup' }))
     expect(socket.of('error').map((frame) => frame['code'])).toEqual(['too far'])
@@ -408,13 +476,50 @@ describe('interacting with a place', () => {
     ticks(1)
 
     expect(events).toEqual([{ address: ADDRESS, kind: 'pickup', point: 3 }])
-    expect(tickEvents(socket)).toContainEqual({ kind: 'pickup', player: ADDRESS, point: 3 })
+    expect(tickEvents(socket)).toContainEqual({ kind: 'pickup', player: joined.handle, point: 3 })
     expect(socket.of('event').some((frame) => frame['kind'] === 'pickup')).toBe(false)
+  })
+
+  it('never lets a pickup at the wrong point reach the quest engine', () => {
+    const socket = fakeSocket()
+    rooms.join(ADDRESS, STARTING_GEAR, socket, [courierQuest({ from: 3, to: 5 })])
+
+    const wrong = map.courier[6]
+    if (!wrong) throw new Error('the map has no seventh courier point')
+    standAt(ADDRESS, wrong)
+    rooms.handle(ADDRESS, message({ t: 'interact', target: 'pickup' }))
+    ticks(1)
+
+    expect(events).toEqual([])
+    expect(tickEvents(socket)).toEqual([])
+    expect(socket.of('error').map((frame) => frame['code'])).toEqual(['nothing to do'])
+  })
+
+  it('refuses a delivery from a player who is carrying nothing', () => {
+    const socket = fakeSocket()
+    rooms.join(ADDRESS, STARTING_GEAR, socket, [courierQuest({ from: 3, to: 5 })])
+
+    const drop = map.courier[5]
+    if (!drop) throw new Error('the map has no sixth courier point')
+    standAt(ADDRESS, drop)
+    rooms.handle(ADDRESS, message({ t: 'interact', target: 'deliver' }))
+    ticks(1)
+
+    expect(events).toEqual([])
+
+    // The same delivery, once the quest engine has said the parcel is in hand.
+    rooms.noteQuests(ADDRESS, [courierQuest({ from: 3, to: 5 }, true)])
+    vi.advanceTimersByTime(600)
+    standAt(ADDRESS, drop)
+    rooms.handle(ADDRESS, message({ t: 'interact', target: 'deliver' }))
+    ticks(1)
+
+    expect(events).toEqual([{ address: ADDRESS, kind: 'deliver', point: 5 }])
   })
 
   it('takes a landmark visit only at that landmark', () => {
     const socket = fakeSocket()
-    rooms.join(ADDRESS, STARTING_GEAR, socket)
+    const joined = rooms.join(ADDRESS, STARTING_GEAR, socket, [landmarksQuest()])
 
     rooms.handle(ADDRESS, message({ t: 'interact', target: 'landmark:2' }))
     expect(socket.of('error').map((frame) => frame['code'])).toEqual(['too far'])
@@ -424,7 +529,34 @@ describe('interacting with a place', () => {
     ticks(1)
 
     expect(events).toEqual([{ address: ADDRESS, kind: 'landmark', index: 2 }])
-    expect(tickEvents(socket)).toContainEqual({ kind: 'landmark', player: ADDRESS, index: 2 })
+    expect(tickEvents(socket)).toContainEqual({ kind: 'landmark', player: joined.handle, index: 2 })
+  })
+
+  it('drops a visit to a landmark this player has already counted', () => {
+    const socket = fakeSocket()
+    rooms.join(ADDRESS, STARTING_GEAR, socket, [landmarksQuest([false, false, true, false])])
+
+    standAt(ADDRESS, map.landmarks[2])
+    rooms.handle(ADDRESS, message({ t: 'interact', target: 'landmark:2' }))
+    ticks(1)
+
+    expect(events).toEqual([])
+    expect(socket.of('error').map((frame) => frame['code'])).toEqual(['nothing to do'])
+  })
+
+  it('takes one interact on a target every half second, however fast they arrive', () => {
+    const socket = fakeSocket()
+    rooms.join(ADDRESS, STARTING_GEAR, socket, [landmarksQuest()])
+    standAt(ADDRESS, map.landmarks[1])
+
+    // Forty over two seconds, which is what a finger held on the button looks like.
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      rooms.handle(ADDRESS, message({ t: 'interact', target: 'landmark:1' }))
+      vi.advanceTimersByTime(50)
+    }
+
+    expect(events.length).toBeGreaterThan(0)
+    expect(events.length).toBeLessThanOrEqual(4)
   })
 
   it('confirms the office when the player is standing at it', () => {
@@ -435,6 +567,138 @@ describe('interacting with a place', () => {
     rooms.handle(ADDRESS, message({ t: 'interact', target: 'office' }))
 
     expect(socket.of('event').at(-1)).toMatchObject({ kind: 'interact', target: 'office' })
+  })
+})
+
+describe('keeping the sockets honest', () => {
+  it('pings a member and terminates the one that never answers', () => {
+    const socket = fakeSocket()
+    rooms.join(ADDRESS, STARTING_GEAR, socket)
+
+    vi.advanceTimersByTime(PING_EVERY_MS)
+    expect(socket.pings).toBe(1)
+
+    vi.advanceTimersByTime(PING_EVERY_MS)
+    expect(socket.pings).toBe(2)
+    expect(socket.terminated).toBe(false)
+
+    vi.advanceTimersByTime(PING_EVERY_MS)
+    expect(socket.terminated).toBe(true)
+    expect(rooms.snapshot().online).toBe(0)
+  })
+
+  it('leaves a member that answers its pings alone', () => {
+    const socket = fakeSocket()
+    rooms.join(ADDRESS, STARTING_GEAR, socket)
+
+    for (let round = 0; round < 8; round += 1) {
+      vi.advanceTimersByTime(PING_EVERY_MS)
+      rooms.pong(ADDRESS)
+    }
+
+    expect(socket.pings).toBe(8)
+    expect(socket.terminated).toBe(false)
+    expect(rooms.snapshot().online).toBe(1)
+  })
+
+  it('closes a socket whose buffer has run away, and stops writing to it', () => {
+    const socket = fakeSocket()
+    rooms.join(ADDRESS, STARTING_GEAR, socket)
+
+    ticks(1)
+    const before = socket.raw.length
+    socket.bufferedAmount = MAX_BUFFERED_BYTES + 1
+    ticks(2)
+
+    expect(socket.closes).toEqual([{ code: 1013, reason: 'too slow' }])
+    expect(socket.raw).toHaveLength(before)
+    expect(rooms.snapshot().online).toBe(0)
+  })
+
+  it('takes back the seat of a connection that has sent nothing for ten minutes', () => {
+    const socket = fakeSocket()
+    // A slower tick, because ten minutes of fake time is ten minutes of real ticks.
+    const quiet = createRooms({ map, seed: 'idle', capacity: 24, tickMs: 1000 })
+    quiet.start()
+
+    try {
+      quiet.join(ADDRESS, STARTING_GEAR, socket)
+
+      // The socket is alive and answering the whole time. It is simply not playing.
+      for (let round = 0; round < IDLE_CONNECTION_MS / PING_EVERY_MS; round += 1) {
+        vi.advanceTimersByTime(PING_EVERY_MS)
+        quiet.pong(ADDRESS)
+      }
+
+      expect(socket.terminated).toBe(false)
+      expect(socket.closes).toEqual([{ code: 1000, reason: 'idle' }])
+      expect(quiet.snapshot().online).toBe(0)
+    } finally {
+      quiet.stop()
+    }
+  })
+
+  it('keeps a connection that is still playing', () => {
+    const socket = fakeSocket()
+    const quiet = createRooms({ map, seed: 'busy', capacity: 24, tickMs: 1000 })
+    quiet.start()
+
+    try {
+      quiet.join(ADDRESS, STARTING_GEAR, socket)
+
+      for (let round = 0; round < IDLE_CONNECTION_MS / PING_EVERY_MS; round += 1) {
+        vi.advanceTimersByTime(PING_EVERY_MS)
+        quiet.pong(ADDRESS)
+        quiet.handle(ADDRESS, message({ t: 'move', dx: 0, dz: 1, yaw: 0 }))
+      }
+
+      expect(socket.closes).toHaveLength(0)
+      expect(quiet.snapshot().online).toBe(1)
+    } finally {
+      quiet.stop()
+    }
+  })
+})
+
+describe('dropping and coming back', () => {
+  function woundAt(address: string, shield: number, downedUntil = 0): void {
+    const room = rooms.roomFor(address)
+    if (!room) throw new Error('no room')
+    const player = room.state.players.get(address)
+    if (!player) throw new Error('no player')
+    const players = new Map(room.state.players)
+    players.set(address, { ...player, shield, downedUntil })
+    room.write({ ...room.state, players })
+  }
+
+  it('brings a downed player back still down', () => {
+    rooms.join(ADDRESS, STARTING_GEAR, fakeSocket())
+    const comesBackUpAt = Date.now() + 3000
+    woundAt(ADDRESS, 0, comesBackUpAt)
+
+    rooms.leave(ADDRESS)
+    vi.advanceTimersByTime(1000)
+    rooms.join(ADDRESS, STARTING_GEAR, fakeSocket())
+
+    const back = rooms.roomFor(ADDRESS)?.state.players.get(ADDRESS)
+    expect(back?.downedUntil).toBe(comesBackUpAt)
+    expect(back?.shield).toBe(0)
+  })
+
+  it('keeps a spent shield through a reconnect, and hands it back after the window', () => {
+    rooms.join(ADDRESS, STARTING_GEAR, fakeSocket())
+    woundAt(ADDRESS, 1)
+
+    rooms.leave(ADDRESS)
+    vi.advanceTimersByTime(2000)
+    rooms.join(ADDRESS, STARTING_GEAR, fakeSocket())
+    expect(rooms.roomFor(ADDRESS)?.state.players.get(ADDRESS)?.shield).toBe(1)
+
+    woundAt(ADDRESS, 1)
+    rooms.leave(ADDRESS)
+    vi.advanceTimersByTime(CARRY_MS + 1000)
+    rooms.join(ADDRESS, STARTING_GEAR, fakeSocket())
+    expect(rooms.roomFor(ADDRESS)?.state.players.get(ADDRESS)?.shield).toBe(3)
   })
 })
 
@@ -525,6 +789,10 @@ describe('writing a tick down', () => {
     return { address, kind: 'landmark', index: 0 }
   }
 
+  function kill(address: string): PlayerQuestEvent {
+    return { address, kind: 'kill' }
+  }
+
   it('writes the batches down in the order they happened, however slow the first one is', async () => {
     const writer = heldWriter()
     const record = recordWorldEvents({} as Db, rooms, { apply: writer.apply })
@@ -567,5 +835,29 @@ describe('writing a tick down', () => {
     record([visit(OTHER)])
     await settle()
     expect(writer.started.at(-1)).toEqual([OTHER])
+  })
+
+  it('keeps every kill when the chain is over full, and drops only the interacts', async () => {
+    const writer = heldWriter()
+    const record = recordWorldEvents({} as Db, rooms, { apply: writer.apply })
+
+    for (let batch = 0; batch < MAX_PENDING_BATCHES; batch += 1) record([visit(OTHER)])
+    await settle()
+
+    // Five ticks arrive while the chain is full. Each one is a kill and an interact.
+    for (let batch = 0; batch < 5; batch += 1) record([kill(ADDRESS), visit(OTHER)])
+    await settle()
+
+    for (let batch = 0; batch < MAX_PENDING_BATCHES; batch += 1) {
+      writer.release()
+      await settle()
+    }
+
+    record([visit(OTHER)])
+    await settle()
+
+    // The five kills rode out with the next batch the chain had room for. The five
+    // interacts that came with them are gone, which is what they are there for.
+    expect(writer.started.at(-1)).toEqual([ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, OTHER])
   })
 })

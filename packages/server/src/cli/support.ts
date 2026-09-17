@@ -10,6 +10,7 @@ import type { Db } from '../db/client.js'
 import { sleep } from '../lib/sleep.js'
 import {
   isNotFound,
+  PAGE_SIZE,
   RpcError,
   toChainTransaction,
   type ChainTransaction,
@@ -151,6 +152,8 @@ export type NodeReader = {
   getTransactionByHash: (hash: string) => Promise<RpcTransaction>
   fetchTransaction: (hash: string) => Promise<ChainTransaction | null>
   pushTransaction: (rawHex: string) => Promise<string>
+  mempoolHas: (hash: string) => Promise<boolean>
+  listOutgoing: (address: string, sinceBlock: number) => Promise<ChainTransaction[]>
 }
 
 export function readNode(url: string): NodeReader {
@@ -195,6 +198,32 @@ export function readNode(url: string): NodeReader {
       }
     },
     pushTransaction: (rawHex) => call<string>('pushTransaction', [rawHex]),
+    // Both of these answer the same questions the treasury asks its own node, through the
+    // same decoders, so a run against a deployment compares like with like. A node that
+    // cannot say what is in its mempool is read as "it is in there", which is the answer
+    // that never leads to a second payment.
+    mempoolHas: async (hash) => {
+      const wanted = hash.trim().toLowerCase()
+      try {
+        const content = await call<unknown[]>('mempoolContent', [false])
+        return content.some((entry) => typeof entry === 'string' && entry.trim().toLowerCase() === wanted)
+      } catch {
+        return true
+      }
+    },
+    listOutgoing: async (address, sinceBlock) => {
+      const rows = await call<RpcTransaction[]>('getTransactionsByAddress', [
+        formatAddress(address),
+        PAGE_SIZE,
+        null,
+      ])
+      const wanted = formatAddress(address).replace(/\s+/g, '').toUpperCase()
+
+      return rows
+        .map(toChainTransaction)
+        .filter((tx) => tx.sender === wanted && tx.blockNumber > sinceBlock)
+        .sort((a, b) => a.blockNumber - b.blockNumber)
+    },
   }
 }
 

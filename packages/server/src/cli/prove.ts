@@ -90,6 +90,8 @@ export type ProveOptions = {
   origin: string
   /** Remote only: spend from the treasury key on this machine so the shop check can run. */
   fund: boolean
+  /** Remote only: the DAILY_CAP_NIM the deployment is supposed to be running. Empty means do not check. */
+  expectDailyCap: string
 }
 
 function originOf(value: string): string {
@@ -127,15 +129,16 @@ export function readArguments(
 
   const written = flags.has('url') ? '' : values.get('url')
   const asked = (written ?? env['VETTAI_PROVE_URL'] ?? '').trim()
+  const expectDailyCap = (values.get('expect-daily-cap') ?? '').trim()
 
   if (asked === '') {
     if (flags.has('url')) {
       throw new Error('--url needs the origin of a deployment, for example --url https://world.up.railway.app')
     }
-    return { mode: 'local', origin: '', fund: flags.has('fund') }
+    return { mode: 'local', origin: '', fund: flags.has('fund'), expectDailyCap }
   }
 
-  return { mode: 'remote', origin: originOf(asked), fund: flags.has('fund') }
+  return { mode: 'remote', origin: originOf(asked), fund: flags.has('fund'), expectDailyCap }
 }
 
 /** The name of the file this run is written to, one per minute, sortable by name. */
@@ -145,11 +148,16 @@ export function proofFileName(now: Date, mode: ProveMode = 'local'): string {
 }
 
 /**
- * True when an address belongs to a range a hosting edge gives itself, so the world would
- * be counting its own proxy instead of the caller. It covers 10.0.0.0/8 and the carrier
- * grade range 100.64.0.0/10, which is what Railway and Fly put in front of a container.
- * It does NOT judge IPv6 or any other private range: those are printed in the check's own
- * line, so a person reads the address the deployment actually saw.
+ * True when an address is one no caller on the internet could have arrived from, so the
+ * world is describing a machine on its own side rather than the player. It covers
+ * 10.0.0.0/8, the carrier grade range 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16 and
+ * loopback, which is the whole of RFC 1918 plus what Railway and Fly put in front of a
+ * container.
+ *
+ * It is a label, not the test. A hosting edge with a public address, which is what Railway
+ * answers with today, passes every one of these and is still the wrong address: the check
+ * that catches that compares what the world saw with this machine's own egress address. It
+ * does NOT judge IPv6.
  */
 export function looksLikeProxyHop(ip: string): boolean {
   const parts = ip.trim().split('.')
@@ -159,8 +167,28 @@ export function looksLikeProxyHop(ip: string): boolean {
   if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return false
 
   const [first = -1, second = -1] = octets
-  if (first === 10) return true
-  return first === 100 && second >= 64 && second <= 127
+  if (first === 10 || first === 127) return true
+  if (first === 100 && second >= 64 && second <= 127) return true
+  if (first === 172 && second >= 16 && second <= 31) return true
+  return first === 192 && second === 168
+}
+
+/** Where this machine leaves the internet from, read from a service outside the deployment. */
+export const EGRESS_URL = 'https://api.ipify.org'
+
+/** Plain text, one address. Anything else is a failure rather than a value to compare. */
+export function readEgressAddress(text: string): string {
+  const seen = text.trim()
+  if (!/^[0-9a-fA-F.:]{3,45}$/.test(seen)) {
+    throw new Error(`${EGRESS_URL} answered "${seen.slice(0, 40)}", which is not an address`)
+  }
+  return seen
+}
+
+async function egressAddress(): Promise<string> {
+  const response = await fetch(EGRESS_URL, { signal: AbortSignal.timeout(20_000) })
+  if (!response.ok) throw new Error(`${EGRESS_URL} answered ${response.status}`)
+  return readEgressAddress(await response.text())
 }
 
 function reasonOf(error: unknown): string {
@@ -535,8 +563,15 @@ type SelfView = {
  * against a deployment cannot look inside its rooms, so everything check 11 measures
  * remotely comes from the wire: where the server says this player is, and which of this
  * player's shots the server says landed.
+ *
+ * The world names players by a room handle and never by a wallet address, so the handle in
+ * the welcome is the only thing that can pick this player out of a state frame.
  */
-function followSelf(socket: WorldSocket, me: string, welcome: Frame): SelfView {
+function followSelf(socket: WorldSocket, welcome: Frame): SelfView {
+  const you = welcome['you'] as { handle?: string } | undefined
+  const me = typeof you?.handle === 'string' ? you.handle : ''
+  if (me === '') throw new Error('the welcome did not name this player with a handle')
+
   let at = { x: 0, z: 0 }
   let downed = false
   let drones: DroneWire[] = []
@@ -596,7 +631,7 @@ async function proveSocketLimitsRemote(target: Target, bot: typeof import('./bot
     `${target.base.replace('http', 'ws')}/ws?ticket=${ticket.body.ticket}`,
   )
   const welcome = await socket.waitForKind('welcome')
-  const world = followSelf(socket, player.address, welcome)
+  const world = followSelf(socket, welcome)
 
   const headings = [
     { dx: 0, dz: 1 },
@@ -831,7 +866,7 @@ async function runLocal(run: Run, started: Date): Promise<void> {
     throw new Error('refusing to run: TREASURY_PRIVATE_KEY is not in .env.treasury, so nothing can be paid')
   }
 
-  const { and, asc, eq } = await import('drizzle-orm')
+  const { and, asc, eq, isNull } = await import('drizzle-orm')
   const { openMemoryDb } = await import('../db/client.js')
   const { applyMigrations } = await import('../db/migrate.js')
   const { claims, shopOrders } = await import('../db/schema.js')
@@ -984,7 +1019,17 @@ async function runLocal(run: Run, started: Date): Promise<void> {
     const summary = await deliverOnce(db, treasury, new Date(), { log: (line) => run.say(`     ${line}`) })
     demand(summary.sent >= 1, `the outbox sent ${summary.sent} payouts`)
 
-    const row = await claimRow(huntClaimId)
+    // A payment is only called paid once a full batch sits on top of it, so this waits for
+    // the chain rather than for the broadcast. That wait is the point: it is what stops the
+    // treasury calling a payment final before the chain has.
+    const until = Date.now() + PAID_WAIT_MS
+    let row = await claimRow(huntClaimId)
+    while (row.state !== 'paid' && Date.now() < until) {
+      await sleep(CLAIM_POLL_MS)
+      await deliverOnce(db, treasury, new Date(), { log: () => {} })
+      row = await claimRow(huntClaimId)
+    }
+
     demand(row.state === 'paid', `the claim is ${row.state}, not paid`)
     demand(row.txHash !== null, 'the claim has no transaction hash')
     demand(row.blockNumber !== null, 'the claim has no block number')
@@ -1148,8 +1193,25 @@ async function runLocal(run: Run, started: Date): Promise<void> {
       await waitIndexed(config.TREASURY_ADDRESS, payment.hash)
       await waitIndexed(config.TREASURY_ADDRESS, short.hash)
 
-      const pass = await watcher.tick(db, rpc, { log: (line) => run.say(`     ${line}`) })
-      demand(pass.paid === 1, `the watcher settled ${pass.paid} orders in one pass`)
+      // The watcher acts on a payment only once a full batch sits on top of its block, so
+      // this waits for the chain the way the treasury does instead of settling on sight. A
+      // shallower block can still be dropped, and gear is not something a player gives back.
+      const until = Date.now() + SHOP_WAIT_MS
+      let settled = 0
+      let waited = 0
+
+      for (;;) {
+        const pass = await watcher.tick(db, rpc, { log: (line) => run.say(`     ${line}`) })
+        settled += pass.paid
+        if (settled >= 1) break
+        if (Date.now() > until) {
+          throw new Error(`the watcher settled nothing in ${Math.round(SHOP_WAIT_MS / 1000)}s`)
+        }
+        waited += 1
+        await sleep(CLAIM_POLL_MS)
+      }
+
+      run.say(`     the watcher settled the order after ${waited} pass(es) waiting for the batch`)
 
       const view = await ask<{ state: string }>(target, `/api/shop/orders/${order.body.orderId}`, {
         token: buyer.token,
@@ -1202,8 +1264,11 @@ async function runLocal(run: Run, started: Date): Promise<void> {
 
     // Anything broadcast but not yet in a block is settled by a second pass, which has no
     // queued rows left to send, so the balance below is measured against a finished ledger.
-    for (let attempt = 0; attempt < 6; attempt += 1) {
-      const waiting = await db.select().from(claims).where(eq(claims.state, 'sent'))
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const waiting = await db
+        .select()
+        .from(claims)
+        .where(and(eq(claims.state, 'sent'), isNull(claims.blockNumber)))
       if (waiting.length === 0) break
       await sleep(3000)
       await deliverOnce(db, treasury, new Date(), { log: () => {} })
@@ -1217,14 +1282,18 @@ async function runLocal(run: Run, started: Date): Promise<void> {
     demand(after.txHash === fakeHash, 'the claim with a fake hash was signed again')
     demand(after.blockNumber === null, 'a made up hash was reported as being in a block')
 
+    // What left the wallet is what reached a block, which is not the same as what has been
+    // called paid: a payment waits a full batch on top of it before the treasury says that.
     let expected = 0n
-    for (const row of stillQueued) expected += (await claimRow(row.id)).state === 'paid' ? row.amountLuna : 0n
+    for (const row of stillQueued) {
+      expected += (await claimRow(row.id)).blockNumber !== null ? row.amountLuna : 0n
+    }
 
-    demand(spent === expected, `the treasury fell by ${nim(spent)} against ${nim(expected)} of confirmed payouts`)
+    demand(spent === expected, `the treasury fell by ${nim(spent)} against ${nim(expected)} of payouts on chain`)
 
     return (
       `${summary.sent} payout(s) left in this pass; the claim holding a made up hash stayed "sending" and was ` +
-      `not signed again; the treasury fell by ${nim(spent)}, exactly the confirmed payouts of this pass`
+      `not signed again; the treasury fell by ${nim(spent)}, exactly the payouts of this pass that reached a block`
     )
   })
 
@@ -1259,6 +1328,7 @@ async function runRemote(options: ProveOptions, run: Run, started: Date): Promis
 
   let node: NodeReader | null = null
   let network = ''
+  let dailyCapNim = ''
   let walletA: Session | null = null
   let walletB: Session | null = null
   let replayable: SignedIn | null = null
@@ -1270,13 +1340,17 @@ async function runRemote(options: ProveOptions, run: Run, started: Date): Promis
     1,
     'the deployment answers, names its network, and sees the caller it should',
     async () => {
-      const health = await ask<{ ok: boolean; network: string; rooms: number; online: number }>(
-        target,
-        '/health',
-      )
+      const health = await ask<{
+        ok: boolean
+        network: string
+        rooms: number
+        online: number
+        dailyCapNim?: string
+      }>(target, '/health')
       demand(health.status === 200, `/health answered ${health.status}: ${health.raw}`)
       demand(health.body.ok === true, `/health answered ${health.raw}`)
       network = health.body.network
+      dailyCapNim = String(health.body.dailyCapNim ?? '')
 
       node = support.readNode(support.publicNodeFor(network))
       const head = await node.getLatestBlock()
@@ -1288,10 +1362,19 @@ async function runRemote(options: ProveOptions, run: Run, started: Date): Promis
       const echo = await ask<{ ip: string }>(target, '/api/echo-ip')
       demand(echo.status === 200, `/api/echo-ip answered ${echo.status}`)
       const seen = String(echo.body.ip)
+
+      // The only honest test of TRUST_PROXY is whether the world names the machine that
+      // called it. A hosting edge is not always a private address, so "does it look private"
+      // passed for months while every player was being counted as one household. This asks a
+      // service outside the deployment what this machine's address is and compares the two.
+      const mine = await egressAddress()
+      const label = looksLikeProxyHop(seen) ? ', a range no caller could arrive from' : ''
       demand(
-        !looksLikeProxyHop(seen),
-        `the world sees this caller as ${seen}, which is the hosting edge, so TRUST_PROXY is wrong ` +
-          `and the per-IP cap would count the whole internet as one household`,
+        seen === mine,
+        `the world sees this caller as ${seen}${label} and ${EGRESS_URL} sees this machine as ` +
+          `${mine}. The world is reading a hop on its own side, so the per-IP cap counts the ` +
+          `whole internet as one household. If both are really this machine, they left on ` +
+          `different address families`,
       )
 
       const map = await ask<{ version: string }>(target, '/api/world/map')
@@ -1300,7 +1383,8 @@ async function runRemote(options: ProveOptions, run: Run, started: Date): Promis
 
       return (
         `${network} at block ${head.number} through ${node.url}, ${health.body.rooms} room(s) and ` +
-        `${health.body.online} online, it reads this caller as ${seen}, map ${map.body.version}`
+        `${health.body.online} online, it reads this caller as ${seen}, which is this machine's own ` +
+        `address, map ${map.body.version}`
       )
     },
   )
@@ -1367,8 +1451,27 @@ async function runRemote(options: ProveOptions, run: Run, started: Date): Promis
     )
   })
 
+  // The cap itself cannot be crossed against a deployment without spending the deployment's
+  // whole daily allowance, but the number it is running can be read and held to what Ram
+  // meant to deploy. A cap that quietly went up is the same loss as a cap that is not there.
+  if (options.expectDailyCap === '') {
+    run.skip(
+      7,
+      'the deployment runs the daily cap Ram set',
+      `remote: pass --expect-daily-cap to hold it to a number. The deployment says ${dailyCapNim || 'nothing'}`,
+    )
+  } else {
+    await run.check(7, 'the deployment runs the daily cap Ram set', async () => {
+      demand(dailyCapNim !== '', '/health does not report dailyCapNim, so the cap cannot be read')
+      demand(
+        dailyCapNim === options.expectDailyCap,
+        `the deployment is running DAILY_CAP_NIM=${dailyCapNim} and this run expected ${options.expectDailyCap}`,
+      )
+      return `DAILY_CAP_NIM is ${dailyCapNim} NIM, which is what was expected`
+    })
+  }
+
   const capsAreTheHosts = 'remote: caps are configured on the host'
-  run.skip(7, 'the daily cap holds the claim that would cross it', capsAreTheHosts)
   run.skip(8, 'the third wallet claiming from one address is held', capsAreTheHosts)
   run.skip(9, 'the pool stops the claim that would spend past it', capsAreTheHosts)
 

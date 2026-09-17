@@ -1,7 +1,7 @@
 import { networkInterfaces } from 'node:os'
 import type { FastifyInstance } from 'fastify'
 import { buildApp } from './app.js'
-import { config, worldBootRefusal } from './config.js'
+import { config, proxyWarning, worldBootRefusal } from './config.js'
 import { openDb } from './db/client.js'
 import { applyMigrations } from './db/migrate.js'
 import { worldMap } from './routes/world.js'
@@ -20,6 +20,11 @@ if (refusal) {
   console.error(`the vettai world will not start: ${refusal}`)
   process.exit(1)
 }
+
+// Printed before the logger exists, so it is the first thing in the deploy log rather than
+// one line among the request noise.
+const warning = proxyWarning(config)
+if (warning) console.warn(`vettai world warning: ${warning}`)
 
 const handle = await openDb()
 const migrations = await applyMigrations(handle)

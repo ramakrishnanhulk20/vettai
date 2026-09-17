@@ -3,7 +3,14 @@
 // RPC URL answers: a well-formed URL pointing at nothing still passes here.
 
 import { describe, expect, it } from 'vitest'
-import { isTreasuryProcess, parseConfig, trustedProxies, worldBootRefusal } from '../src/config.js'
+import {
+  isTreasuryProcess,
+  parseConfig,
+  proxyWarning,
+  trustProxy,
+  trustedProxies,
+  worldBootRefusal,
+} from '../src/config.js'
 
 const ADDRESS = 'NQ66KBKYVKLD6J8HN23BY7MVPCT27X2DK54R'
 
@@ -75,6 +82,55 @@ describe('parseConfig', () => {
     expect(trustedProxies('   ')).toBe(false)
     expect(trustedProxies('loopback')).toEqual(['loopback'])
     expect(trustedProxies('uniquelocal, 10.0.0.0/8 ')).toEqual(['uniquelocal', '10.0.0.0/8'])
+  })
+
+  it('reads the edge hops as a whole number and defaults it to none', () => {
+    expect(parseConfig(environment()).TRUST_PROXY_EDGE_HOPS).toBe(0)
+    expect(parseConfig(environment({ TRUST_PROXY_EDGE_HOPS: '1' })).TRUST_PROXY_EDGE_HOPS).toBe(1)
+    expect(() => parseConfig(environment({ TRUST_PROXY_EDGE_HOPS: '-1' }))).toThrow(/EDGE_HOPS/)
+    expect(() => parseConfig(environment({ TRUST_PROXY_EDGE_HOPS: 'one' }))).toThrow(/EDGE_HOPS/)
+  })
+})
+
+describe('trustProxy', () => {
+  it('trusts nobody at all when no peer is named', () => {
+    expect(trustProxy(undefined, 1)).toBe(false)
+    expect(trustProxy('  ', 1)).toBe(false)
+  })
+
+  it('checks the peer against the list and then counts the platform hops', () => {
+    const trusts = trustProxy('100.64.0.0/10', 1)
+    if (trusts === false) throw new Error('a named peer should have given a predicate')
+
+    // Hop 0 is the machine that opened the socket.
+    expect(trusts('100.64.0.4', 0)).toBe(true)
+    expect(trusts('106.205.47.53', 0)).toBe(false)
+    // Hop 1 is the platform's own edge, and hop 2 is already the client.
+    expect(trusts('152.233.68.97', 1)).toBe(true)
+    expect(trusts('106.205.47.53', 2)).toBe(false)
+  })
+
+  it('trusts the peer alone when there is no edge beyond it', () => {
+    const trusts = trustProxy('loopback', 0)
+    if (trusts === false) throw new Error('a named peer should have given a predicate')
+
+    expect(trusts('127.0.0.1', 0)).toBe(true)
+    expect(trusts('152.233.68.97', 1)).toBe(false)
+  })
+})
+
+describe('proxyWarning', () => {
+  it('says so loudly when mainnet is running with nobody trusted', () => {
+    const warning = proxyWarning({ NIMIQ_NETWORK: 'MainAlbatross', TRUST_PROXY: undefined })
+
+    expect(warning).toMatch(/TRUST_PROXY/)
+    expect(warning).toMatch(/IP_WALLETS_PER_DAY/)
+    expect(warning).toMatch(/one household/)
+  })
+
+  it('stays quiet on a testnet, and on a mainnet that names its peer', () => {
+    expect(proxyWarning({ NIMIQ_NETWORK: 'TestAlbatross', TRUST_PROXY: undefined })).toBeNull()
+    expect(proxyWarning({ NIMIQ_NETWORK: 'MainAlbatross', TRUST_PROXY: '100.64.0.0/10' })).toBeNull()
   })
 })
 

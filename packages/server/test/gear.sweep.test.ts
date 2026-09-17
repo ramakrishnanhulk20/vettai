@@ -96,6 +96,13 @@ describe('handing out gear that has been paid for', () => {
     const player = rooms.roomFor(address)?.state.players.get(address)
     expect(player?.gear.blaster).toBe('mk2')
 
+    // Shots from inside the office circle are refused, so step out of it first.
+    const room = rooms.roomFor(address)
+    if (!room) throw new Error("that player is not in the world")
+    const moved = new Map(room.state.players)
+    moved.set(address, { ...room.state.players.get(address)!, x: map.office.x, z: map.office.z - 20 })
+    room.write({ ...room.state, players: moved })
+
     // The mk2 is the faster blaster: the simulation takes six shots in a second where the
     // starting mk1 stops at four, and it is the room's copy of the gear that decides.
     for (let shot = 0; shot < 6; shot += 1) fire()

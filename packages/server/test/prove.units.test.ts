@@ -13,6 +13,7 @@ import {
   looksLikeProxyHop,
   proofFileName,
   readArguments,
+  readEgressAddress,
   summaryLine,
   type CheckLine,
 } from '../src/cli/prove.js'
@@ -107,7 +108,7 @@ describe('proofFileName, for a run against a deployment', () => {
 
 describe('readArguments', () => {
   it('runs the local world when nothing names a deployment', () => {
-    expect(readArguments([], {})).toEqual({ mode: 'local', origin: '', fund: false })
+    expect(readArguments([], {})).toEqual({ mode: 'local', origin: '', fund: false, expectDailyCap: '' })
   })
 
   it('takes --url as the deployment to prove and keeps only its origin', () => {
@@ -115,6 +116,7 @@ describe('readArguments', () => {
       mode: 'remote',
       origin: 'https://world.up.railway.app',
       fund: false,
+      expectDailyCap: '',
     })
   })
 
@@ -128,6 +130,12 @@ describe('readArguments', () => {
     expect(readArguments(['--url', 'https://a.example'], {}).fund).toBe(false)
   })
 
+  it('carries the daily cap a deployment is expected to be running', () => {
+    const asked = readArguments(['--url', 'https://a.example', '--expect-daily-cap', '5'], {})
+    expect(asked.expectDailyCap).toBe('5')
+    expect(readArguments(['--url', 'https://a.example'], {}).expectDailyCap).toBe('')
+  })
+
   it('refuses a --url that is not an http address, rather than guessing one', () => {
     expect(() => readArguments(['--url', 'railway.app'], {})).toThrow(/not a URL/)
     expect(() => readArguments(['--url', 'ftp://world.example'], {})).toThrow(/http or https/)
@@ -136,17 +144,34 @@ describe('readArguments', () => {
 })
 
 describe('looksLikeProxyHop', () => {
-  it('knows the ranges a hosting edge gives itself', () => {
+  it('knows every range no caller could have arrived from', () => {
     expect(looksLikeProxyHop('100.64.0.7')).toBe(true)
     expect(looksLikeProxyHop('100.127.255.254')).toBe(true)
     expect(looksLikeProxyHop('10.250.1.1')).toBe(true)
+    expect(looksLikeProxyHop('172.16.0.1')).toBe(true)
+    expect(looksLikeProxyHop('172.31.255.254')).toBe(true)
+    expect(looksLikeProxyHop('192.168.1.20')).toBe(true)
+    expect(looksLikeProxyHop('127.0.0.1')).toBe(true)
   })
 
   it('leaves a real caller alone, including the edges of those ranges', () => {
     expect(looksLikeProxyHop('100.63.255.255')).toBe(false)
     expect(looksLikeProxyHop('100.128.0.1')).toBe(false)
+    expect(looksLikeProxyHop('172.15.0.1')).toBe(false)
+    expect(looksLikeProxyHop('172.32.0.1')).toBe(false)
+    expect(looksLikeProxyHop('192.169.0.1')).toBe(false)
     expect(looksLikeProxyHop('86.19.4.2')).toBe(false)
+    expect(looksLikeProxyHop('152.233.19.4')).toBe(false)
     expect(looksLikeProxyHop('2a02:c7c:1::1')).toBe(false)
     expect(looksLikeProxyHop('')).toBe(false)
+  })
+})
+
+describe('readEgressAddress', () => {
+  it('takes the one address the service prints, and nothing else', () => {
+    expect(readEgressAddress('  86.19.4.2  ')).toBe('86.19.4.2')
+    expect(readEgressAddress(' 2a02:c7c:1::1 ')).toBe('2a02:c7c:1::1')
+    expect(() => readEgressAddress('<html>rate limited</html>')).toThrow(/not an address/)
+    expect(() => readEgressAddress('')).toThrow(/not an address/)
   })
 })

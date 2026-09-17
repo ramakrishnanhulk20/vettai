@@ -113,9 +113,21 @@ export const claims = pgTable(
     memo: text('memo').notNull(),
     txHash: text('tx_hash').unique(),
     blockNumber: integer('block_number'),
+    /**
+     * The height the signed transaction was built at, written beside the hash. It is what
+     * says when the chain's validity window has closed, which is the only moment a payout
+     * with a hash can be rebuilt without risking two payments.
+     */
+    validityStartHeight: bigint('validity_start_height', { mode: 'number' }),
     ipHash: text('ip_hash'),
     /** How many times this payout has been rebuilt from scratch. Three is the end of the road. */
     attempts: integer('attempts').notNull().default(0),
+    /**
+     * When a payout that failed before it was ever signed may be picked up again. Nothing
+     * reached the chain, so this is a wait on a node that hiccupped, not a penalty: it
+     * starts at two minutes and doubles up to thirty.
+     */
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }),
     /**
      * When a held payout is worth looking at again. A cap is a delay, so a claim the daily
      * or the IP cap stopped waits for the next UTC midnight rather than being forfeited.
@@ -136,7 +148,7 @@ export const claims = pgTable(
     check('claims_kind', sql`${table.kind} in ('hunt', 'courier', 'landmarks', 'landlord', 'streak', 'ladder')`),
     check(
       'claims_state',
-      sql`${table.state} in ('queued', 'sending', 'sent', 'paid', 'failed', 'held')`,
+      sql`${table.state} in ('queued', 'sending', 'sent', 'paid', 'failed', 'held', 'cancelled')`,
     ),
     check('claims_amount_luna', sql`${table.amountLuna} > 0`),
     check('claims_attempts', sql`${table.attempts} >= 0`),
@@ -168,6 +180,11 @@ export const shopOrders = pgTable(
   },
   (table) => [
     index('shop_orders_address_idx').on(table.address),
+    // One live order per wallet per item. Without this a player who taps buy twice ends up
+    // with two memos for one purchase and pays whichever one their phone shows last.
+    uniqueIndex('shop_orders_one_pending_per_item')
+      .on(table.address, table.item)
+      .where(sql`state = 'pending'`),
     check('shop_orders_state', sql`${table.state} in ('pending', 'paid', 'expired')`),
     check('shop_orders_price_luna', sql`${table.priceLuna} > 0`),
     check('shop_orders_memo_len', sql`octet_length(${table.memo}) between 1 and 64`),

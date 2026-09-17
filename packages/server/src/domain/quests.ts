@@ -288,6 +288,57 @@ async function lockQuest(
   return row
 }
 
+/**
+ * The same row with no lock on it, for deciding whether an event is worth a lock at all.
+ * A flood of useless interacts would otherwise queue up behind FOR UPDATE and hold the
+ * batch open for everybody else in the room.
+ */
+async function peekQuest(
+  tx: Tx,
+  address: string,
+  day: string,
+  kind: QuestKind,
+): Promise<Quest | undefined> {
+  const [row] = await tx
+    .select()
+    .from(quests)
+    .where(and(eq(quests.address, address), eq(quests.day, day), eq(quests.kind, kind)))
+    .limit(1)
+
+  return row
+}
+
+/** Which quest an event belongs to. */
+function questFor(event: QuestEvent): QuestKind {
+  if (event.kind === 'kill') return 'hunt'
+  if (event.kind === 'landmark') return 'landmarks'
+  return 'courier'
+}
+
+/**
+ * True when this event could still change this row. The pre-read and the locked read are
+ * both judged by it, so the cheap look and the real one can never disagree about what
+ * counts: the lock only settles who gets there first.
+ */
+function canChange(quest: Quest | undefined, event: QuestEvent): boolean {
+  if (!quest) return false
+
+  if (event.kind === 'kill') return quest.progress < HUNT_PROGRESS_CAP
+  if (quest.state !== 'open') return false
+
+  if (event.kind === 'pickup' || event.kind === 'deliver') {
+    const detail = courierDetail(quest)
+    if (!detail) return false
+    if (event.kind === 'pickup') return event.point === detail.from
+    return event.point === detail.to && detail.pickedUpAt !== null
+  }
+
+  if (!Number.isInteger(event.index) || event.index < 0 || event.index >= LANDMARK_COUNT) {
+    return false
+  }
+  return !visitedLandmarks(quest).includes(event.index)
+}
+
 function markDone(now: Date): { state: 'done'; doneAt: Date } {
   return { state: 'done', doneAt: now }
 }
@@ -313,22 +364,23 @@ async function applyEventIn(
   now: Date,
 ): Promise<Quest[]> {
   const day = utcDay(now)
+  const kind = questFor(event)
+
+  const seen = await peekQuest(tx, address, day, kind)
+  if (!canChange(seen, event)) return []
+
+  const quest = await lockQuest(tx, address, day, kind)
+  if (!quest || !canChange(quest, event)) return []
 
   if (event.kind === 'kill') {
-    const quest = await lockQuest(tx, address, day, 'hunt')
-    if (!quest || quest.progress >= HUNT_PROGRESS_CAP) return []
-
     const progress = quest.progress + 1
     const finishes = quest.state === 'open' && progress >= quest.target
     return save(tx, quest.id, { progress, ...(finishes ? markDone(now) : {}) })
   }
 
   if (event.kind === 'pickup') {
-    const quest = await lockQuest(tx, address, day, 'courier')
-    if (!quest || quest.state !== 'open') return []
-
     const detail = courierDetail(quest)
-    if (!detail || event.point !== detail.from) return []
+    if (!detail) return []
 
     return save(tx, quest.id, {
       detail: { ...detail, pickedUpAt: Math.floor(now.getTime() / 1000) },
@@ -336,12 +388,8 @@ async function applyEventIn(
   }
 
   if (event.kind === 'deliver') {
-    const quest = await lockQuest(tx, address, day, 'courier')
-    if (!quest || quest.state !== 'open') return []
-
     const detail = courierDetail(quest)
-    if (!detail || event.point !== detail.to) return []
-    if (detail.pickedUpAt === null) return []
+    if (!detail || detail.pickedUpAt === null) return []
 
     const carriedFor = now.getTime() - detail.pickedUpAt * 1000
     if (carriedFor > COURIER_WINDOW_MS) {
@@ -353,14 +401,7 @@ async function applyEventIn(
     return save(tx, quest.id, { progress: COURIER_TARGET, ...markDone(now) })
   }
 
-  const quest = await lockQuest(tx, address, day, 'landmarks')
-  if (!quest || quest.state !== 'open') return []
-  if (!Number.isInteger(event.index) || event.index < 0 || event.index >= LANDMARK_COUNT) return []
-
-  const visited = visitedLandmarks(quest)
-  if (visited.includes(event.index)) return []
-
-  const reached = [...visited, event.index]
+  const reached = [...visitedLandmarks(quest), event.index]
   const finishes = reached.length >= quest.target
   return save(tx, quest.id, {
     progress: reached.length,

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { and, eq, lt, sql } from 'drizzle-orm'
+import { and, eq, gt, lt, ne, sql } from 'drizzle-orm'
 import type { Db } from '../db/client.js'
 import { isUniqueViolation } from '../db/errors.js'
 import { players, shopOrders, type Gear, type ShopOrder } from '../db/schema.js'
@@ -71,27 +71,90 @@ export function expiresAt(order: ShopOrder): Date {
   return new Date(order.createdAt.getTime() + ORDER_TTL_MS)
 }
 
-/** What the state really is right now: a pending order past its half hour is gone. */
+/**
+ * What the state really is at a given moment.
+ *
+ * Only `paid` is the end of the road. Everything else is judged against the clock it is
+ * given, `expired` included, because the row may have been closed by a sweep at one moment
+ * and then asked about again with the time a payment was actually mined. A player whose
+ * money reached the chain inside the half hour bought the gear, however late the treasury
+ * got round to reading it.
+ */
 export function effectiveState(order: ShopOrder, now: Date = new Date()): OrderState {
-  const stored = order.state as OrderState
-  if (stored !== 'pending') return stored
+  if ((order.state as OrderState) === 'paid') return 'paid'
   return expiresAt(order).getTime() <= now.getTime() ? 'expired' : 'pending'
 }
 
 export type CreateOrderInput = { address: string; item: ShopItemId; now?: Date }
 
+function asCreated(order: ShopOrder): CreatedOrder {
+  return {
+    id: order.id,
+    item: order.item as ShopItemId,
+    priceLuna: order.priceLuna,
+    memo: order.memo,
+    expiresAt: expiresAt(order),
+  }
+}
+
+/** This wallet's live pending order for one item, or nothing when there is none. */
+async function livePendingOrder(
+  db: Db,
+  address: string,
+  item: ShopItemId,
+  since: Date,
+): Promise<ShopOrder | undefined> {
+  const [row] = await db
+    .select()
+    .from(shopOrders)
+    .where(
+      and(
+        eq(shopOrders.address, address),
+        eq(shopOrders.item, item),
+        eq(shopOrders.state, 'pending'),
+        gt(shopOrders.createdAt, since),
+      ),
+    )
+    .limit(1)
+
+  return row
+}
+
 /**
  * Opens an order and hands back what the phone needs to pay it: the amount and the memo.
  *
- * The id is minted here rather than by the database because the memo is cut from it and
- * the memo has to be unique. A memo that collided with a live order would hand the gear
- * to whoever paid second, so a collision is retried with a new id instead.
+ * A wallet that already has a live order for the same item gets that one back, memo and all.
+ * Tapping buy twice is one purchase in a player's head, and two memos would mean paying
+ * twice for one blaster. The database holds that rule as a partial unique index, so two
+ * requests arriving together cannot both open one either.
+ *
+ * The id is minted here rather than by the database because the memo is cut from it and the
+ * memo has to be unique. A memo that collided with a live order would hand the gear to
+ * whoever paid second, so a collision is retried with a new id instead.
  */
 export async function createOrder(db: Db, input: CreateOrderInput): Promise<CreatedOrder> {
   const item = items[input.item]
   if (!item) throw new Error(`${String(input.item)} is not in the shop`)
 
   const now = input.now ?? new Date()
+  const since = new Date(now.getTime() - ORDER_TTL_MS)
+
+  // A pending row nobody paid in time is closed first, so the index below only ever stands
+  // between a player and an order that is still payable.
+  await db
+    .update(shopOrders)
+    .set({ state: 'expired' })
+    .where(
+      and(
+        eq(shopOrders.address, input.address),
+        eq(shopOrders.item, item.id),
+        eq(shopOrders.state, 'pending'),
+        lt(shopOrders.createdAt, since),
+      ),
+    )
+
+  const live = await livePendingOrder(db, input.address, item.id, since)
+  if (live) return asCreated(live)
 
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const id = randomUUID()
@@ -112,9 +175,14 @@ export async function createOrder(db: Db, input: CreateOrderInput): Promise<Crea
 
       if (!row) throw new Error('the order was not written')
 
-      return { id: row.id, item: item.id, priceLuna: item.priceLuna, memo, expiresAt: expiresAt(row) }
+      return asCreated(row)
     } catch (error) {
       if (!isUniqueViolation(error)) throw error
+
+      // Either the memo collided, which the next id fixes, or another request opened this
+      // wallet's order a moment ago, which is the one to hand back.
+      const raced = await livePendingOrder(db, input.address, item.id, since)
+      if (raced) return asCreated(raced)
     }
   }
 
@@ -200,10 +268,13 @@ export async function markPaid(db: Db, input: MarkPaidInput): Promise<MarkPaidRe
   if (input.valueLuna < order.priceLuna) return { ok: false, reason: 'short payment', orderId: order.id }
 
   return db.transaction(async (tx) => {
+    // Anything that is not already paid may still be paid, because a row closed by the
+    // expiry sweep can turn out to have been paid on time. `paid` is what makes a replay a
+    // no-op rather than a second grant.
     const [claimed] = await tx
       .update(shopOrders)
       .set({ state: 'paid', txHash: input.txHash, blockNumber: input.blockNumber, paidAt: now })
-      .where(and(eq(shopOrders.id, order.id), eq(shopOrders.state, 'pending')))
+      .where(and(eq(shopOrders.id, order.id), ne(shopOrders.state, 'paid')))
       .returning({ id: shopOrders.id })
 
     if (!claimed) return { ok: false, reason: 'already paid', orderId: order.id }

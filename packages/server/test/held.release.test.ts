@@ -132,7 +132,7 @@ describe('a held claim waits rather than disappearing', () => {
     expect((await claimRow(held.claimId))?.state).toBe('queued')
   })
 
-  it('frees a pool hold on the very next pass once there is room again', async () => {
+  it('frees a pool hold on the very next pass once a payout is cancelled', async () => {
     const limits: Limits = { ...CAP, poolTotalLuna: nimToLuna('0.6') }
 
     const spender = randomAddress()
@@ -142,9 +142,17 @@ describe('a held claim waits rather than disappearing', () => {
     const held = await claimFor(player, '0.3', NOW, limits)
     expect(held).toMatchObject({ state: 'held', reason: 'pool' })
 
+    // A failed payout is still owed, so it keeps its room in the pool. Only cancelling it,
+    // which is Ram's decision and nobody else's, gives the room back.
     await db.update(claims).set({ state: 'failed' }).where(eq(claims.id, committed.claimId))
 
-    expect(await releaseHeld(db, new Date(NOW.getTime() + 60_000), limits)).toEqual({
+    const stillShort = await releaseHeld(db, new Date(NOW.getTime() + 60_000), limits)
+    expect(stillShort).toEqual({ released: 0, stillHeld: 1 })
+    expect((await claimRow(held.claimId))?.heldUntil).toBeNull()
+
+    await db.update(claims).set({ state: 'cancelled' }).where(eq(claims.id, committed.claimId))
+
+    expect(await releaseHeld(db, new Date(NOW.getTime() + 120_000), limits)).toEqual({
       released: 1,
       stillHeld: 0,
     })

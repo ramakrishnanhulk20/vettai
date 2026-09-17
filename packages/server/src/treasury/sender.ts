@@ -25,6 +25,9 @@ export type SenderRpc = {
   getBlockNumber: () => Promise<number>
   pushTransaction: (rawHex: string) => Promise<string>
   fetchTransaction: (hash: string) => Promise<ChainTransaction | null>
+  getAccountByAddress: (address: string) => Promise<{ balance: number }>
+  mempoolHas: (hash: string) => Promise<boolean>
+  listOutgoing: (address: string, sinceBlock: number) => Promise<ChainTransaction[]>
 }
 
 export type SendInput = {
@@ -32,12 +35,25 @@ export type SendInput = {
   valueLuna: bigint
   memo: string
   /**
-   * Called with the hash after signing and before the broadcast, so the caller can write
-   * the hash down first. A payment whose hash was never saved is a payment nobody can
-   * look up afterwards, and looking it up is the only safe alternative to sending again.
+   * Called with the hash and the height it was built at, after signing and before the
+   * broadcast, so the caller can write both down first. A payment whose hash was never
+   * saved is a payment nobody can look up afterwards, and the height is what later says
+   * whether the chain could still accept it.
    */
-  onSigned?: (hash: string) => Promise<void> | void
+  onSigned?: (hash: string, validityStartHeight: number) => Promise<void> | void
 }
+
+/**
+ * How long the chain will accept a transaction built at a given height:
+ * TRANSACTION_VALIDITY_WINDOW_BLOCKS on @nimiq/core 2.21.0, at roughly one block a second.
+ */
+export const VALIDITY_WINDOW_BLOCKS = 7200
+
+/**
+ * The blocks a payment has to be buried under before the treasury calls it final. It is
+ * BLOCKS_PER_BATCH on Albatross: one full batch on top of the block that carries it.
+ */
+export const FINALITY_BLOCKS = 60
 
 export type Inclusion = { blockNumber: number } | { pending: true }
 
@@ -46,13 +62,24 @@ export type Inclusion = { blockNumber: number } | { pending: true }
  * things to money. In a block is settled. Pending is "ask again". Unknown is the only one
  * that says nothing was ever accepted, and it is the only one a payout may be rebuilt on.
  */
-export type Lookup = { blockNumber: number } | { pending: true } | { unknown: true }
+export type Lookup =
+  | { blockNumber: number; confirmations?: number }
+  | { pending: true }
+  | { unknown: true }
 
 export type Sender = {
   address: string
   send: (input: SendInput) => Promise<{ hash: string }>
   waitInclusion: (hash: string, timeoutMs?: number) => Promise<Inclusion>
   lookup: (hash: string) => Promise<Lookup>
+  /** The head of the chain, which is how far the validity window and finality are measured. */
+  head: () => Promise<number>
+  /** What the treasury wallet holds right now, in luna. */
+  balanceLuna: () => Promise<bigint>
+  /** True when the node still holds this hash, and true again when it could not say. */
+  mempoolHas: (hash: string) => Promise<boolean>
+  /** Everything this wallet has paid out since a block, memos included. */
+  outgoingSince: (sinceBlock: number) => Promise<ChainTransaction[]>
 }
 
 export type SenderOptions = {
@@ -131,12 +158,26 @@ export function createSender(options: SenderOptions): Sender {
       })
 
       const hash = transaction.hash()
-      await input.onSigned?.(hash)
+      await input.onSigned?.(hash, validityStartHeight)
 
       await options.rpc.pushTransaction(Buffer.from(transaction.serialize()).toString('hex'))
 
       return { hash }
     },
+
+    head: () => options.rpc.getBlockNumber(),
+
+    async balanceLuna(): Promise<bigint> {
+      const account = await options.rpc.getAccountByAddress(address)
+      if (!Number.isInteger(account.balance) || account.balance < 0) {
+        throw new Error(`the node reported a balance of ${account.balance}, which is not whole luna`)
+      }
+      return BigInt(account.balance)
+    },
+
+    mempoolHas: (hash: string) => options.rpc.mempoolHas(hash),
+
+    outgoingSince: (sinceBlock: number) => options.rpc.listOutgoing(address, sinceBlock),
 
     /**
      * Asks the node about one hash, once.
@@ -156,7 +197,11 @@ export function createSender(options: SenderOptions): Sender {
       }
 
       if (!found) return { unknown: true }
-      return found.blockNumber > 0 ? { blockNumber: found.blockNumber } : { pending: true }
+      if (found.blockNumber <= 0) return { pending: true }
+
+      return found.confirmations !== undefined && found.confirmations > 0
+        ? { blockNumber: found.blockNumber, confirmations: found.confirmations }
+        : { blockNumber: found.blockNumber }
     },
 
     /**

@@ -68,7 +68,7 @@ afterEach(async () => {
   await app.close()
 })
 
-type Joined = { address: string; client: TestClient }
+type Joined = { address: string; handle: string; client: TestClient }
 
 async function ticketFor(wallet: KeyPair): Promise<{ address: string; ticket: string }> {
   const signedIn = await signIn(app, wallet)
@@ -85,11 +85,16 @@ async function joinWorld(wallet: KeyPair = KeyPair.generate()): Promise<Joined> 
   const { address, ticket } = await ticketFor(wallet)
   const client = await openSocket(`${base}/ws?ticket=${ticket}`)
   open.push(client)
-  await client.waitForKind('welcome')
-  return { address, client }
+  const welcome = await client.waitForKind('welcome')
+  const you = welcome['you'] as { handle: string; address: string }
+  return { address, handle: you.handle, client }
 }
 
-/** Puts a wounded drone right in front of a player, so one shot is one kill. */
+/**
+ * Puts a wounded drone right in front of a player, so one shot is one kill. The player is
+ * stood twenty metres down the street from the board first: nobody may fire from inside the
+ * no-fire circle, and the spawn is in it.
+ */
 function droneInFrontOf(address: string, id: string): void {
   const room = rooms.roomFor(address)
   if (!room) throw new Error('that player is in no room')
@@ -97,11 +102,12 @@ function droneInFrontOf(address: string, id: string): void {
   const player = room.state.players.get(address)
   if (!player) throw new Error('that player is not in the world')
 
+  const at = { x: map.office.x, z: map.office.z - 20 }
   const drone: DroneState = {
     id,
-    x: player.x,
+    x: at.x,
     y: 1.6,
-    z: player.z + 3,
+    z: at.z + 3,
     yaw: 0,
     hp: 1,
     state: 'patrol',
@@ -116,7 +122,7 @@ function droneInFrontOf(address: string, id: string): void {
   }
 
   const players = new Map(room.state.players)
-  players.set(address, { ...player, shield: 3, downedUntil: 0 })
+  players.set(address, { ...player, x: at.x, z: at.z, shield: 3, downedUntil: 0 })
 
   room.write({ ...room.state, players, drones: new Map([[drone.id, drone]]), bolts: [] })
 }
@@ -139,20 +145,42 @@ describe('the ticket gate', () => {
 
 describe('the welcome', () => {
   it('hands a new player the map version, the drones and the day set of quests', async () => {
-    const { address, client } = await joinWorld()
+    const { address, handle, client } = await joinWorld()
 
     const welcome = client.frames.find((frame) => frame.t === 'welcome')
-    expect(welcome).toMatchObject({ v: 1, you: address, room: 'r1', mapVersion: map.version })
+    expect(welcome).toMatchObject({
+      v: 1,
+      you: { handle, address },
+      room: 'r1',
+      mapVersion: map.version,
+    })
     // The client resets its move counter from this, so a reconnect never replays old moves.
     expect(welcome?.['youSeq']).toBe(0)
-    expect(welcome?.['drones']).toHaveLength(12)
-    const joinedPlayers = welcome?.['players'] as { seq: number }[]
+    expect(welcome?.['drones']).toHaveLength(2)
+    const joinedPlayers = welcome?.['players'] as { id: string; seq: number }[]
     expect(joinedPlayers).toHaveLength(1)
+    // The player is named by the handle from `you`, not by the wallet behind it.
+    expect(joinedPlayers[0]?.id).toBe(handle)
     // Nothing has been sent yet, so the client has no input of its own to replay.
     expect(joinedPlayers[0]?.seq).toBe(0)
 
     const questKinds = (welcome?.['quests'] as { kind: string }[]).map((quest) => quest.kind)
     expect(questKinds.sort()).toEqual(['courier', 'hunt', 'landmarks', 'streak'])
+  })
+
+  it('never puts another player wallet on the wire', async () => {
+    const mine = await joinWorld()
+    const theirs = await joinWorld()
+
+    await mine.client.waitFor((frame) => {
+      if (frame.t !== 'state') return false
+      const players = frame['players'] as { id: string }[]
+      return players.some((player) => player.id === theirs.handle)
+    })
+
+    const seen = mine.client.frames.filter((frame) => frame.t !== 'welcome')
+    expect(JSON.stringify(seen)).not.toContain(theirs.address)
+    expect(JSON.stringify(seen)).not.toContain(mine.address)
   })
 
   it('starts sending the world every tick', async () => {
@@ -178,14 +206,14 @@ describe('the welcome', () => {
 
 describe('moving', () => {
   it('shows the player somewhere new in the next state', async () => {
-    const { address, client } = await joinWorld()
+    const { handle, client } = await joinWorld()
 
     client.send({ t: 'move', seq: 1, dx: 0, dz: 1, yaw: 0 })
 
     const moved = await client.waitFor((frame) => {
       if (frame.t !== 'state') return false
       const players = frame['players'] as { id: string; z: number }[]
-      return players.some((player) => player.id === address && player.z > map.spawn.z)
+      return players.some((player) => player.id === handle && player.z > map.spawn.z)
     })
 
     expect(moved['tick']).toBeGreaterThan(0)
@@ -234,12 +262,12 @@ describe('shooting', () => {
       // The shot and the kill happen in the same tick, so they ride out on one state frame.
       const inTick = await mine.client.waitForTickEvents('kill')
       expect(inTick.find((event) => event.kind === 'hit')).toMatchObject({
-        player: mine.address,
+        player: mine.handle,
         drone: `t${kill}`,
         damage: 1,
       })
       expect(inTick.find((event) => event.kind === 'kill')).toMatchObject({
-        player: mine.address,
+        player: mine.handle,
         drone: `t${kill}`,
       })
 

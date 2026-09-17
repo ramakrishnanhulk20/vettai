@@ -11,7 +11,7 @@ import type { Building, Lot, PatrolLoop, Place, WorldMap } from './types.js'
  */
 
 /** Bump this when the shape of the map changes, so a stale client refuses to draw it. */
-const GENERATOR_VERSION = 2
+const GENERATOR_VERSION = 3
 
 export const LOTS_PER_SIDE = 12
 export const LOT_SIZE = 16
@@ -22,6 +22,20 @@ const HALF = MAP_SIZE / 2
 
 /** Drones fly their loops at this height, above heads and below the roofs. */
 export const PATROL_Y = 6
+
+/**
+ * The quest board stands in a no-fire circle this wide. Nothing may shoot into it and
+ * nobody may shoot out of it, so it is a place to read the board from and come back at,
+ * never a place to camp from.
+ */
+export const OFFICE_SAFE_RADIUS = 10
+
+/**
+ * How far a patrol waypoint has to stay from the board. A drone that flew into the circle
+ * could be taken apart by a player standing in the one spot nothing is allowed to shoot
+ * back at, which is a farm rather than a fight.
+ */
+const PATROL_BOARD_CLEARANCE = OFFICE_SAFE_RADIUS + 4
 
 const BUILDING_SHARE = 0.6
 const PARK_SHARE = 0.15
@@ -73,6 +87,42 @@ function crossing(lot: Lot): Place {
   return { x: streetCentre(lot[0]), z: streetCentre(lot[1]) }
 }
 
+const OFFICE_LOT: Lot = [CENTRE_LOT, CENTRE_LOT]
+const OFFICE = crossing(OFFICE_LOT)
+
+function insideGrid(index: number): number {
+  return Math.min(LOTS_PER_SIDE - 1, Math.max(0, index))
+}
+
+/** The same lot, or one stepped away from the board when its crossing is inside the circle. */
+function clearOfBoard(lot: Lot): Lot {
+  if (Math.hypot(crossing(lot).x - OFFICE.x, crossing(lot).z - OFFICE.z) >= PATROL_BOARD_CLEARANCE) {
+    return lot
+  }
+
+  // Crossings are a whole cell apart, so only the board's own lot can be this close and one
+  // step out of it is 24 m, which always clears the circle. A lot on the centre goes east.
+  const alongI = Math.sign(lot[0] - OFFICE_LOT[0])
+  const alongJ = Math.sign(lot[1] - OFFICE_LOT[1])
+  const stepI = alongI === 0 && alongJ === 0 ? 1 : alongI
+  return [insideGrid(lot[0] + stepI), insideGrid(lot[1] + alongJ)]
+}
+
+/** Drops a waypoint that repeats the one before it, and a last one that repeats the first. */
+function withoutRepeats(lots: Lot[]): Lot[] {
+  const kept: Lot[] = []
+  for (const lot of lots) {
+    const last = kept[kept.length - 1]
+    if (last && last[0] === lot[0] && last[1] === lot[1]) continue
+    kept.push(lot)
+  }
+
+  const first = kept[0]
+  const end = kept[kept.length - 1]
+  if (kept.length > 1 && first && end && first[0] === end[0] && first[1] === end[1]) kept.pop()
+  return kept
+}
+
 function shuffle(lots: Lot[], rng: () => number): void {
   for (let n = lots.length - 1; n > 0; n--) {
     const swap = Math.floor(rng() * (n + 1))
@@ -107,12 +157,15 @@ function pickType(i: number, j: number, types: Map<number, number>, rng: () => n
 
 /**
  * A loop around one quarter of the block: eight waypoints, every one of them a street
- * crossing, so a drone flying the loop never crosses a roof.
+ * crossing, so a drone flying the loop never crosses a roof. None of them sits inside the
+ * board's circle, and no two in a row are the same place.
  */
 function patrolLoop(quadrant: [number, number, number, number], rng: () => number): PatrolLoop {
   const [baseI1, i2, baseJ1, j2] = quadrant
-  const i1 = baseI1 + Math.floor(rng() * 2)
-  const j1 = baseJ1 + Math.floor(rng() * 2)
+  // The jitter may not eat the whole span. With fewer than two cells between the corners
+  // the midpoint lands on a corner, and the loop then asks a drone to fly where it is.
+  const i1 = Math.min(baseI1 + Math.floor(rng() * 2), i2 - 2)
+  const j1 = Math.min(baseJ1 + Math.floor(rng() * 2), j2 - 2)
   const im = Math.floor((i1 + i2) / 2)
   const jm = Math.floor((j1 + j2) / 2)
   const corners: Lot[] = [
@@ -125,7 +178,7 @@ function patrolLoop(quadrant: [number, number, number, number], rng: () => numbe
     [i1, j2],
     [i1, jm],
   ]
-  return corners.map(crossing)
+  return withoutRepeats(corners.map(clearOfBoard)).map(crossing)
 }
 
 function courierPoint(lot: Lot, index: number, rng: () => number): Place {
@@ -168,7 +221,7 @@ export function generateMap(seed: string): WorldMap {
     }
   }
 
-  const office = crossing([CENTRE_LOT, CENTRE_LOT])
+  const office = OFFICE
   const shop = crossing([CENTRE_LOT + 2, CENTRE_LOT])
   /**
    * In tour order, near first. Two sit in the middle ring and two on the far corners, which

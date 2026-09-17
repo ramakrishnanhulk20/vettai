@@ -82,7 +82,7 @@ describe('generateMap', () => {
   })
 
   it('stamps a version that moves with the seed', () => {
-    expect(map.version).toMatch(/^2-[0-9a-z]+$/)
+    expect(map.version).toMatch(/^3-[0-9a-z]+$/)
     expect(generateMap('vettai-2').version).not.toBe(map.version)
   })
 
@@ -205,6 +205,30 @@ describe('generateMap', () => {
       for (const waypoint of loop) {
         expect(CENTRE_LINES).toContain(waypoint.x)
         expect(CENTRE_LINES).toContain(waypoint.z)
+      }
+    }
+  })
+
+  it('keeps every patrol waypoint out of the board circle, on the seed the server ships', () => {
+    const shipped = generateMap('vettai-1')
+
+    for (const loop of shipped.patrols) {
+      for (const waypoint of loop) {
+        const gap = Math.hypot(waypoint.x - shipped.office.x, waypoint.z - shipped.office.z)
+        expect(gap).toBeGreaterThanOrEqual(14)
+      }
+    }
+  })
+
+  it('never asks a drone to fly to the waypoint it is already on', () => {
+    for (const seed of ['vettai-1', 'vettai-2', 'vettai-test', 'vettai-property']) {
+      for (const loop of generateMap(seed).patrols) {
+        for (let index = 0; index < loop.length; index++) {
+          const here = loop[index]
+          const next = loop[(index + 1) % loop.length]
+          if (!here || !next) throw new Error('a patrol loop has a hole in it')
+          expect(`${here.x},${here.z}`).not.toBe(`${next.x},${next.z}`)
+        }
       }
     }
   })

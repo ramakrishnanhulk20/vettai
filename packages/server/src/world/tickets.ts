@@ -25,15 +25,36 @@ type Issued = { address: string; expiresAt: number }
 
 const live = new Map<string, Issued>()
 
+/** How often the unspent ones are swept out, so a ticket nobody redeems is not a slow leak. */
+export const SWEEP_EVERY_MS = 30_000
+
+let sweeper: ReturnType<typeof setTimeout> | null = null
+
 function sweep(now: number): void {
   for (const [ticket, issued] of live) {
     if (issued.expiresAt <= now) live.delete(ticket)
   }
 }
 
+/**
+ * Keeps one timer alive while any ticket is outstanding, and lets it go when the last one
+ * has been swept. It is unref'd, so the sweep is never the reason a process stays up.
+ */
+function scheduleSweep(): void {
+  if (sweeper !== null) return
+
+  sweeper = setTimeout(() => {
+    sweeper = null
+    sweep(Date.now())
+    if (live.size > 0) scheduleSweep()
+  }, SWEEP_EVERY_MS)
+  sweeper.unref?.()
+}
+
 /** Hands out a pass for one wallet. The caller has already proven it holds that wallet. */
 export function issueTicket(address: string, now: number = Date.now()): string {
   sweep(now)
+  scheduleSweep()
 
   const ticket = `${TICKET_PREFIX}${randomBytes(TICKET_BYTES).toString('hex')}`
   live.set(ticket, { address, expiresAt: now + TICKET_TTL_MS })
@@ -46,6 +67,8 @@ export function issueTicket(address: string, now: number = Date.now()): string {
  * answer is built, so two upgrades racing on one ticket can never both be let in.
  */
 export function redeemTicket(ticket: unknown, now: number = Date.now()): string | null {
+  sweep(now)
+
   if (typeof ticket !== 'string' || !TICKET_PATTERN.test(ticket)) return null
 
   const issued = live.get(ticket)

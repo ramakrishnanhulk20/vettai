@@ -1,6 +1,6 @@
 import { and, eq, inArray, sql } from 'drizzle-orm'
 import type { Db } from '../db/client.js'
-import { ladderPeriods, quests } from '../db/schema.js'
+import { claims, ladderPeriods, quests } from '../db/schema.js'
 import { DAY_MS } from '../lib/day.js'
 import { queueClaimIn, type Tx } from './claims.js'
 import { rewards } from './rewards.js'
@@ -147,4 +147,71 @@ export async function payLadder(db: Db, week: string, now: Date = new Date()): P
 
     return { week, paid: true, winners, claimIds }
   })
+}
+
+/**
+ * How many closed weeks one catch-up pass will walk. A floor that is years old, or a clock
+ * that jumped, must not turn one pass into thousands of transactions.
+ */
+export const MAX_CATCHUP_WEEKS = 104
+
+/** Every ISO week from one to another, both ends included, oldest first. */
+export function weeksFrom(first: string, last: string): string[] {
+  const start = weekRange(first).start
+  const end = weekRange(last).start
+
+  const weeks: string[] = []
+  for (let at = start; at.getTime() <= end.getTime(); at = new Date(at.getTime() + 7 * DAY_MS)) {
+    weeks.push(weekOf(at))
+    if (weeks.length >= MAX_CATCHUP_WEEKS) break
+  }
+
+  return weeks
+}
+
+/** The week the oldest claim was made in, which is as far back as a ladder can owe anything. */
+export async function firstPlayedWeek(db: Db, now: Date): Promise<string> {
+  const [row] = await db.select({ oldest: sql<string | null>`min(${claims.createdAt})` }).from(claims)
+  const oldest = row?.oldest ? new Date(row.oldest) : null
+  return oldest && !Number.isNaN(oldest.getTime()) ? weekOf(oldest) : weekOf(now)
+}
+
+export type LadderCatchUp = {
+  /** The weeks this pass paid, oldest first. Empty when nothing was owed. */
+  paid: string[]
+  /** Where the walk started, so a log line can say it. */
+  from: string
+}
+
+/**
+ * Pays every closed week that has no period row yet, oldest first.
+ *
+ * There is no Monday gate. A treasury that was asleep on Monday, or was deployed on a
+ * Wednesday, used to skip that week's prizes for good; now any pass picks up whatever is
+ * owed. payLadder is what makes this safe to call as often as we like: the period row is the
+ * primary key, so a week already paid costs one refused insert and nothing else.
+ */
+export async function payDueLadders(
+  db: Db,
+  now: Date = new Date(),
+  floorWeek?: string,
+): Promise<LadderCatchUp> {
+  const closed = previousWeek(now)
+  const from = floorWeek ?? (await firstPlayedWeek(db, now))
+
+  if (weekRange(from).start.getTime() > weekRange(closed).start.getTime()) return { paid: [], from }
+
+  const wanted = weeksFrom(from, closed)
+  const done = new Set(
+    (await db.select({ period: ladderPeriods.period }).from(ladderPeriods)).map((row) => row.period),
+  )
+
+  const paid: string[] = []
+  for (const week of wanted) {
+    if (done.has(week)) continue
+    const result = await payLadder(db, week, now)
+    if (result.paid) paid.push(week)
+  }
+
+  return { paid, from }
 }

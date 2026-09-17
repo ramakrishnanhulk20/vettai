@@ -5,7 +5,7 @@ import {
   segmentHitsBox,
   slideAgainstBoxes,
 } from './geometry.js'
-import { LOTS_PER_SIDE, PATROL_Y, streetCentre } from './map.js'
+import { LOTS_PER_SIDE, OFFICE_SAFE_RADIUS, PATROL_Y, streetCentre } from './map.js'
 import { seeded } from './prng.js'
 import type {
   BoltState,
@@ -33,20 +33,21 @@ const PLAYER_RADIUS = 0.5
 const PLAYER_HEIGHT = 1.8
 const EYE_HEIGHT = 1.6
 const TORSO_HEIGHT = 1
-const WALK_SPEED = 6
-const SPRINT_SPEED = 7
+export const WALK_SPEED = 6
+export const SPRINT_SPEED = 7
 const MAX_SHIELD = 3
 const DOWNED_MS = 3000
 const SHIELD_REGEN_MS = 8000
 const FIRE_WINDOW_MS = 1000
 const FIRE_PER_SECOND = { mk1: 4, mk2: 6 } as const
-const HITSCAN_RANGE = 60
+export const HITSCAN_RANGE = 60
 /**
  * The half angle of the aim assist cone: a drone is counted when the aim is within this of
  * it. A thumb on glass cannot hold a narrow line, and at 468 ms of lag the drone has moved
  * by the time the shot arrives, so the cone is wide on purpose.
  */
-const AIM_CONE = (12 * Math.PI) / 180
+export const AIM_CONE_DEGREES = 12
+const AIM_CONE = (AIM_CONE_DEGREES * Math.PI) / 180
 
 const DRONE_HP = 3
 const DRONE_SPEED = 3
@@ -59,16 +60,11 @@ const DRONE_CIRCLE_RADIUS = 12
 const DRONE_FIRE_MS = 2000
 const DRONE_WAYPOINT_REACHED = 1.5
 const DRONE_WRECK_MS = 2000
-const MAX_DRONES = 12
-const DRONE_SPAWN_MS = 15000
+export const MAX_DRONES = 12
+export const DRONE_SPAWN_MS = 15000
 
-/**
- * The quest board stands in a no-fire circle this wide. A player reading the board, picking
- * a quest or coming back from being downed cannot be shot there, and a bolt that crosses
- * into it dies. Shooting out of it is still allowed: the safety is for the reader, not a
- * place to camp from.
- */
-const OFFICE_SAFE_RADIUS = 10
+/** How many drones a room is born with. The rest arrive on the spawn clock, like any other. */
+export const INITIAL_DRONES = 2
 
 /** How close an engaged drone is allowed to fly to a tower it is circling. */
 const DRONE_CLEARANCE = 1
@@ -78,14 +74,20 @@ const AIM_CANDIDATES = 3
 
 const BOLT_SPEED = 18
 const BOLT_LIFE_MS = 3000
-const BOLT_RADIUS = 0.15
+export const BOLT_RADIUS = 0.15
 
 /**
  * A long step would let a fast player cross a wall in one jump, because collision looks at
  * where a body lands and not at the whole path. The server ticks every 50 ms; anything
- * longer than 100 ms is treated as 100 ms and the world simply runs slow for that moment.
+ * longer than this is treated as this and the world simply runs slow for that moment.
+ *
+ * The ceiling is 0.1 s because the fastest body in the game covers 7 m/s times 0.1 s, which
+ * is 0.7 m, and every footprint is grown by the half metre of the player's own radius on
+ * each side, so the thinnest thing in the way is 1.0 m thick to a walker. A 0.7 m step that
+ * starts outside one always lands inside it, where the slide catches it. A longer step could
+ * put a sprinting player on the far side of a wall with nothing in between to test.
  */
-const MAX_STEP_SECONDS = 0.1
+export const MAX_STEP_SECONDS = 0.1
 
 const IDLE: MoveIntent = { dx: 0, dz: 0, yaw: 0 }
 
@@ -178,8 +180,11 @@ function spawnDrone(
   const count = room.ids.drone + 1
   const rng = seeded(`${room.seed}:drone:${count}`)
   // The loops are handed out in turn rather than drawn at random, so no loop is ever left
-  // empty by a run of unlucky draws and the centre of the city is always being patrolled.
-  const loopIndex = (count - 1) % map.patrols.length
+  // empty by a run of unlucky draws. The first drones take the centre loop, which is the
+  // last one, because a room is born with two and a player standing at the spawn has to
+  // have something to shoot long before the spawn clock has filled the sky.
+  const loopIndex =
+    count <= INITIAL_DRONES ? map.patrols.length - 1 : (count - 1) % map.patrols.length
   const loop = map.patrols[loopIndex]
   if (!loop || loop.length === 0) return { room, drone: null }
 
@@ -208,8 +213,12 @@ function spawnDrone(
   return { room: { ...room, drones, ids: { ...room.ids, drone: count } }, drone }
 }
 
-/** A new room, already patrolled by a full set of drones so the first player has a game. */
-export function createRoom(map: WorldMap, seed: string): RoomState {
+/**
+ * A new room with a couple of drones over the centre of the city. The rest arrive on the
+ * spawn clock: a room handed its full dozen at birth would let a player leave and rejoin
+ * for a fresh batch whenever the sky went quiet.
+ */
+export function createRoom(map: WorldMap, seed: string, initial: number = INITIAL_DRONES): RoomState {
   let room: RoomState = {
     tick: 0,
     players: new Map(),
@@ -219,20 +228,37 @@ export function createRoom(map: WorldMap, seed: string): RoomState {
     ids: { drone: 0, bolt: 0 },
     seed,
   }
-  for (let n = 0; n < MAX_DRONES; n++) room = spawnDrone(room, map, 0).room
+  const born = Math.min(Math.max(Math.floor(initial), 0), MAX_DRONES)
+  for (let n = 0; n < born; n++) room = spawnDrone(room, map, 0).room
   return room
 }
 
 /**
+ * What a player keeps when they drop and come back inside the carry window. Leaving is not
+ * a way to stand up, refill the shield or clear the fire counter.
+ */
+export type PlayerCarry = {
+  /** The moment they come back up, on the same clock as `now`. Zero means they are up. */
+  readonly downedUntil: number
+  readonly shield: number
+  readonly recentFires: readonly number[]
+  /** When the next shield bar was due, so a reconnect does not hand it back at once. */
+  readonly nextShieldAt: number
+}
+
+/**
  * Put a player in the room. `at` is the map's spawn point; the default is the centre street
- * crossing, which every generated map keeps clear of buildings.
+ * crossing, which every generated map keeps clear of buildings. `carry` is what a player who
+ * dropped a moment ago left behind, and it wins over the fresh state.
  */
 export function addPlayer(
   room: RoomState,
   id: string,
   gear: PlayerGear,
   at: Place = { x: streetCentre(LOTS_PER_SIDE / 2), z: streetCentre(LOTS_PER_SIDE / 2) },
+  carry?: PlayerCarry,
 ): RoomState {
+  const shield = carry ? Math.min(Math.max(carry.shield, 0), MAX_SHIELD) : MAX_SHIELD
   const player: PlayerState = {
     id,
     x: at.x,
@@ -240,11 +266,11 @@ export function addPlayer(
     yaw: 0,
     vx: 0,
     vz: 0,
-    shield: MAX_SHIELD,
-    downedUntil: 0,
+    shield,
+    downedUntil: carry?.downedUntil ?? 0,
     lastFireAt: 0,
-    recentFires: [],
-    nextShieldAt: 0,
+    recentFires: carry ? [...carry.recentFires] : [],
+    nextShieldAt: carry?.nextShieldAt ?? 0,
     lastIntentAt: 0,
     intent: IDLE,
     gear,
@@ -303,7 +329,6 @@ function damageDrone(
   player: string,
   amount: number,
   now: number,
-  map: WorldMap,
 ): { room: RoomState; events: SimEvent[] } {
   const damage = new Map(drone.damage)
   damage.set(player, (damage.get(player) ?? 0) + amount)
@@ -314,10 +339,9 @@ function damageDrone(
   ]
   // Being shot is what makes a drone yours. It turns on the shooter wherever the shot came
   // from, holds on to them for six seconds, and answers inside its own fire interval, so a
-  // player cannot stand at 40 m and take one apart while it flies its loop. A shot fired
-  // from the board's circle provokes nothing, because nothing may shoot back into it.
-  const shooter = room.players.get(player)
-  const provokes = shooter !== undefined && !inSafeZone(map, shooter)
+  // player cannot stand at 40 m and take one apart while it flies its loop. A shot can never
+  // come from the board's circle, because applyFire refuses one.
+  const provokes = room.players.has(player)
   let hurt: DroneState = {
     ...drone,
     hp: hp > 0 ? hp : 0,
@@ -355,6 +379,10 @@ function damageDrone(
  * drone inside a 12 degree cone around the aim takes one point of damage. A drone with a
  * building between it and the player is skipped, and the next one in the cone is tried, so
  * aim assist can never shoot somebody through a wall.
+ *
+ * A player standing in the board's circle cannot fire at all. The circle cuts both ways:
+ * nothing may shoot into it, so anybody allowed to shoot out of it would be taking drones
+ * apart from the one place in the city that cannot answer.
  */
 export function applyFire(
   room: RoomState,
@@ -365,6 +393,7 @@ export function applyFire(
 ): { room: RoomState; events: SimEvent[] } {
   const player = room.players.get(id)
   if (!player || player.downedUntil > 0) return { room, events: [] }
+  if (inSafeZone(map, player)) return { room, events: [] }
 
   const recent = player.recentFires.filter((at) => at > now - FIRE_WINDOW_MS)
   if (recent.length >= shotsPerSecond(player.gear)) return { room, events: [] }
@@ -393,7 +422,7 @@ export function applyFire(
 
   const drone = fired.drones.get(found.target.id)
   if (!drone) return { room: fired, events: [] }
-  return damageDrone(fired, drone, id, 1, now, map)
+  return damageDrone(fired, drone, id, 1, now)
 }
 
 function stepPlayers(

@@ -216,7 +216,10 @@ export type BotOptions = {
  * Reads the frames the world sends and keeps one picture of it. Everything the bot decides
  * with comes from here, so nothing it does depends on a number it made up.
  */
-function watch(socket: WorldSocket, me: string) {
+function watch(socket: WorldSocket) {
+  // The world calls players by a room handle, never by a wallet address, and the welcome is
+  // where this bot learns its own. Until that frame arrives there is nothing to match on.
+  let me = ''
   const here: { x: number; z: number } = { x: 0, z: 0 }
   let drones: DroneWire[] = []
   let bolts: TrackedBolt[] = []
@@ -247,6 +250,8 @@ function watch(socket: WorldSocket, me: string) {
 
   socket.onFrame((frame: Frame) => {
     if (frame.t === 'welcome') {
+      const you = frame['you'] as { handle?: string } | undefined
+      me = typeof you?.handle === 'string' ? you.handle : me
       readPlayers(frame['players'])
       drones = (frame['drones'] as DroneWire[]) ?? []
       quests = (frame['quests'] as QuestView[]) ?? []
@@ -297,7 +302,7 @@ export async function runBot(options: BotOptions): Promise<QuestView[]> {
   if (ticket.status !== 200) throw new Error(`no socket ticket: ${ticket.raw}`)
 
   const socket = await openWorldSocket(`${baseUrl.replace('http', 'ws')}/ws?ticket=${ticket.body.ticket}`)
-  const world = watch(socket, session.address)
+  const world = watch(socket)
   const welcome = await socket.waitForKind('welcome')
 
   log(`${session.address} joined room ${String(welcome['room'])}`)

@@ -4,7 +4,17 @@
 
 import { describe, expect, it } from 'vitest'
 import { generateMap } from '../src/world/map.js'
-import { addPlayer, applyFire, applyMove, createRoom, removePlayer, step } from '../src/world/sim.js'
+import {
+  addPlayer,
+  applyFire,
+  applyMove,
+  createRoom,
+  removePlayer,
+  step,
+  INITIAL_DRONES,
+  MAX_DRONES,
+  MAX_STEP_SECONDS,
+} from '../src/world/sim.js'
 import type {
   Building,
   BoltState,
@@ -20,9 +30,17 @@ const START = 1_700_000_000_000
 const DT = 0.05
 const OPEN_GROUND = { x: map.spawn.x, z: map.spawn.z + 30 }
 
-/** A room with no drones, so a test about walking is only about walking. */
+/**
+ * A room with no drones and none on the way, so a test about walking is only about walking.
+ * Without the spawn clock held off, the first tick puts a fresh drone in the sky.
+ */
 function quietRoom(): RoomState {
-  return { ...createRoom(map, 'room-1'), drones: new Map() }
+  return { ...createRoom(map, 'room-1'), drones: new Map(), nextDroneSpawnAt: Number.MAX_SAFE_INTEGER }
+}
+
+/** A room with the sky already full, which is what most of these tests used to assume. */
+function busyRoom(): RoomState {
+  return createRoom(map, 'room-1', MAX_DRONES)
 }
 
 function mustPlayer(room: RoomState, id: string): PlayerState {
@@ -252,7 +270,7 @@ describe('drones', () => {
   })
 
   it('keeps twelve alive and replaces a lost one no more than once every fifteen seconds', () => {
-    const full = createRoom(map, 'room-1')
+    const full = busyRoom()
     expect(full.drones.size).toBe(12)
 
     const short = new Map(full.drones)
@@ -282,6 +300,25 @@ describe('drones', () => {
       (drone) => Math.hypot(drone.x - map.spawn.x, drone.z - map.spawn.z) < 60,
     )
     expect(near.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('is born with two and fills up on the spawn clock, so rejoining buys no batch', () => {
+    const fresh = createRoom(map, 'room-1')
+    expect(fresh.drones.size).toBe(INITIAL_DRONES)
+
+    let room = fresh
+    let now = START
+    // One spawn every fifteen seconds, and the room needs ten more to be full.
+    for (let cycle = 0; cycle < MAX_DRONES - INITIAL_DRONES; cycle += 1) {
+      now += 15_000
+      room = step(room, map, DT, now).room
+      expect(room.drones.size).toBe(INITIAL_DRONES + cycle + 1)
+    }
+
+    expect(room.drones.size).toBe(MAX_DRONES)
+
+    now += 15_000
+    expect(step(room, map, DT, now).room.drones.size).toBe(MAX_DRONES)
   })
 
   it('turns on a player who shoots it from 40 m and fires back inside two seconds', () => {
@@ -443,15 +480,63 @@ describe('the quest board is a safe zone', () => {
     expect(after.events.filter((event) => event.kind === 'droneHit').length).toBeGreaterThan(0)
   })
 
-  it('lets a player shoot out of it without waking the drone', () => {
+  it('refuses a shot fired from inside it, so nobody farms from where nothing can answer', () => {
     let room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, board(3))
     const ahead = { ...droneNear(mustPlayer(room, 'p1'), 0), x: map.office.x, z: map.office.z + 17 }
     room = withDrone(room, ahead)
 
     const shot = applyFire(room, 'p1', aimAt(20, 6), START, open)
+    expect(shot.events).toHaveLength(0)
+    expect(mustDrone(shot.room, 'd1').hp).toBe(3)
+    expect(mustDrone(shot.room, 'd1').target).toBeNull()
+    // The refused shot does not even count against the fire rate: nothing happened.
+    expect(mustPlayer(shot.room, 'p1').recentFires).toHaveLength(0)
+  })
+
+  it('lets the same player shoot the same drone one step outside the circle', () => {
+    let room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, board(11))
+    const ahead = { ...droneNear(mustPlayer(room, 'p1'), 0), x: map.office.x, z: map.office.z + 17 }
+    room = withDrone(room, ahead)
+
+    const shot = applyFire(room, 'p1', aimAt(28, 6), START, open)
     expect(shot.events.map((event) => event.kind)).toEqual(['hit'])
     expect(mustDrone(shot.room, 'd1').hp).toBe(2)
-    expect(mustDrone(shot.room, 'd1').target).toBeNull()
+    expect(mustDrone(shot.room, 'd1').target).toBe('p1')
+  })
+})
+
+describe('the step clamp', () => {
+  it('never lets a long tick carry a sprinting player through a wall', () => {
+    const building = map.buildings[0]
+    if (!building) throw new Error('the map has no buildings')
+    const start = {
+      x: building.aabb.minX - 0.6,
+      z: (building.aabb.minZ + building.aabb.maxZ) / 2,
+    }
+
+    let room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default', sprint: true }, start)
+    room = applyMove(room, 'p1', { dx: 1, dz: 0, yaw: 0 }, START)
+
+    // Five seconds in one step: a paused process, a laptop lid, a stalled event loop.
+    const after = step(room, map, 5, START + 5000).room
+
+    const player = mustPlayer(after, 'p1')
+    expect(player.x).toBeLessThanOrEqual(building.aabb.minX - 0.5)
+    expect(player.x - start.x).toBeLessThanOrEqual(7 * MAX_STEP_SECONDS)
+  })
+
+  it('does nothing at all on a negative step', () => {
+    let room = addPlayer(quietRoom(), 'p1', { blaster: 'mk1', skin: 'default' }, OPEN_GROUND)
+    room = applyMove(room, 'p1', { dx: 0, dz: 1, yaw: 0 }, START)
+
+    const after = step(room, map, -5, START).room
+
+    const player = mustPlayer(after, 'p1')
+    expect(player.x).toBe(OPEN_GROUND.x)
+    expect(player.z).toBe(OPEN_GROUND.z)
+    expect(player.vx).toBe(0)
+    expect(player.vz).toBe(0)
+    expect(after.tick).toBe(room.tick + 1)
   })
 })
 

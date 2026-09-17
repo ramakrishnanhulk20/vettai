@@ -8,6 +8,8 @@
     "start": "tsx src/index.ts",
     "treasury": "tsx src/treasury/index.ts",
     "treasury:sweep": "tsx src/cli/sweep.ts",
+    "treasury:requeue": "tsx src/cli/requeue.ts",
+    "treasury:export": "tsx src/cli/export.ts",
     "test": "vitest run --reporter=verbose",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
@@ -19,6 +21,7 @@
   "dependencies": {
     "@electric-sql/pglite": "0.5.8",
     "@fastify/cors": "11.3.0",
+    "@fastify/proxy-addr": "5.1.0",
     "@fastify/rate-limit": "11.2.0",
     "@fastify/websocket": "11.3.0",
     "@nimiq/core": "2.21.0",

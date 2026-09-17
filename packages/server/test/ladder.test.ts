@@ -9,7 +9,15 @@ import { eq } from 'drizzle-orm'
 import type { Db, DbHandle } from '../src/db/client.js'
 import type { Tx } from '../src/domain/claims.js'
 import { claims, ladderPeriods, quests } from '../src/db/schema.js'
-import { payLadder, previousWeek, topByKills, weekOf, weekRange } from '../src/domain/ladder.js'
+import {
+  firstPlayedWeek,
+  payDueLadders,
+  payLadder,
+  previousWeek,
+  topByKills,
+  weekOf,
+  weekRange,
+} from '../src/domain/ladder.js'
 import { rewards } from '../src/domain/rewards.js'
 import { nimToLuna } from '../src/lib/luna.js'
 import { clearTables, freshDb, insertPlayer } from './support/db.js'
@@ -194,5 +202,49 @@ describe('payLadder', () => {
     expect(result).toMatchObject({ paid: true, winners: [], claimIds: [] })
     expect(await db.select().from(ladderPeriods)).toHaveLength(1)
     expect(await db.select().from(claims)).toHaveLength(0)
+  })
+})
+
+describe('payDueLadders', () => {
+  it('pays every closed week the treasury slept through, not just this Monday', async () => {
+    // Two weeks of play, and a treasury that was down over both Mondays. The catch-up pass
+    // runs on a Wednesday, which the old Monday gate would have walked straight past.
+    await playerWithKills([
+      { day: '2026-09-15', count: 12 },
+      { day: '2026-09-22', count: 9 },
+    ])
+
+    const wednesday = new Date('2026-09-30T11:00:00Z')
+    const caught = await payDueLadders(db, wednesday, '2026-W38')
+
+    expect(caught.paid).toEqual(['2026-W38', '2026-W39'])
+
+    const periods = await db.select().from(ladderPeriods)
+    expect(periods.map((row) => row.period).sort()).toEqual(['2026-W38', '2026-W39'])
+    expect(await db.select().from(claims).where(eq(claims.kind, 'ladder'))).toHaveLength(2)
+
+    // The week that is still running is not paid, and a second pass pays nothing again.
+    const again = await payDueLadders(db, wednesday, '2026-W38')
+    expect(again.paid).toEqual([])
+    expect(await db.select().from(claims).where(eq(claims.kind, 'ladder'))).toHaveLength(2)
+  })
+
+  it('starts at the week of the oldest claim when no floor is set', async () => {
+    const address = await playerWithKills([{ day: '2026-09-15', count: 6 }])
+
+    await db.insert(claims).values({
+      address,
+      questId: null,
+      kind: 'ladder',
+      amountLuna: nimToLuna('0.1'),
+      memo: 'vettai:test:first',
+      createdAt: new Date('2026-09-16T08:00:00Z'),
+    })
+
+    expect(await firstPlayedWeek(db, MONDAY)).toBe('2026-W38')
+
+    const caught = await payDueLadders(db, new Date('2026-09-23T04:00:00Z'))
+    expect(caught.from).toBe('2026-W38')
+    expect(caught.paid).toEqual(['2026-W38'])
   })
 })

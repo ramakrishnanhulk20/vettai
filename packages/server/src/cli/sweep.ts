@@ -312,6 +312,8 @@ async function main(argv: readonly string[]): Promise<number> {
     getAccountByAddress: node.getAccountByAddress,
     fetchTransaction: node.fetchTransaction,
     pushTransaction: node.pushTransaction,
+    mempoolHas: node.mempoolHas,
+    listOutgoing: node.listOutgoing,
   }
 
   const named = treasuryEnvFileFrom(process.env, serverRoot)

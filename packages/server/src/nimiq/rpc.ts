@@ -47,11 +47,27 @@ export function isNotFound(error: unknown): boolean {
 
 let nextId = 1
 
-async function call<T>(method: string, params: unknown[]): Promise<T> {
-  const response = await fetch(config.NIMIQ_RPC_URL, {
+/** How long one call may take before it counts as a node that never answered. */
+export const RPC_TIMEOUT_MS = 15_000
+
+/**
+ * True when the node never gave an answer, as opposed to answering "no".
+ *
+ * A JSON-RPC error body is an answer and is handed straight back, so "transaction not
+ * found" keeps meaning what it says. A timeout, a dropped connection, a 429 or a 5xx is the
+ * node failing to speak, and only those are worth asking again.
+ */
+export function isNodeSilent(error: unknown): boolean {
+  if (error instanceof RpcError) return error.code === 429 || error.code >= 500
+  return true
+}
+
+async function callNode<T>(url: string, method: string, params: unknown[]): Promise<T> {
+  const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ jsonrpc: '2.0', id: nextId++, method, params }),
+    signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
   })
 
   if (!response.ok) {
@@ -67,6 +83,39 @@ async function call<T>(method: string, params: unknown[]): Promise<T> {
   if (!body.result) throw new RpcError(`RPC ${method} returned no result`, -1)
 
   return body.result.data
+}
+
+/**
+ * One call to the node, with one retry and an optional second node behind it.
+ *
+ * A public node that hiccups is the likeliest thing to go wrong in this whole server, and
+ * the treasury must never read a hiccup as a fact about money. A silent node is therefore
+ * asked twice before NIMIQ_RPC_FALLBACK_URL, when it is set, is asked once. An answer the
+ * node really gave, error included, is never retried: it is already the truth.
+ */
+async function call<T>(method: string, params: unknown[]): Promise<T> {
+  let last: unknown = new RpcError(`RPC ${method} was never called`, -1)
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await callNode<T>(config.NIMIQ_RPC_URL, method, params)
+    } catch (error) {
+      if (!isNodeSilent(error)) throw error
+      last = error
+    }
+  }
+
+  const fallback = config.NIMIQ_RPC_FALLBACK_URL
+  if (fallback) {
+    try {
+      return await callNode<T>(fallback, method, params)
+    } catch (error) {
+      if (!isNodeSilent(error)) throw error
+      last = error
+    }
+  }
+
+  throw last
 }
 
 export function getBlockNumber(): Promise<number> {
@@ -197,6 +246,8 @@ export type ChainTransaction = {
   recipient: string
   valueLuna: bigint
   memo: string | null
+  /** Blocks on top of the one carrying this transaction, when the node counted them. */
+  confirmations?: number
 }
 
 export function toChainTransaction(tx: RpcTransaction): ChainTransaction {
@@ -212,7 +263,36 @@ export function toChainTransaction(tx: RpcTransaction): ChainTransaction {
     recipient: normalizeAddress(tx.to) ?? tx.to.replace(/\s+/g, '').toUpperCase(),
     valueLuna: BigInt(tx.value ?? 0),
     memo: decodeMemo(tx.recipientData),
+    ...(typeof tx.confirmations === 'number' && tx.confirmations > 0
+      ? { confirmations: tx.confirmations }
+      : {}),
   }
+}
+
+/**
+ * True when the node is holding this hash in its own mempool, and true again when it could
+ * not say.
+ *
+ * "I do not know" has to read as "it may still be in there": the treasury only rebuilds a
+ * payout it is certain was never accepted, and a node that is busy or offline proves
+ * nothing. rpc.nimiqwatch.com answers "Transaction not found" for hashes sitting in its own
+ * mempool, which is exactly why this is asked separately rather than read off a lookup.
+ */
+export async function mempoolHas(hash: string): Promise<boolean> {
+  const wanted = hash.trim().toLowerCase()
+
+  let content: unknown[]
+  try {
+    content = await call<unknown[]>('mempoolContent', [false])
+  } catch {
+    return true
+  }
+
+  return content.some((entry) => {
+    if (typeof entry === 'string') return entry.trim().toLowerCase() === wanted
+    const inner = (entry as { hash?: unknown }).hash
+    return typeof inner === 'string' && inner.trim().toLowerCase() === wanted
+  })
 }
 
 /** Null means the node has never seen this hash, which is not an error: it may be seconds old. */
@@ -251,9 +331,10 @@ export type PageFetcher = (
  * payments cut off and never settled. Reading stops as soon as a page reaches back past
  * the cursor, because everything older than that was handled on an earlier pass.
  */
-export async function listIncoming(
+async function walkPages(
   address: string,
   sinceBlock: number,
+  keep: (tx: ChainTransaction, wanted: string) => boolean,
   options: { pageSize?: number; fetchPage?: PageFetcher } = {},
 ): Promise<ChainTransaction[]> {
   const wanted = normalizeAddress(address)
@@ -274,7 +355,7 @@ export async function listIncoming(
     for (const row of rows) {
       const tx = toChainTransaction(row)
       if (tx.blockNumber <= sinceBlock) reachedCursor = true
-      if (tx.recipient === wanted && tx.blockNumber > sinceBlock) seen.set(tx.hash, tx)
+      if (tx.blockNumber > sinceBlock && keep(tx, wanted)) seen.set(tx.hash, tx)
     }
 
     if (rows.length < pageSize || reachedCursor) break
@@ -283,4 +364,28 @@ export async function listIncoming(
   }
 
   return [...seen.values()].sort((a, b) => a.blockNumber - b.blockNumber)
+}
+
+export function listIncoming(
+  address: string,
+  sinceBlock: number,
+  options: { pageSize?: number; fetchPage?: PageFetcher } = {},
+): Promise<ChainTransaction[]> {
+  return walkPages(address, sinceBlock, (tx, wanted) => tx.recipient === wanted, options)
+}
+
+/**
+ * Payments this address has made since a block, which is how the treasury asks the chain
+ * "did I already pay this one?" after a crash.
+ *
+ * It is the mirror of listIncoming and it reads the same pages: the node hands back both
+ * directions, so the sender filter happens here. A memo found in this list is proof a
+ * payout went out, whatever the treasury's own row says.
+ */
+export function listOutgoing(
+  address: string,
+  sinceBlock: number,
+  options: { pageSize?: number; fetchPage?: PageFetcher } = {},
+): Promise<ChainTransaction[]> {
+  return walkPages(address, sinceBlock, (tx, wanted) => tx.sender === wanted, options)
 }

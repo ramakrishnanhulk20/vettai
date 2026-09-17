@@ -12,6 +12,15 @@ Every claim in this file is exercised by `npm run prove`, which runs the attacks
 against the live Nimiq testnet and prints each refusal with the reason the server gave. The
 output of each run is saved under `docs/proofs/`.
 
+A run against a deployment (`npm run prove -- --url https://...`) proves what a stranger can
+prove: the network the deployment is on, that it reads the caller's real address and not its
+own edge, the forgery and replay refusals, that a wallet plays and is paid on chain, that the
+socket holds its budgets, and, with `--expect-daily-cap`, that the daily cap running out
+there is the one Ram set. The rest is host-only and is skipped rather than faked: the per-IP
+cap and the pool need the host's own limits turned down, the shop check needs the treasury
+key to float a wallet, and the outbox check reads the treasury's database. A local run on the
+testnet is what covers those.
+
 ## Who is attacking, and what they want
 
 | Attacker | What they want | What it would cost us |
@@ -154,13 +163,15 @@ This is the only door to money, so it has several locks in a row.
   cap.
 - **A cap quietly eating a real player's reward.** A hold is a delay, not a forfeiture.
   `queueClaimIn` stamps `held_until` with the next UTC midnight for the daily and the IP cap,
-  and leaves it null for the pool, because pool room comes back the moment a committed claim
-  fails rather than at a time anybody can name. The treasury calls `releaseHeld` every 60
-  seconds and once at boot (`src/treasury/index.ts`). It re-runs the same cap check under the
-  same two locks, flips the claims that now pass to `queued`, and moves the rest on to the
-  next midnight. A released claim is re-dated to the moment it was released, because the
-  daily cap counts a wallet by the day its claims entered the queue. A ladder prize held on
-  Monday is paid this way instead of being lost.
+  and leaves it null for the pool, because pool room comes back when a payout that will never
+  be made is cancelled by hand, which is not a time anybody can name in advance. The treasury
+  calls `releaseHeld` every 60 seconds and once at boot (`src/treasury/index.ts`). It re-runs
+  the same cap check under the same two locks, flips the claims that now pass to `queued`,
+  and puts the rest back under the same rule, so a pool hold keeps its null and is measured
+  again on the very next pass rather than being parked until midnight. A released claim is
+  re-dated to the moment it was released, because the daily cap counts a wallet by the day
+  its claims entered the queue. A ladder prize held on Monday is paid this way instead of
+  being lost.
 - **Naming your own IP to get a fresh per-IP count.** The per-IP cap is only as good as the
   address the server believes. `TRUST_PROXY` is a list of trusted peers, not a hop count, and
   never `true`: `trustedProxies` in `src/config.ts` accepts addresses, CIDRs or the named
@@ -190,8 +201,14 @@ Files: `src/domain/shop.ts`, `src/treasury/watcher.ts`.
   belonging to somebody else.
 - **Paying one order twice, or the watcher seeing a payment twice.** The order's memo is
   unique, the transaction hash is unique, and the grant is a conditional
-  `UPDATE ... WHERE state = 'pending'` inside a transaction with the gear write. A replayed
-  pass is a no-op rather than a second grant.
+  `UPDATE ... WHERE state <> 'paid'` inside a transaction with the gear write. `paid` is the
+  only state a payment cannot move an order out of, so a replayed pass is a no-op rather than
+  a second grant, while an order the expiry sweep closed can still be honoured if the money
+  turns out to have been mined in time.
+- **Paying twice for one item because the phone was tapped twice.** A wallet that already has
+  a live order for an item is handed that same order and the same memo back, held by a
+  partial unique index on (address, item) where the state is `pending`. Two taps are one
+  purchase, and two memos would have been two payments for one blaster.
 - **A payment with no order behind it.** Anything into the treasury without the
   `vettai:shop:` prefix is refused and written down. The cursor moves past it, because it
   will never become an order.
@@ -199,8 +216,11 @@ Files: `src/domain/shop.ts`, `src/treasury/watcher.ts`.
   block the payment was mined in, not the moment the watcher got round to reading it.
   `markPaid` takes `blockTime` from the transaction and only falls back to the clock when the
   node gave no time. The node reports that time in milliseconds, measured against a real
-  testnet payout rather than assumed. A payment that reached the chain inside the half hour
-  is honoured even if the treasury was restarting while it landed.
+  testnet payout rather than assumed. A payment that reached the chain inside the half hour is
+  honoured even if the treasury was restarting while it landed, and even if the expiry sweep
+  had already written the row off: expiry is judged from the payment's own moment every time
+  it is asked, never read back off the row. The watcher expires orders after it has settled
+  the payments of that pass, not before.
 - **A refused payment disappearing.** Every incoming transaction the watcher inspects is
   written to `received_payments` with its outcome: `paid`, `short`, `expired`,
   `unknown_memo`, `sender_mismatch` or `already_paid`, together with the sender, the value,
@@ -227,18 +247,38 @@ This is where an operator mistake costs the most, so the order of writes is the 
   chain, runs a real delivery pass against testnet, and shows the claim left alone while the
   treasury balance falls by exactly the payouts that were confirmed.
 - **A broadcast the node refused, after the hash was written down.** Such a row would
-  otherwise sit in `sending` forever and the player would never be paid. `settleInFlight`
-  asks the node one final time once the row has held its hash with no block for 15 minutes
-  (`REJECTED_MS`). Only an answer of unknown after that wait counts as never accepted: a
-  Nimiq transaction is valid for a couple of minutes after the height it was built at, so a
-  node that has still never heard of the hash by then never will. The claim goes back to
-  `queued` with the dead hash cleared and `attempts` incremented, and is rebuilt as a new
-  transaction with a fresh validity height. After three attempts it is `failed` and left for
-  a person. The count is the `attempts` integer column, never text parsed out of an error
-  message.
-- **A row that was picked up but never signed.** A `sending` row with no hash and older than
-  ten minutes is retried once and then marked `failed` for Ram to look at, never retried in a
-  loop.
+  otherwise sit in `sending` forever and the player would never be paid, so it can be built
+  again, and building it again is the one thing here that could pay somebody twice. It takes
+  four separate yeses and any single doubt is a no. The row has held its hash with no block
+  for three hours (`REJECTED_MS`). The head is past the height the transaction was built at
+  plus the chain's validity window (7200 blocks) plus a batch, so the chain can no longer
+  accept it at all; that height is written down beside the hash, in the same write, by
+  `onSigned`. The node is not holding the hash in its own mempool, which is asked separately
+  because rpc.nimiqwatch.com answers "Transaction not found" for its own mempool and would
+  otherwise read as a refusal. And the treasury's own outgoing history since that height
+  carries no payment with this claim's memo. If the history does carry it, the payout was
+  made: the claim is closed against the transaction that really happened rather than sent
+  again. Only then does the claim go back to `queued` with the dead hash cleared and
+  `attempts` incremented. After three attempts it is `failed` and left for a person, still
+  counted against the pool because the money is still owed. The count is the `attempts`
+  integer column, never text parsed out of an error message.
+- **Calling a payment final before the chain has.** A payment in a block is recorded as
+  `sent` with its block number and is only `paid` once 60 blocks, one Albatross batch, sit on
+  top of it. The same horizon holds on the way in: the shop watcher reads only up to 60
+  blocks behind the head, so gear is never handed over for a payment the chain could still
+  drop. A player would never have given it back.
+- **A node that hiccups costing somebody their payout.** Every call carries a 15 second
+  timeout and is retried once, and an optional second node is asked after that. A failure
+  before the transaction was signed writes no hash, so nothing can be on chain: the claim
+  goes back to `queued` with a wait that starts at two minutes and doubles to thirty, and it
+  does not spend one of its three rebuild attempts. Nothing is ever given up on for a node
+  being slow.
+- **Promising more than the wallet holds.** At boot the treasury reads its own balance off
+  the chain and refuses to start when it is less than the unpaid part of `POOL_TOTAL_NIM`,
+  printing both numbers. Every pass reads the balance again and sends nothing while it is
+  below queued plus sending plus the next payout, saying "wallet below committed" once a
+  minute. Both numbers, and how long the oldest payout has waited, are on the treasury's own
+  `/health` page, which has no public domain.
 - **The wrong key, or the wrong chain.** `assertTreasuryConfig` refuses to start the treasury
   unless the private key derives `TREASURY_ADDRESS` and the node reports the network in
   `NIMIQ_NETWORK`. A node on mainnet while the config says testnet turns a demo into real
@@ -254,7 +294,9 @@ This is where an operator mistake costs the most, so the order of writes is the 
 
 File: `src/domain/ladder.ts`. The period row is inserted first, inside the transaction, so a
 second caller, a restart, or a drifting clock is refused by the primary key rather than by a
-check it could race past. The pool advisory lock is the very first statement of that
+check it could race past. There is no Monday gate on top of that: every pass pays every
+closed week that has no row yet, oldest first, so a treasury that was down over a Monday, or
+deployed on a Wednesday, still pays that week rather than skipping it for good. The pool advisory lock is the very first statement of that
 transaction, ahead of the wallet locks the three prizes take, which keeps the lock order the
 same as every single claim's. A week with nobody in it still writes its row so it is never
 looked at again. The public endpoint that reads the ladder cannot trigger a payment.
@@ -309,10 +351,11 @@ lists wins is marketing.
   with many connections holding the locks against each other, which is the case the locks
   exist for.
 - **Drone scarcity is per room, so a farmer with many wallets in one room competes with
-  itself.** A room holds at most six live drones and up to 24 players. That is an accident
-  that helps us rather than a defence: it slows a farmer down, and it would slow twenty real
-  players down the same way. It also means a farmer who spreads across rooms is not slowed at
-  all.
+  itself.** A room holds at most twelve live drones and up to 24 players, so a full room is
+  one drone for every two people. That is an accident that helps us rather than a defence: it
+  slows a farmer down, and it would slow twenty real players down the same way. Twelve drones
+  slow a farmer half as much as six did, and a farmer who spreads across rooms is not slowed
+  at all.
 - **The map is public, so routes can be optimised.** `GET /api/world/map` serves the whole
   city to anybody, with no session, because the client has to draw it. Every landmark,
   courier point and patrol loop is therefore known in advance and a bot can walk the shortest

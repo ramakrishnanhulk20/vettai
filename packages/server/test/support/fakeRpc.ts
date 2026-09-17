@@ -34,6 +34,18 @@ export class FakeRpc {
   /** When true the node refuses the broadcast, so nothing is on chain afterwards. */
   failPush: string | null = null
 
+  /** What the treasury wallet holds, in luna. Big enough that the balance gate never bites. */
+  balanceLuna = 100_000_000_000n
+
+  /** When true getAccountByAddress throws, the way a node that is down would. */
+  failBalance = false
+
+  /** When true mempoolContent throws, which every caller has to read as "it may be in there". */
+  failMempool = false
+
+  /** Hashes the node is holding. A broadcast sits here until a block carries it. */
+  readonly mempool = new Set<string>()
+
   readonly pushed: PushedTransaction[] = []
 
   readonly stakes = new Map<string, bigint>()
@@ -42,7 +54,11 @@ export class FakeRpc {
 
   private readonly chain: ChainTransaction[] = []
 
+  /** When set, getBlockNumber throws with this text, the way a node under load answers. */
+  failBlockNumber: string | null = null
+
   async getBlockNumber(): Promise<number> {
+    if (this.failBlockNumber) throw new RpcError(this.failBlockNumber, 503, this.failBlockNumber)
     return this.head
   }
 
@@ -65,7 +81,18 @@ export class FakeRpc {
     }
 
     this.pushed.push(record)
+    this.mempool.add(record.hash)
     return record.hash
+  }
+
+  async getAccountByAddress(address: string): Promise<{ address: string; balance: number; type: string }> {
+    if (this.failBalance) throw new RpcError('Internal error', -32603, 'node is busy')
+    return { address, balance: Number(this.balanceLuna), type: 'basic' }
+  }
+
+  async mempoolHas(hash: string): Promise<boolean> {
+    if (this.failMempool) return true
+    return this.mempool.has(hash)
   }
 
   /**
@@ -84,6 +111,7 @@ export class FakeRpc {
       if (seen <= this.includeAfter) return null
       record.blockNumber ??= this.head
       record.blockTime ??= new Date(this.blockTimeMs)
+      this.mempool.delete(record.hash)
       return {
         hash: record.hash,
         blockNumber: record.blockNumber,
@@ -106,6 +134,13 @@ export class FakeRpc {
       .sort((a, b) => a.blockNumber - b.blockNumber)
   }
 
+  async listOutgoing(address: string, sinceBlock: number): Promise<ChainTransaction[]> {
+    const wanted = comparableAddress(address)
+    return this.chain
+      .filter((tx) => comparableAddress(tx.sender) === wanted && tx.blockNumber > sinceBlock)
+      .sort((a, b) => a.blockNumber - b.blockNumber)
+  }
+
   async getStakerByAddress(address: string): Promise<RpcStaker> {
     const balance = this.stakes.get(comparableAddress(address))
     if (balance === undefined) {
@@ -123,8 +158,8 @@ export class FakeRpc {
     }
   }
 
-  /** Puts a payment on the fake chain, the way a player's phone would. */
-  receive(
+  /** Puts a transaction on the fake chain, in either direction. */
+  place(
     tx: Omit<ChainTransaction, 'blockNumber' | 'blockTime'> & { blockNumber?: number; blockTime?: Date | null },
   ): ChainTransaction {
     const placed: ChainTransaction = {
@@ -134,6 +169,13 @@ export class FakeRpc {
     }
     this.chain.push(placed)
     return placed
+  }
+
+  /** Puts a payment on the fake chain, the way a player's phone would. */
+  receive(
+    tx: Omit<ChainTransaction, 'blockNumber' | 'blockTime'> & { blockNumber?: number; blockTime?: Date | null },
+  ): ChainTransaction {
+    return this.place(tx)
   }
 
   /** How many times this hash has been looked up, so a test can prove there was no resend. */
