@@ -62,6 +62,9 @@ happened.
   memo, and the HUD shows the transaction hash and the block number it landed in.
 - Going down costs three seconds and the walk back from the crossing you fell at, never
   the quest progress you had.
+- Every sound is synthesised in the browser: shots, hits, bursts, bolts coming in from
+  the side they come from, each drone humming from where it flies, and a low city bed.
+  Nothing is downloaded, and a mute button in the HUD remembers itself.
 - The landlord quest asks for a real stake with a validator, which the treasury reads back
   off the chain once a day. The stake stays the player's throughout. It is off by default
   (`LANDLORD_ENABLED=false`) until the operator turns it on.
@@ -96,7 +99,7 @@ happened.
   pushed, so a crash mid-send cannot pay the same claim twice.
 - Three caps bound the loss from a scripted player: per wallet per UTC day, distinct
   wallets per IP per day, and a hard ceiling on the whole pool.
-- 446 server tests and 21 browser specs, including property tests over the simulation
+- 446 server tests and 24 browser specs, including property tests over the simulation
   and over the caps, plus one command that proves the whole thing against the live chain.
 - MIT licensed, with the docs inside the app at `/docs`.
 
