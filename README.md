@@ -436,7 +436,7 @@ packages/
 docs/
   proofs/      saved output of real prove-it runs against the live chain
   security/    the threat model
-  submission/  the icon and the thumbnail
+  submission/  the icon, the thumbnail and the landing shot
 reference/  saved program material and research notes
 ```
 
