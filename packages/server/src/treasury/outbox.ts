@@ -23,10 +23,11 @@ export const SETTLE_POLL_MS = 2000
 
 /**
  * How long a payout may hold a hash with no block before the node is asked one last
- * time. A Nimiq transaction is only valid for a couple of minutes after the height it
- * was built at, so a node that has still never heard of the hash by now never will.
+ * time. A Nimiq transaction stays valid for TRANSACTION_VALIDITY_WINDOW_BLOCKS (7200)
+ * blocks of one second, so two hours. Rebuilding before that window has closed lets the
+ * old and the new transaction both land. Three hours leaves a margin over the window.
  */
-export const REJECTED_MS = 15 * 60 * 1000
+export const REJECTED_MS = 3 * 60 * 60 * 1000
 
 /** How many times a payout is rebuilt before it is left on the record for Ram. */
 export const MAX_ATTEMPTS = 3
