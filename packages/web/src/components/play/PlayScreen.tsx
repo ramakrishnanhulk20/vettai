@@ -14,7 +14,21 @@ import {
 } from "@/lib/api";
 import { isInsidePay, isUserRejection, waitForProvider } from "@/lib/nimiq";
 import { login, me, readSession } from "@/lib/session";
-import { connectWorld, youOf, type WelcomeFrame, type WorldConnection } from "@/lib/ws";
+import {
+  connectWorld,
+  youOf,
+  type TickEvent,
+  type WelcomeFrame,
+  type WorldConnection,
+} from "@/lib/ws";
+import {
+  cityBed,
+  disposeAudio,
+  play,
+  playAt,
+  soundsPlayed,
+  unlockAudio,
+} from "@/game/audio";
 import { createControls, type Controls } from "@/game/controls";
 import type { WorldMap } from "@/game/map";
 import {
@@ -151,6 +165,49 @@ function questStep(quest: QuestView, map: WorldMap | null, at: { x: number; z: n
   }
 
   return `${name} ${quest.progress}/${quest.target}`;
+}
+
+/**
+ * What each thing the world says sounds like. Anything the world gave a place to is played
+ * from that place, so a kill behind the player comes from behind them.
+ */
+function soundFor(event: TickEvent, you: string): void {
+  if (event.kind === "hit") {
+    if (event.player === you) playAt("hit", event.x, event.y, event.z);
+    return;
+  }
+  if (event.kind === "kill") {
+    if (event.player === you) playAt("kill", event.x, event.y, event.z);
+    return;
+  }
+  if (event.kind === "spawn") return playAt("spawn", event.x, event.y, event.z);
+  if (event.kind === "droneHit") {
+    if (event.player === you) play("shieldHit");
+    return;
+  }
+  if (event.kind === "downed") {
+    if (event.player === you) play("downed");
+    return;
+  }
+  if (event.kind === "respawn") {
+    if (event.player === you) play("respawn");
+    return;
+  }
+  if (event.kind === "pickup") {
+    if (event.player === you) play("pickup");
+    return;
+  }
+  if (event.kind === "deliver") {
+    if (event.player === you) play("deliver");
+    return;
+  }
+  if (event.kind === "landmark") {
+    if (event.player === you) play("landmark");
+    return;
+  }
+  if (event.kind === "assist") return play("assist");
+  if (event.kind === "courier-reset") return play("refused");
+  if (event.kind === "quests-rolled") return play("tap");
 }
 
 export default function PlayScreen() {
@@ -367,6 +424,7 @@ export default function PlayScreen() {
   const onPaid = useCallback(
     (claim: ClaimView) => {
       const block = claim.blockNumber === null ? "" : `, block ${claim.blockNumber}`;
+      play("paid");
       toast(`Bounty paid: ${nim(claim.amountLuna)} NIM${block}`);
       setPaidAt(Date.now());
       setCelebrate(claim.id);
@@ -394,6 +452,7 @@ export default function PlayScreen() {
   useEffect(() => () => {
     if (celebrateTimer.current) clearTimeout(celebrateTimer.current);
     if (officeTimer.current) clearTimeout(officeTimer.current);
+    disposeAudio();
   }, []);
 
   /**
@@ -407,6 +466,7 @@ export default function PlayScreen() {
   }, []);
 
   const openSheet = useCallback((next: "board" | "shop" | "ladder") => {
+    play("tap");
     sheetRef.current = true;
     setSheet(next);
     setStandingAt(worldRef.current?.place() ?? null);
@@ -580,10 +640,12 @@ export default function PlayScreen() {
           // trigger anyway is the game pretending it fired, which is how a judge standing on
           // the office door decides the fire button is broken.
           if (insideSafeRef.current) {
+            play("refused");
             noteOffice();
             lessonDone(1);
             return;
           }
+          play("shot");
           const shot = worldRef.current?.fire(yaw, pitch) ?? { yaw, pitch };
           setFiredAt(Date.now());
           lessonDone(1);
@@ -772,6 +834,8 @@ export default function PlayScreen() {
           heap: () =>
             (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory
               ?.usedJSHeapSize ?? null,
+          /** How many times each sound has really played, which is how the sound is checked. */
+          audio: { played: soundsPlayed() },
         };
       }
 
@@ -834,13 +898,35 @@ export default function PlayScreen() {
         connection.on("welcome", onWelcome);
 
         let spoke = 0;
+        /** Bolts already heard, so one bolt is announced once and only while it is flying. */
+        const heard = new Set<string>();
+        let lastBolt = 0;
+
         connection.on("state", (frame) => {
           worldRef.current?.state(frame);
+
+          // A bolt is heard from the side it was fired from, which is the only warning a
+          // player gets about a drone they are not looking at. One warning per quarter
+          // second: a pair of drones firing together must not turn into a siren.
+          const flying = new Set<string>();
+          for (const bolt of frame.bolts) {
+            flying.add(bolt.id);
+            if (heard.has(bolt.id)) continue;
+            heard.add(bolt.id);
+            const now = Date.now();
+            if (now - lastBolt < 220) continue;
+            lastBolt = now;
+            playAt("boltIncoming", bolt.x, bolt.y, bolt.z);
+          }
+          for (const id of heard) {
+            if (!flying.has(id)) heard.delete(id);
+          }
 
           // Three things the world says that the scene has no way of showing: a kill
           // somebody else was credited with, a parcel that is back where it started, and
           // a day that turned over while this player was still standing in the street.
           for (const event of frame.events) {
+            soundFor(event, youId.current);
             if (event.kind === "assist") {
               toast("Assist: your shot finished it");
             }
@@ -879,6 +965,7 @@ export default function PlayScreen() {
             questsRef.current = next;
             setQuests(next);
 
+            if (frame.quest.state === "done") play("questDone");
             announce(frame.quest);
             return;
           }
@@ -905,6 +992,7 @@ export default function PlayScreen() {
             // actually being pointed at, so the toast ends on the next step.
             const nextStep =
               frame.code === "nothing to do" ? (objectiveRef.current?.sentence ?? null) : null;
+            play("refused");
             toast(refusalText(frame.code, nextStep));
           }
         });
@@ -967,6 +1055,14 @@ export default function PlayScreen() {
   // has lost its picture should not be spending its battery on frames nobody sees.
   useEffect(() => {
     setLoop.current(playing);
+  }, [playing]);
+
+  // The street's own rumble under everything. It only really starts once a touch has let
+  // the phone make sound at all, which is what the first tap on the surface does.
+  useEffect(() => {
+    if (!playing) return;
+    cityBed(true);
+    return () => cityBed(false);
   }, [playing]);
 
   // Two and a half seconds into the wait the panel stops saying "looking" and starts
@@ -1116,8 +1212,12 @@ export default function PlayScreen() {
 
       {playing && <div aria-hidden className={styles.vignette} />}
 
+      {/* The phone will not make a sound until a finger has touched the page, so the first
+          touch anywhere on the street is what opens the speaker. */}
       <div
         ref={surfaceRef}
+        onPointerDown={unlockAudio}
+        onTouchStart={unlockAudio}
         data-testid="surface"
         className={`absolute inset-0 select-none ${sheet ? "pointer-events-none" : "touch-none"}`}
         style={{ touchAction: "none" }}

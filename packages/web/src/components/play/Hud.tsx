@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import type { QuestView } from "@/lib/api";
 import type { Objective } from "@/game/markers";
 import type { Readout } from "@/game/world";
+import { isMuted, play, setMuted, unlockAudio } from "@/game/audio";
 import Compass from "./Compass";
 import styles from "./play.module.css";
 
@@ -158,6 +159,20 @@ export default function Hud({
   const [openReadout, setOpenReadout] = useState(false);
   const [panel, setPanel] = useState<Panel | null>(null);
   const [copied, setCopied] = useState(false);
+  // Read after the mount, never during it: the first paint comes off the server and this
+  // phone's answer lives in its own storage.
+  const [quiet, setQuiet] = useState(false);
+  useEffect(() => setQuiet(isMuted()), []);
+
+  const toggleSound = useCallback(() => {
+    const next = !isMuted();
+    // The tap that turns the sound back on is also the gesture the phone wants before it
+    // will make any sound at all, so the speaker is opened here as well.
+    unlockAudio();
+    setMuted(next);
+    setQuiet(next);
+    if (!next) play("tap");
+  }, []);
 
   useEffect(() => {
     if (!openReadout || !readout) return;
@@ -311,20 +326,23 @@ export default function Hud({
           </div>
         </div>
 
-        {latency !== null && (
-          <button
-            type="button"
-            onClick={() => setOpenReadout((was) => !was)}
-            data-testid="latency"
-            aria-label="Show what this phone is doing"
-            aria-expanded={openReadout}
-            className={`pointer-events-auto font-mono text-[14px] tracking-wide transition-colors duration-200 hover:text-hunt ${styles.tap} ${
-              openReadout ? "text-hunt" : "text-paper/60"
-            }`}
-          >
-            {latency} ms
-          </button>
-        )}
+        <div className="flex items-center gap-1">
+          {latency !== null && (
+            <button
+              type="button"
+              onClick={() => setOpenReadout((was) => !was)}
+              data-testid="latency"
+              aria-label="Show what this phone is doing"
+              aria-expanded={openReadout}
+              className={`pointer-events-auto font-mono text-[14px] tracking-wide transition-colors duration-200 hover:text-hunt ${styles.tap} ${
+                openReadout ? "text-hunt" : "text-paper/60"
+              }`}
+            >
+              {latency} ms
+            </button>
+          )}
+          <Sound quiet={quiet} reduced={reduced} onToggle={toggleSound} />
+        </div>
         {latency !== null && latency > 250 && (
           <span className="font-mono text-[11px] text-paper/60" data-testid="far-note">
             slow line to the server
@@ -469,6 +487,8 @@ export default function Hud({
         }}
         transition={{ duration: reduced ? 0 : 0.35, ease: "easeOut" }}
         whileTap={reduced || downed ? undefined : { scale: 0.92 }}
+        onPointerDown={unlockAudio}
+        onTouchStart={unlockAudio}
         aria-label="Fire"
         aria-hidden={sheetOpen}
         data-testid="fire"
@@ -490,6 +510,53 @@ export default function Hud({
         Fire
       </motion.button>
     </div>
+  );
+}
+
+/**
+ * The speaker. One 44 pixel box, the accent when the city is making noise and a slash
+ * across it when it is not. What it says is remembered on this phone, so a player who
+ * turned the sound off once never has to do it again.
+ */
+function Sound({
+  quiet,
+  reduced,
+  onToggle,
+}: {
+  quiet: boolean;
+  reduced: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <motion.button
+      type="button"
+      onClick={onToggle}
+      whileTap={reduced ? undefined : { scale: 0.9 }}
+      data-testid="mute"
+      aria-label={quiet ? "Turn the sound on" : "Turn the sound off"}
+      aria-pressed={quiet}
+      className={`pointer-events-auto ${styles.tap} ${styles.mute} ${
+        quiet ? "text-paper/45" : "text-hunt"
+      }`}
+    >
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
+        <path
+          d="M3 7.5h3L10.5 4v12L6 12.5H3z"
+          fill="currentColor"
+          stroke="currentColor"
+          strokeWidth="1.4"
+          strokeLinejoin="round"
+        />
+        {quiet ? (
+          <path d="M14 7l4 6M18 7l-4 6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="square" />
+        ) : (
+          <>
+            <path d="M13.4 7.2a4 4 0 0 1 0 5.6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="square" />
+            <path d="M15.8 5.2a7 7 0 0 1 0 9.6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="square" opacity="0.6" />
+          </>
+        )}
+      </svg>
+    </motion.button>
   );
 }
 

@@ -264,3 +264,20 @@
     rgba(3, 4, 9, 0.82) 100%
   );
 }
+
+/* The speaker button. It sits beside the round trip reading, wears the accent while the
+   city is making noise, and takes a hairline box so a thumb can see what it is aiming at. */
+.mute {
+  border: 1px solid rgba(243, 239, 231, 0.14);
+  background: rgba(11, 15, 26, 0.55);
+  backdrop-filter: blur(2px);
+  transition:
+    border-color 200ms ease,
+    color 200ms ease,
+    background-color 200ms ease;
+}
+
+.mute:hover {
+  border-color: var(--hunt);
+  background: rgba(255, 106, 43, 0.14);
+}

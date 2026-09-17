@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { youOf, type BoltWire, type DroneWire, type PlayerWire, type StateFrame, type TickEvent, type WelcomeFrame } from "@/lib/ws";
 import type { Gear } from "@/lib/api";
+import { droneGone, droneHum, setListener } from "./audio";
 import { createCameraRig, type Blocker } from "./camera";
 import { fetchWorldConstants, type Box, type WorldMap } from "./map";
 import { segmentHitsBox, slideAgainstBoxes } from "./slide";
@@ -277,6 +278,8 @@ type DroneView = {
   track: Track;
   hp: number;
   flashUntil: number;
+  /** True while the drone is coming for a player, which is what its hum says out loud. */
+  engaged: boolean;
 };
 
 /** A drone the thumb is near enough to, with the aim that points straight at it. */
@@ -605,12 +608,19 @@ export function createWorld(options: WorldOptions): World {
       const group = createDrone(LOOK);
       group.position.set(wire.x, wire.y, wire.z);
       scene.add(group);
-      const view: DroneView = { group, track: { samples: [] }, hp: wire.hp, flashUntil: 0 };
+      const view: DroneView = {
+        group,
+        track: { samples: [] },
+        hp: wire.hp,
+        flashUntil: 0,
+        engaged: wire.state === "engage",
+      };
       pushSample(view.track, { t: at, x: wire.x, y: wire.y, z: wire.z, yaw: wire.yaw });
       drones.set(wire.id, view);
       return;
     }
     known.hp = wire.hp;
+    known.engaged = wire.state === "engage";
     pushSample(known.track, { t: at, x: wire.x, y: wire.y, z: wire.z, yaw: wire.yaw });
   }
 
@@ -657,6 +667,7 @@ export function createWorld(options: WorldOptions): World {
     const view = drones.get(id);
     if (view) {
       drones.delete(id);
+      droneGone(id);
       wrecks.push({ group: view.group, started: now, fromY: view.group.position.y });
     }
     burst(at.x, at.y, at.z, now);
@@ -1249,6 +1260,7 @@ export function createWorld(options: WorldOptions): World {
         scene.remove(view.group);
         disposeDrone(view.group);
         drones.delete(id);
+        droneGone(id);
       }
 
       for (const wire of frame.bolts) trackBolt(wire, at);
@@ -1356,11 +1368,16 @@ export function createWorld(options: WorldOptions): World {
       neon.update(sceneTime);
       sky.update(sceneTime, camera.position);
 
+      // The ear rides the camera, and every drone in the sky hums from where it is. The
+      // engine picks the nearest six on its own and holds the rest silent.
+      setListener(camera.position.x, camera.position.y, camera.position.z, look.yaw);
+
       sighted.length = 0;
-      for (const drone of drones.values()) {
+      for (const [id, drone] of drones) {
         if (drone.hp <= 0) continue;
         const at = drone.group.position;
         sighted.push({ x: at.x, y: at.y, z: at.z });
+        droneHum(id, at.x, at.y, at.z, drone.engaged);
       }
       markers.frame(now, camera, body, look.yaw, sighted);
 
@@ -1470,7 +1487,8 @@ export function createWorld(options: WorldOptions): World {
       live = false;
       for (const [, entry] of players) dropPlayer(entry);
       players.clear();
-      for (const [, view] of drones) {
+      for (const [id, view] of drones) {
+        droneGone(id);
         scene.remove(view.group);
         disposeDrone(view.group);
       }
